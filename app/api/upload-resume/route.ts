@@ -5,31 +5,34 @@ import { generateEmbedding } from "@/lib/ai-utils"
 import { SupabaseCandidateService } from "@/lib/supabase-candidates"
 import { ensureResumeBucketExists, supabaseAdmin } from "@/lib/supabase"
 import { checkFileExistsInSupabase } from "@/lib/supabase-storage-utils"
+import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 
 export async function POST(request: NextRequest) {
-  // Authorization: require login cookie or valid admin token
-  const authCookie = request.cookies.get("auth")?.value
-  const authHeader = request.headers.get("authorization")
-  const hasAdminToken = authHeader === `Bearer ${process.env.ADMIN_TOKEN}`
-  if (authCookie !== "true" && !hasAdminToken) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-  }
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "candidates.edit")) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
 
   console.log("=== Comprehensive Resume Upload Started ===")
 
-  // Get HR user ID if available
-  let uploadedBy: string | undefined = undefined
+  let uploadedBy: string | undefined
   const hrUserCookie = request.cookies.get("hr_user")?.value
   if (hrUserCookie) {
     try {
-      const hrUser = JSON.parse(hrUserCookie)
-      if (hrUser && hrUser.id) {
-        uploadedBy = hrUser.id
-        console.log(`Associating upload with HR user: ${uploadedBy}`)
-      }
-    } catch (e) {
-      console.warn("Failed to parse hr_user cookie:", e)
+      const parsed = JSON.parse(hrUserCookie)
+      const parsedId = String(parsed?.id || "").trim()
+      if (parsedId) uploadedBy = parsedId
+    } catch {
+      uploadedBy = undefined
     }
+  }
+
+  if (!uploadedBy && ctx.authUser.email) {
+    const { data: hrUserRow } = await supabaseAdmin
+      .from("hr_users")
+      .select("id")
+      .eq("email", ctx.authUser.email)
+      .maybeSingle()
+    if (hrUserRow?.id) uploadedBy = hrUserRow.id
   }
 
   let uploadLogId: string | null = null
@@ -559,6 +562,7 @@ export async function POST(request: NextRequest) {
         fileUrl = await SupabaseCandidateService.uploadFile(file, insertedId)
         filePath = fileUrl.split('/').pop() || ''
         await SupabaseCandidateService.updateCandidate(insertedId, { fileHash, updatedAt: new Date().toISOString() })
+        await supabaseAdmin.from("candidates").update({ uploaded_by_auth_user_id: ctx.authUser.id }).eq("id", insertedId)
 
         console.log("=== Resume Upload Completed Successfully ===")
         if (uploadLogId) {
@@ -575,6 +579,16 @@ export async function POST(request: NextRequest) {
             })
             .eq('id', uploadLogId)
         }
+        supabaseAdmin
+          .from("analytics_events")
+          .insert({
+            actor_auth_user_id: ctx.authUser.id,
+            event_name: "candidate.uploaded",
+            entity_type: "candidates",
+            entity_id: insertedId,
+            metadata: { file_name: file.name, file_hash: fileHash, result_type: "created" },
+          })
+          .then(() => {})
         return NextResponse.json({
           success: true,
           candidateId: insertedId,
@@ -633,6 +647,17 @@ export async function POST(request: NextRequest) {
 
             console.log("Uploading to Supabase Storage...")
             fileUrl = await SupabaseCandidateService.uploadFile(file, existingId)
+            await supabaseAdmin.from("candidates").update({ uploaded_by_auth_user_id: ctx.authUser.id }).eq("id", existingId)
+            supabaseAdmin
+              .from("analytics_events")
+              .insert({
+                actor_auth_user_id: ctx.authUser.id,
+                event_name: "candidate.uploaded",
+                entity_type: "candidates",
+                entity_id: existingId,
+                metadata: { file_name: file.name, file_hash: fileHash, result_type: "updated" },
+              })
+              .then(() => {})
             filePath = fileUrl.split('/').pop() || ''
 
             await SupabaseCandidateService.updateCandidate(existingId, {
@@ -908,6 +933,17 @@ export async function POST(request: NextRequest) {
       try {
         const insertedId = await SupabaseCandidateService.addCandidate(candidateData)
         insertedCandidateId = insertedId
+        await supabaseAdmin.from("candidates").update({ uploaded_by_auth_user_id: ctx.authUser.id }).eq("id", insertedId)
+        supabaseAdmin
+          .from("analytics_events")
+          .insert({
+            actor_auth_user_id: ctx.authUser.id,
+            event_name: "candidate.uploaded",
+            entity_type: "candidates",
+            entity_id: insertedId,
+            metadata: { file_name: file.name, result_type: "created", reused_existing_file: true },
+          })
+          .then(() => {})
 
         if (uploadLogId) {
           await supabaseAdmin
@@ -972,6 +1008,17 @@ export async function POST(request: NextRequest) {
               fileName: file.name,
               updatedAt: new Date().toISOString(),
             })
+            await supabaseAdmin.from("candidates").update({ uploaded_by_auth_user_id: ctx.authUser.id }).eq("id", existingId)
+            supabaseAdmin
+              .from("analytics_events")
+              .insert({
+                actor_auth_user_id: ctx.authUser.id,
+                event_name: "candidate.uploaded",
+                entity_type: "candidates",
+                entity_id: existingId,
+                metadata: { file_name: file.name, result_type: "updated", reused_existing_file: true },
+              })
+              .then(() => {})
 
             if (uploadLogId) {
               await supabaseAdmin

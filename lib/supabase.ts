@@ -97,6 +97,14 @@ export interface Database {
           current_company: string | null
           location: string
           preferred_location: string | null
+          looking_for_work: boolean | null
+          open_job_types: string[] | null
+          available_start_time: string | null
+          available_end_time: string | null
+          work_timezone: string | null
+          available_start_date: string | null
+          availability_notes: string | null
+          work_availability_updated_at: string | null
           total_experience: string
           current_salary: string | null
           expected_salary: string | null
@@ -159,6 +167,14 @@ export interface Database {
           current_company?: string | null
           location: string
           preferred_location?: string | null
+          looking_for_work?: boolean | null
+          open_job_types?: string[] | null
+          available_start_time?: string | null
+          available_end_time?: string | null
+          work_timezone?: string | null
+          available_start_date?: string | null
+          availability_notes?: string | null
+          work_availability_updated_at?: string | null
           total_experience: string
           current_salary?: string | null
           expected_salary?: string | null
@@ -220,6 +236,14 @@ export interface Database {
           current_company?: string | null
           location?: string
           preferred_location?: string | null
+          looking_for_work?: boolean | null
+          open_job_types?: string[] | null
+          available_start_time?: string | null
+          available_end_time?: string | null
+          work_timezone?: string | null
+          available_start_date?: string | null
+          availability_notes?: string | null
+          work_availability_updated_at?: string | null
           total_experience?: string
           current_salary?: string | null
           expected_salary?: string | null
@@ -266,7 +290,7 @@ export interface Database {
           parsing_confidence?: number | null
           parsing_errors?: any[] | null
           uploaded_by?: string | null
-          embedding?: any // vector(1536)
+          embedding?: any // vector(768)
         }
       }
       work_experience: {

@@ -15,16 +15,18 @@ async function embedWithGeminiRest(input: string, model: string): Promise<number
   if (!apiKey) throw new Error("GEMINI_API_KEY not configured")
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent`
-  const body: any = {
-    model: `models/${model}`,
-    content: { parts: [{ text: input }] },
+  const makeBody = (includeDim: boolean) => {
+    const body: any = {
+      model: `models/${model}`,
+      content: { parts: [{ text: input }] },
+    }
+    if (includeDim && Number.isFinite(EMBEDDING_DIM) && EMBEDDING_DIM > 0) {
+      body.output_dimensionality = EMBEDDING_DIM
+    }
+    return body
   }
 
-  if (Number.isFinite(EMBEDDING_DIM) && EMBEDDING_DIM > 0) {
-    body.output_dimensionality = EMBEDDING_DIM
-  }
-
-  const doRequest = async () => {
+  const doRequest = async (body: any) => {
     const res = await fetch(url, {
       method: "POST",
       headers: {
@@ -55,24 +57,88 @@ async function embedWithGeminiRest(input: string, model: string): Promise<number
     return values.map((v: any) => Number(v)).filter((v: any) => Number.isFinite(v))
   }
 
+  const runRequest = async (body: any) => {
+    try {
+      return await doRequest(body)
+    } catch (e: any) {
+      const msg = String(e?.message || e)
+      const status = Number(e?.status || 0)
+      const isTransient = status === 429 || status === 503 || /overloaded|timeout|temporarily unavailable/i.test(msg)
+      if (isTransient) {
+        await sleep(600)
+        return await doRequest(body)
+      }
+      throw e
+    }
+  }
+
+  const primary = makeBody(true)
   try {
-    return await doRequest()
+    return await runRequest(primary)
   } catch (e: any) {
     const msg = String(e?.message || e)
     const status = Number(e?.status || 0)
-    const isTransient = status === 429 || status === 503 || /overloaded|timeout|temporarily unavailable/i.test(msg)
-    if (isTransient) {
-      await sleep(600)
-      return await doRequest()
+    if (status === 400 && /output_dimensionality|dimension|invalid value|unsupported/i.test(msg)) {
+      return await runRequest(makeBody(false))
     }
     throw e
   }
 }
 
+function expandKeywordVariants(keywords: string[]): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+
+  const add = (v: string) => {
+    const t = String(v || "").trim()
+    if (!t) return
+    const k = t.toLowerCase()
+    if (seen.has(k)) return
+    seen.add(k)
+    out.push(t)
+  }
+
+  for (const kw of keywords || []) {
+    const base = String(kw || "").trim()
+    if (!base) continue
+    add(base)
+
+    const parts = base.split(/\s+/).filter(Boolean)
+    if (parts.length === 0) continue
+
+    for (let i = 0; i < Math.min(parts.length, 3); i++) {
+      const w = parts[i]
+      const lower = w.toLowerCase()
+
+      const candidates: string[] = []
+      if (lower.length > 3) {
+        if (lower.endsWith("ies")) {
+          candidates.push(w.slice(0, -3) + "y")
+        } else if (lower.endsWith("es") && !lower.endsWith("ses") && !lower.endsWith("xes")) {
+          candidates.push(w.slice(0, -2))
+        } else if (lower.endsWith("s") && !lower.endsWith("ss")) {
+          candidates.push(w.slice(0, -1))
+        } else if (!lower.endsWith("s")) {
+          candidates.push(w + "s")
+        }
+      }
+
+      for (const repl of candidates) {
+        if (!repl || repl.toLowerCase() === lower) continue
+        const next = [...parts]
+        next[i] = repl
+        add(next.join(" "))
+      }
+    }
+  }
+
+  return out
+}
+
 export async function generateEmbedding(text: string): Promise<number[]> {
   console.log("=== Generating Embedding ===")
   if (!process.env.GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY not configured")
+    return []
   }
 
   const input = (text || "").trim().slice(0, 8000)
@@ -98,7 +164,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
             return embedding.slice(0, EMBEDDING_DIM)
           }
           if (embedding.length < EMBEDDING_DIM) {
-            throw new Error(`Embedding length ${embedding.length} < expected ${EMBEDDING_DIM}`)
+            return [...embedding, ...Array(EMBEDDING_DIM - embedding.length).fill(0)]
           }
         }
 
@@ -416,14 +482,51 @@ Example Output: ["Fleet Incharge", "Gurgaon"]`
     const keywords = JSON.parse(text)
     
     if (Array.isArray(keywords)) {
-      console.log("✅ AI extracted keywords:", keywords)
-      return keywords
+      const expanded = expandKeywordVariants(keywords).slice(0, 25)
+      console.log("✅ AI extracted keywords:", expanded)
+      return expanded
     }
     
     throw new Error("Invalid response format")
   } catch (error) {
     console.error("AI extraction failed, falling back to rule-based:", error)
-    return extractKeywordsFromSentence(query)
+    return expandKeywordVariants(extractKeywordsFromSentence(query)).slice(0, 25)
+  }
+}
+
+export async function generateWebsearchQueryFromJDWithAI(jd: string): Promise<string> {
+  const input = String(jd || "").trim().slice(0, 8000)
+  if (!input) return ""
+
+  if (!process.env.GEMINI_API_KEY) {
+    const terms = extractKeywordsFromSentence(input).slice(0, 12)
+    return terms.map((t) => (t.includes(" ") ? `"${t}"` : t)).join(" ")
+  }
+
+  try {
+    const model = genAI.getGenerativeModel({ model: DEFAULT_GEMINI_MODEL })
+    const prompt = `You convert a job description into a HIGH-PRECISION boolean query for Postgres websearch_to_tsquery (english).
+
+Rules:
+- Output ONLY one line query string, no JSON, no markdown.
+- Prefer AND for core requirements; use OR only for synonyms.
+- Use quotes for multi-word phrases.
+- Include 6-14 total terms/phrases max.
+- Avoid generic words like "job", "role", "looking", "motivated".
+
+Examples:
+JD: "Fleet manager, DOT, FMCSA, preventive maintenance, fuel monitoring"
+Query: ("fleet manager" OR "fleet operations") (DOT OR FMCSA) ("preventive maintenance" OR maintenance) (fuel OR "fuel management")
+
+Job description:
+${input}`
+
+    const result = await model.generateContent(prompt)
+    const text = result.response.text().trim().replace(/\s+/g, " ")
+    return text
+  } catch {
+    const terms = extractKeywordsFromSentence(input).slice(0, 12)
+    return terms.map((t) => (t.includes(" ") ? `"${t}"` : t)).join(" ")
   }
 }
 

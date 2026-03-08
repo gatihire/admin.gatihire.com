@@ -5,9 +5,11 @@ import BulkImportUrls from "@/components/bulk-import-urls"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Users, FileText, TrendingUp, MapPin, Briefcase, Calendar, Download, RefreshCw, Eye, Database, Trash2 } from "lucide-react"
+import { Users, FileText, TrendingUp, MapPin, Briefcase, Calendar, Download, RefreshCw, Eye, Database, Trash2, Loader2 } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { CandidatePreviewDialog } from "./candidate-preview-dialog"
@@ -68,11 +70,123 @@ export function AdminPanel() {
   const [filterPeriod, setFilterPeriod] = useState("all")
   const [mounted, setMounted] = useState(false)
   const [selectedCandidate, setSelectedCandidate] = useState<any>(null)
+  const [templatesLoading, setTemplatesLoading] = useState(true)
+  const [templatesSaving, setTemplatesSaving] = useState(false)
+  const [templateDrafts, setTemplateDrafts] = useState({
+    invite_email: { subject: "", body: "" },
+    outreach_email: { subject: "", body: "" },
+    invite_whatsapp: { body: "", campaignName: "", paramOrder: "candidate_name\njob_title\ncompany_name\ninvite_link" },
+    outreach_whatsapp: { body: "", campaignName: "", paramOrder: "candidate_name\njob_title\ncompany_name\napply_link" }
+  })
   const { toast } = useToast()
+  const [embeddingStats, setEmbeddingStats] = useState<null | {
+    totalCandidates: number
+    missingEmbedding: number
+    missingResumeText: number
+    latestUploadedAt: string | null
+  }>(null)
+  const [backfillBusy, setBackfillBusy] = useState(false)
+  const [backfillLimit, setBackfillLimit] = useState("25")
+  const [backfillMinChars, setBackfillMinChars] = useState("200")
+  const [backfillLastResult, setBackfillLastResult] = useState<any>(null)
+  const [resumeBackfillBusy, setResumeBackfillBusy] = useState(false)
+  const [resumeBackfillLimit, setResumeBackfillLimit] = useState("25")
+  const [resumeBackfillMinChars, setResumeBackfillMinChars] = useState("200")
+  const [resumeBackfillLastResult, setResumeBackfillLastResult] = useState<any>(null)
+
+  const refreshEmbeddingStats = async () => {
+    try {
+      const res = await fetch("/api/admin/backfill-embeddings", { method: "GET" })
+      const data = await res.json().catch(() => null)
+      if (res.ok && data?.ok) {
+        setEmbeddingStats({
+          totalCandidates: Number(data.totalCandidates || 0),
+          missingEmbedding: Number(data.missingEmbedding || 0),
+          missingResumeText: Number(data.missingResumeText || 0),
+          latestUploadedAt: typeof data.latestUploadedAt === "string" ? data.latestUploadedAt : null,
+        })
+      }
+    } catch {
+    }
+  }
+
+  const runEmbeddingBackfillBatch = async () => {
+    if (backfillBusy) return
+    setBackfillBusy(true)
+    setBackfillLastResult(null)
+    try {
+      const sp = new URLSearchParams({
+        limit: String(Math.min(200, Math.max(1, Number(backfillLimit || 25) || 25))),
+        minChars: String(Math.min(5000, Math.max(0, Number(backfillMinChars || 200) || 200))),
+      })
+      const res = await fetch(`/api/admin/backfill-embeddings?${sp.toString()}`, { method: "POST" })
+      const data = await res.json().catch(() => null)
+      setBackfillLastResult(data)
+      if (!res.ok) {
+        toast({
+          title: "Embedding backfill failed",
+          description: data?.error || "Request failed",
+          variant: "destructive",
+        })
+      } else {
+        toast({
+          title: "Embedding backfill batch completed",
+          description: `Updated ${data?.updated || 0}, skipped ${data?.skipped || 0}, failed ${data?.failed || 0}`,
+        })
+        await refreshEmbeddingStats()
+      }
+    } catch (e: any) {
+      toast({
+        title: "Embedding backfill failed",
+        description: String(e?.message || e),
+        variant: "destructive",
+      })
+    } finally {
+      setBackfillBusy(false)
+    }
+  }
+
+  const runResumeTextBackfillBatch = async () => {
+    if (resumeBackfillBusy) return
+    setResumeBackfillBusy(true)
+    setResumeBackfillLastResult(null)
+    try {
+      const sp = new URLSearchParams({
+        limit: String(Math.min(200, Math.max(1, Number(resumeBackfillLimit || 25) || 25))),
+        minChars: String(Math.min(5000, Math.max(0, Number(resumeBackfillMinChars || 200) || 200))),
+      })
+      const res = await fetch(`/api/admin/backfill-resume-text?${sp.toString()}`, { method: "POST" })
+      const data = await res.json().catch(() => null)
+      setResumeBackfillLastResult(data)
+      if (!res.ok) {
+        toast({
+          title: "Resume text backfill failed",
+          description: data?.error || "Request failed",
+          variant: "destructive",
+        })
+      } else {
+        toast({
+          title: "Resume text backfill completed",
+          description: `Updated ${data?.updated || 0}, skipped ${data?.skipped || 0}, failed ${data?.failed || 0}`,
+        })
+        await refreshEmbeddingStats()
+      }
+    } catch (e: any) {
+      toast({
+        title: "Resume text backfill failed",
+        description: String(e?.message || e),
+        variant: "destructive",
+      })
+    } finally {
+      setResumeBackfillBusy(false)
+    }
+  }
 
   useEffect(() => {
     setMounted(true)
     fetchStats()
+    fetchTemplates()
+    refreshEmbeddingStats()
   }, [])
 
   useEffect(() => {
@@ -117,6 +231,114 @@ export function AdminPanel() {
       })
     } finally {
       setLoading(false)
+    }
+  }
+
+  const fetchTemplates = async () => {
+    setTemplatesLoading(true)
+    try {
+      const res = await fetch("/api/admin/message-templates")
+      if (!res.ok) throw new Error("Failed to load templates")
+      const data = await res.json()
+      const templates = data?.templates || {}
+      const inviteEmail = templates.invite_email || {}
+      const outreachEmail = templates.outreach_email || {}
+      const inviteWhatsApp = templates.invite_whatsapp || {}
+      const outreachWhatsApp = templates.outreach_whatsapp || {}
+      const emailSource = (inviteEmail.subject || inviteEmail.body) ? inviteEmail : outreachEmail
+      setTemplateDrafts({
+        invite_email: {
+          subject: emailSource.subject || "",
+          body: emailSource.body || ""
+        },
+        outreach_email: {
+          subject: emailSource.subject || "",
+          body: emailSource.body || ""
+        },
+        invite_whatsapp: {
+          body: inviteWhatsApp.body || "",
+          campaignName: inviteWhatsApp.metadata?.campaignName || "",
+          paramOrder: Array.isArray(inviteWhatsApp.metadata?.paramOrder)
+            ? inviteWhatsApp.metadata.paramOrder.join("\n")
+            : "candidate_name\njob_title\ncompany_name\ninvite_link"
+        },
+        outreach_whatsapp: {
+          body: outreachWhatsApp.body || "",
+          campaignName: outreachWhatsApp.metadata?.campaignName || "",
+          paramOrder: Array.isArray(outreachWhatsApp.metadata?.paramOrder)
+            ? outreachWhatsApp.metadata.paramOrder.join("\n")
+            : "candidate_name\njob_title\ncompany_name\napply_link"
+        }
+      })
+    } catch (error: any) {
+      toast({
+        title: "Templates failed",
+        description: error?.message || "Failed to load message templates",
+        variant: "destructive",
+      })
+    } finally {
+      setTemplatesLoading(false)
+    }
+  }
+
+  const parseParamOrder = (value: string) =>
+    value
+      .split(/[\n,]/g)
+      .map((v) => v.trim())
+      .filter(Boolean)
+
+  const saveTemplates = async () => {
+    setTemplatesSaving(true)
+    try {
+      const payload = {
+        templates: [
+          {
+            templateKey: "invite_email",
+            subject: templateDrafts.invite_email.subject,
+            body: templateDrafts.invite_email.body,
+            metadata: {}
+          },
+          {
+            templateKey: "outreach_email",
+            subject: templateDrafts.invite_email.subject,
+            body: templateDrafts.invite_email.body,
+            metadata: {}
+          },
+          {
+            templateKey: "invite_whatsapp",
+            body: templateDrafts.invite_whatsapp.body,
+            metadata: {
+              campaignName: templateDrafts.invite_whatsapp.campaignName || undefined,
+              paramOrder: parseParamOrder(templateDrafts.invite_whatsapp.paramOrder)
+            }
+          },
+          {
+            templateKey: "outreach_whatsapp",
+            body: templateDrafts.outreach_whatsapp.body,
+            metadata: {
+              campaignName: templateDrafts.outreach_whatsapp.campaignName || undefined,
+              paramOrder: parseParamOrder(templateDrafts.outreach_whatsapp.paramOrder)
+            }
+          }
+        ]
+      }
+      const res = await fetch("/api/admin/message-templates", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      })
+      const data = await res.json().catch(() => null)
+      if (!res.ok) throw new Error(data?.error || "Failed to save templates")
+      toast({ title: "Templates saved", description: "Message templates updated." })
+      await fetchTemplates()
+    } catch (error: any) {
+      toast({
+        title: "Save failed",
+        description: error?.message || "Failed to save templates",
+        variant: "destructive",
+      })
+    } finally {
+      setTemplatesSaving(false)
     }
   }
 
@@ -452,6 +674,165 @@ export function AdminPanel() {
           </Button>
         </div>
       </div>
+
+      <Card className="border border-zinc-200">
+        <CardContent className="p-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="text-sm font-semibold text-gray-900">Vector Search Health</div>
+              <div className="mt-1 text-xs text-gray-600">
+                JD vector search needs candidate embeddings. Backfill once, then every new resume/profile becomes searchable.
+              </div>
+              {embeddingStats ? (
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <Badge variant="secondary">Total: {embeddingStats.totalCandidates}</Badge>
+                  <Badge variant={embeddingStats.missingEmbedding > 0 ? "destructive" : "secondary"}>
+                    Missing embeddings: {embeddingStats.missingEmbedding}
+                  </Badge>
+                  <Badge variant="secondary">Missing resume text: {embeddingStats.missingResumeText}</Badge>
+                </div>
+              ) : (
+                <div className="mt-2 text-xs text-gray-600">Loading stats…</div>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <div className="flex items-center gap-2">
+                <Input value={backfillLimit} onChange={(e) => setBackfillLimit(e.target.value)} className="h-9 w-20" />
+                <div className="text-xs text-gray-600">batch</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Input value={backfillMinChars} onChange={(e) => setBackfillMinChars(e.target.value)} className="h-9 w-24" />
+                <div className="text-xs text-gray-600">min chars</div>
+              </div>
+              <Button onClick={runEmbeddingBackfillBatch} disabled={backfillBusy} className="h-9">
+                {backfillBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                Backfill embeddings
+              </Button>
+              <Button variant="outline" onClick={refreshEmbeddingStats} disabled={backfillBusy} className="h-9">
+                Refresh
+              </Button>
+            </div>
+          </div>
+
+          {backfillLastResult?.ok ? (
+            <div className="mt-3 text-xs text-gray-600">
+              Updated {backfillLastResult.updated || 0}, skipped {backfillLastResult.skipped || 0}, failed {backfillLastResult.failed || 0}.
+            </div>
+          ) : null}
+          {resumeBackfillLastResult?.ok ? (
+            <div className="mt-2 text-xs text-gray-600">
+              Resume text updated {resumeBackfillLastResult.updated || 0}, skipped {resumeBackfillLastResult.skipped || 0}, failed {resumeBackfillLastResult.failed || 0}.
+            </div>
+          ) : null}
+
+          <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center">
+            <div className="flex items-center gap-2">
+              <Input value={resumeBackfillLimit} onChange={(e) => setResumeBackfillLimit(e.target.value)} className="h-9 w-20" />
+              <div className="text-xs text-gray-600">batch</div>
+            </div>
+            <div className="flex items-center gap-2">
+              <Input value={resumeBackfillMinChars} onChange={(e) => setResumeBackfillMinChars(e.target.value)} className="h-9 w-24" />
+              <div className="text-xs text-gray-600">min chars</div>
+            </div>
+            <Button onClick={runResumeTextBackfillBatch} disabled={resumeBackfillBusy} className="h-9">
+              {resumeBackfillBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              Backfill resume text
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="border border-indigo-100">
+        <CardHeader>
+          <CardTitle>Messaging Templates</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="text-xs text-muted-foreground">
+            Email placeholders: {"{{candidate_name}}"}, {"{{job_title}}"}, {"{{company_name}}"}, {"{{invite_link}}"}, {"{{apply_link}}"}, {"{{match_score}}"}, {"{{skills}}"}
+          </div>
+          <div className="space-y-3">
+            <div className="text-sm font-semibold">Email (Fallback)</div>
+            <Input
+              value={templateDrafts.invite_email.subject}
+              onChange={(e) =>
+                setTemplateDrafts((prev) => ({
+                  ...prev,
+                  invite_email: { ...prev.invite_email, subject: e.target.value },
+                  outreach_email: { ...prev.outreach_email, subject: e.target.value }
+                }))
+              }
+              placeholder="Email subject"
+              disabled={templatesLoading}
+            />
+            <Textarea
+              value={templateDrafts.invite_email.body}
+              onChange={(e) =>
+                setTemplateDrafts((prev) => ({
+                  ...prev,
+                  invite_email: { ...prev.invite_email, body: e.target.value },
+                  outreach_email: { ...prev.outreach_email, body: e.target.value }
+                }))
+              }
+              placeholder="HTML body (used only when WhatsApp is not used)"
+              className="min-h-[180px]"
+              disabled={templatesLoading}
+            />
+          </div>
+          <div className="grid gap-6 lg:grid-cols-2">
+            <div className="space-y-3">
+              <div className="text-sm font-semibold">Invite WhatsApp (AiSensy)</div>
+              <Input
+                value={templateDrafts.invite_whatsapp.campaignName}
+                onChange={(e) => setTemplateDrafts((prev) => ({
+                  ...prev,
+                  invite_whatsapp: { ...prev.invite_whatsapp, campaignName: e.target.value }
+                }))}
+                placeholder="Campaign name (AiSensy template)"
+                disabled={templatesLoading}
+              />
+              <Textarea
+                value={templateDrafts.invite_whatsapp.paramOrder}
+                onChange={(e) => setTemplateDrafts((prev) => ({
+                  ...prev,
+                  invite_whatsapp: { ...prev.invite_whatsapp, paramOrder: e.target.value }
+                }))}
+                placeholder="Template param order, one per line"
+                className="min-h-[90px]"
+                disabled={templatesLoading}
+              />
+            </div>
+            <div className="space-y-3">
+              <div className="text-sm font-semibold">Outreach WhatsApp (AiSensy)</div>
+              <Input
+                value={templateDrafts.outreach_whatsapp.campaignName}
+                onChange={(e) => setTemplateDrafts((prev) => ({
+                  ...prev,
+                  outreach_whatsapp: { ...prev.outreach_whatsapp, campaignName: e.target.value }
+                }))}
+                placeholder="Campaign name (AiSensy template)"
+                disabled={templatesLoading}
+              />
+              <Textarea
+                value={templateDrafts.outreach_whatsapp.paramOrder}
+                onChange={(e) => setTemplateDrafts((prev) => ({
+                  ...prev,
+                  outreach_whatsapp: { ...prev.outreach_whatsapp, paramOrder: e.target.value }
+                }))}
+                placeholder="Template param order, one per line"
+                className="min-h-[90px]"
+                disabled={templatesLoading}
+              />
+            </div>
+          </div>
+          <div className="flex items-center justify-between">
+            <div className="text-xs text-muted-foreground">WhatsApp templates are managed in AiSensy; only param order is configured here.</div>
+            <Button onClick={saveTemplates} disabled={templatesSaving || templatesLoading}>
+              {templatesSaving ? "Saving..." : "Save Templates"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Key Metrics */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6">

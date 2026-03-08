@@ -36,10 +36,26 @@ export const SKILL_SUGGESTIONS_BY_SUBCATEGORY: Record<string, readonly string[]>
 export const SUB_CATEGORY_OPTIONS = [
   { value: "driver_heavy_vehicle", label: "Driver – Heavy Vehicle" },
   { value: "driver_light_commercial", label: "Driver – Light Commercial" },
+  { value: "driver_last_mile", label: "Driver – Last Mile / Delivery" },
+  { value: "driver_line_haul", label: "Driver – Line Haul" },
   { value: "dispatcher", label: "Dispatcher" },
+  { value: "transport_coordinator", label: "Transport Coordinator" },
+  { value: "route_planner", label: "Route Planner" },
   { value: "warehouse_staff", label: "Warehouse Staff" },
+  { value: "warehouse_supervisor", label: "Warehouse Supervisor" },
+  { value: "inventory_executive", label: "Inventory Executive" },
+  { value: "picker_packer", label: "Picker / Packer" },
+  { value: "loader_unloader", label: "Loader / Unloader" },
+  { value: "forklift_operator", label: "Forklift Operator" },
+  { value: "qc_executive", label: "QC Executive" },
   { value: "fleet_manager", label: "Fleet Manager" },
+  { value: "fleet_supervisor", label: "Fleet Supervisor" },
+  { value: "fleet_maintenance", label: "Fleet Maintenance Technician" },
   { value: "operations_executive", label: "Operations Executive" },
+  { value: "operations_manager", label: "Operations Manager" },
+  { value: "customer_support", label: "Customer Support" },
+  { value: "sales_3pl", label: "3PL Sales" },
+  { value: "delivery_associate", label: "Delivery Associate" }
 ] as const
 
 export const LANGUAGE_OPTIONS = ["Hindi", "English", "Regional"] as const
@@ -47,7 +63,6 @@ export const LANGUAGE_OPTIONS = ["Hindi", "English", "Regional"] as const
 export const ENGLISH_LEVEL_OPTIONS = [
   { value: "no_english", label: "No English" },
   { value: "basic", label: "Basic" },
-  { value: "thoda", label: "Thoda English" },
   { value: "good", label: "Good English" },
 ] as const
 
@@ -115,4 +130,3 @@ export const REPORTING_TO_OPTIONS = [
 
 export const WHY_JOIN_OPTIONS = ["Stable income", "Fixed route", "Overtime pay", "Growth opportunity"] as const
 export const BENEFIT_OPTIONS = ["PF / ESIC", "Fuel Allowance", "Incentives", "Accommodation", "Food"] as const
-

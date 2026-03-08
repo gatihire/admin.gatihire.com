@@ -63,8 +63,8 @@ interface CandidateData {
   _id: string
   id?: string
   name: string
-  email: string
-  phone: string
+  email?: string
+  phone?: string
   currentRole: string
   desiredRole?: string
   currentCompany?: string
@@ -561,18 +561,26 @@ export function CandidatePreviewDialog({
                         <Mail className="h-5 w-5 text-blue-500" />
                         <div className="flex-1">
                           <p className="text-sm font-medium text-gray-700">Email</p>
-                          <a href={`mailto:${safeCandidate.email}`} className="text-blue-600 hover:underline font-medium">
-                            {safeCandidate.email}
-                          </a>
+                          {safeCandidate.email ? (
+                            <a href={`mailto:${safeCandidate.email}`} className="text-blue-600 hover:underline font-medium">
+                              {safeCandidate.email}
+                            </a>
+                          ) : (
+                            <p className="text-gray-500 font-medium">Hidden</p>
+                          )}
                         </div>
                       </div>
                       <div className="flex items-center space-x-3 p-3 bg-gray-50 rounded-lg">
                         <Phone className="h-5 w-5 text-green-500" />
                         <div className="flex-1">
                           <p className="text-sm font-medium text-gray-700">Phone</p>
-                          <a href={`tel:${safeCandidate.phone}`} className="text-blue-600 hover:underline font-medium">
-                            {safeCandidate.phone}
-                          </a>
+                          {safeCandidate.phone ? (
+                            <a href={`tel:${safeCandidate.phone}`} className="text-blue-600 hover:underline font-medium">
+                              {safeCandidate.phone}
+                            </a>
+                          ) : (
+                            <p className="text-gray-500 font-medium">Hidden</p>
+                          )}
                         </div>
                       </div>
                       <div className="flex items-center space-x-3 p-3 bg-gray-50 rounded-lg">
@@ -1508,18 +1516,32 @@ export function CandidatePreviewDialog({
                         <Briefcase className="h-5 w-5 mr-2" />
                         Assign to Job
                       </Button>
-                      <Button asChild className="h-12 bg-blue-600 hover:bg-blue-700">
-                        <a href={`mailto:${safeCandidate.email}`}>
+                      {safeCandidate.email ? (
+                        <Button asChild className="h-12 bg-blue-600 hover:bg-blue-700">
+                          <a href={`mailto:${safeCandidate.email}`}>
+                            <Mail className="h-5 w-5 mr-2" />
+                            Send Email
+                          </a>
+                        </Button>
+                      ) : (
+                        <Button disabled className="h-12">
                           <Mail className="h-5 w-5 mr-2" />
                           Send Email
-                        </a>
-                      </Button>
-                      <Button variant="outline" asChild className="h-12 hover:bg-green-50">
-                        <a href={`tel:${safeCandidate.phone}`}>
+                        </Button>
+                      )}
+                      {safeCandidate.phone ? (
+                        <Button variant="outline" asChild className="h-12 hover:bg-green-50">
+                          <a href={`tel:${safeCandidate.phone}`}>
+                            <Phone className="h-5 w-5 mr-2" />
+                            Call
+                          </a>
+                        </Button>
+                      ) : (
+                        <Button variant="outline" disabled className="h-12">
                           <Phone className="h-5 w-5 mr-2" />
                           Call
-                        </a>
-                      </Button>
+                        </Button>
+                      )}
                       {safeCandidate.fileUrl && (
                         <Button variant="outline" asChild className="h-12 hover:bg-purple-50">
                           <a href={safeCandidate.fileUrl} target="_blank" rel="noopener noreferrer">

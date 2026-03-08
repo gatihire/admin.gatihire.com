@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { supabase } from "@/lib/supabase"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -8,6 +8,7 @@ import { Separator } from "@/components/ui/separator"
 import { Checkbox } from "@/components/ui/checkbox"
 import { useToast } from "@/components/ui/use-toast"
 import { Loader2, Chrome, Upload, ExternalLink, CheckCircle2 } from "lucide-react"
+import { trackEvent } from "@/lib/analytics-client"
 
 export type BoardJobLite = {
   id: string
@@ -37,7 +38,7 @@ type Intent =
   | { type: "apply"; jobId: string }
   | { type: "external"; jobId: string; redirectUrl: string }
 
-const INTENT_KEY = "truckinzy_candidate_intent"
+const INTENT_KEY = "gatihire_candidate_intent"
 
 function setIntent(intent: Intent) {
   try {
@@ -78,6 +79,7 @@ export function ApplyFlowDialog({ job, open, onOpenChange, onCandidateUpdated }:
   const [candidate, setCandidate] = useState<CandidateLite | null>(null)
   const [file, setFile] = useState<File | null>(null)
   const [done, setDone] = useState(false)
+  const applyStartedTracked = useRef(false)
 
   const isExternal = useMemo(() => String(job?.apply_type || "in_platform") === "external", [job])
   const externalUrl = useMemo(() => String(job?.external_apply_url || "").trim(), [job])
@@ -108,7 +110,26 @@ export function ApplyFlowDialog({ job, open, onOpenChange, onCandidateUpdated }:
       setFile(null)
       setDone(false)
       setLoading(false)
+      applyStartedTracked.current = false
       return
+    }
+
+    if (job?.id) {
+      trackEvent({ event_name: "board.apply.dialog_opened", entity_type: "jobs", entity_id: job.id, metadata: { job_id: job.id } })
+    }
+
+    if (job?.id && !applyStartedTracked.current) {
+      applyStartedTracked.current = true
+      ;(async () => {
+        const token = await getAccessToken()
+        await trackEvent({
+          event_name: "board.apply.started",
+          entity_type: "jobs",
+          entity_id: job.id,
+          metadata: { job_id: job.id, apply_type: isExternal ? "external" : "in_platform" },
+          access_token: token,
+        })
+      })()
     }
 
     if (!sessionReady) return
@@ -124,7 +145,7 @@ export function ApplyFlowDialog({ job, open, onOpenChange, onCandidateUpdated }:
         if (c && onCandidateUpdated) onCandidateUpdated(c)
       })
       .finally(() => setLoading(false))
-  }, [open, isAuthed, sessionReady, onCandidateUpdated])
+  }, [open, isAuthed, sessionReady, onCandidateUpdated, job, isExternal])
 
   const startGoogle = async () => {
     if (!job) return
@@ -132,6 +153,7 @@ export function ApplyFlowDialog({ job, open, onOpenChange, onCandidateUpdated }:
       toast({ title: "Confirm to continue", description: "Tick the checkbox to proceed.", variant: "destructive" })
       return
     }
+    trackEvent({ event_name: "board.signup.oauth_clicked", entity_type: "jobs", entity_id: job.id, metadata: { job_id: job.id, provider: "google" } })
     const redirectTo = `${window.location.origin}/board`
     if (isExternal && externalUrl) {
       setIntent({ type: "external", jobId: job.id, redirectUrl: externalUrl })
@@ -147,6 +169,8 @@ export function ApplyFlowDialog({ job, open, onOpenChange, onCandidateUpdated }:
     try {
       const token = await getAccessToken()
       if (!token) throw new Error("Not signed in")
+
+      trackEvent({ event_name: "board.apply.submit_clicked", entity_type: "jobs", entity_id: job.id, metadata: { job_id: job.id, use_existing_resume: opts.useExisting }, access_token: token })
 
       if (!opts.useExisting) {
         if (!file) throw new Error("Please choose a resume")
@@ -200,6 +224,8 @@ export function ApplyFlowDialog({ job, open, onOpenChange, onCandidateUpdated }:
     try {
       const token = await getAccessToken()
       if (!token) throw new Error("Not signed in")
+
+      trackEvent({ event_name: "board.external_apply.clicked", entity_type: "jobs", entity_id: job.id, metadata: { job_id: job.id }, access_token: token })
       await fetch("/api/candidate/external-apply", {
         method: "POST",
         headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
@@ -254,7 +280,7 @@ export function ApplyFlowDialog({ job, open, onOpenChange, onCandidateUpdated }:
             <label className="flex items-start gap-3 rounded-lg border p-3">
               <Checkbox checked={consent} onCheckedChange={(v) => setConsent(Boolean(v))} />
               <div className="text-sm">
-                <div className="font-medium text-foreground">Create my profile with Truckinzy</div>
+                <div className="font-medium text-foreground">Create my profile with GatiHire</div>
                 <div className="text-muted-foreground">
                   By continuing, you agree we can save your resume and preferences for future applications.
                 </div>

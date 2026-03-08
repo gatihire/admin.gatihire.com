@@ -14,6 +14,7 @@ import { Badge } from "@/components/ui/badge"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Building2, MoreHorizontal, Plus, Trash2, Upload } from "lucide-react"
 import { cachedFetchJson, invalidateSessionCache } from "@/lib/utils"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
 type Client = {
   id: string
@@ -71,6 +72,8 @@ export function ClientsDashboard() {
   const [clients, setClients] = useState<Client[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState("")
+  const [sourceFilter, setSourceFilter] = useState<string>("all")
+  const [clientStats, setClientStats] = useState<Record<string, { truckinzy: number; employee: number; total: number }>>({})
 
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<Client | null>(null)
@@ -102,6 +105,20 @@ export function ClientsDashboard() {
       })
       const rows = Array.isArray(data) ? (data as any[]) : []
       setClients(rows as Client[])
+
+      const ids = rows.map((c: any) => String(c?.id || "").trim()).filter(Boolean)
+      if (ids.length) {
+        const url = `/api/clients/stats?ids=${encodeURIComponent(ids.join(","))}`
+        const stats = await cachedFetchJson<{ byClient: Record<string, { truckinzy: number; employee: number; total: number }> }>(
+          `internal:clients:/api/clients/stats:${url}`,
+          url,
+          undefined,
+          { ttlMs: 10 * 60_000, force: Boolean(opts?.force) }
+        )
+        setClientStats(stats?.byClient || {})
+      } else {
+        setClientStats({})
+      }
     } finally {
       setLoading(false)
     }
@@ -131,9 +148,21 @@ export function ClientsDashboard() {
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
-    if (!q) return clients
-    return clients.filter((c) => (c.name || "").toLowerCase().includes(q) || (c.slug || "").toLowerCase().includes(q))
-  }, [clients, search])
+    let list = clients
+    if (q) {
+      list = list.filter((c) => (c.name || "").toLowerCase().includes(q) || (c.slug || "").toLowerCase().includes(q))
+    }
+    if (sourceFilter !== "all") {
+      list = list.filter((c) => {
+        const stat = clientStats[c.id]
+        if (!stat) return false
+        if (sourceFilter === "truckinzy") return stat.truckinzy > 0
+        if (sourceFilter === "employee") return stat.employee > 0
+        return true
+      })
+    }
+    return list
+  }, [clients, search, sourceFilter, clientStats])
 
   const openNew = () => {
     setEditing(null)
@@ -309,8 +338,36 @@ export function ClientsDashboard() {
         </Button>
       </div>
 
-      <div className="flex items-center gap-2">
-        <Input placeholder="Search clients..." value={search} onChange={(e) => setSearch(e.target.value)} className="max-w-sm" />
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-12">
+        <div className="md:col-span-5">
+          <div className="text-xs text-zinc-500 mb-1">Search</div>
+          <Input placeholder="Search clients..." value={search} onChange={(e) => setSearch(e.target.value)} className="w-full" />
+        </div>
+
+        <div className="md:col-span-4">
+          <div className="text-xs text-zinc-500 mb-1">Source</div>
+          <Tabs value={sourceFilter} onValueChange={setSourceFilter}>
+            <TabsList className="w-full justify-start">
+              <TabsTrigger value="all" className="flex-1">All</TabsTrigger>
+              <TabsTrigger value="truckinzy" className="flex-1">Truckinzy</TabsTrigger>
+              <TabsTrigger value="employee" className="flex-1">Employee</TabsTrigger>
+            </TabsList>
+          </Tabs>
+        </div>
+
+        <div className="md:col-span-3">
+          <div className="text-xs text-zinc-500 mb-1">&nbsp;</div>
+          <Button
+            variant="outline"
+            className="w-full"
+            onClick={async () => {
+              invalidateSessionCache("internal:clients:", { prefix: true })
+              await fetchClients({ force: true })
+            }}
+          >
+            Refresh
+          </Button>
+        </div>
       </div>
 
       {loading ? (

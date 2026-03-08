@@ -1,14 +1,15 @@
 "use client"
 
 import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from "react"
+import { usePathname } from "next/navigation"
 import { logger } from "@/lib/logger"
 import { cachedFetchJson, invalidateSessionCache } from "@/lib/utils"
 
 interface Candidate {
   _id: string
   name: string
-  email: string
-  phone: string
+  email?: string
+  phone?: string
   currentRole: string
   desiredRole?: string
   currentCompany?: string
@@ -38,6 +39,7 @@ interface Candidate {
 interface CandidateContextType {
   candidates: Candidate[]
   isLoading: boolean
+  error: string | null
   hasMore: boolean
   currentPage: number
   pageSize: number
@@ -60,8 +62,10 @@ interface CandidateContextType {
 const CandidateContext = createContext<CandidateContextType | undefined>(undefined)
 
 export function CandidateProvider({ children }: { children: ReactNode }) {
+  const pathname = usePathname()
   const [candidates, setCandidates] = useState<Candidate[]>([])
   const [isLoading, setIsLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const [hasMore, setHasMore] = useState(false)
   const [lastFetched, setLastFetched] = useState<Date | null>(null)
   const [currentPage, setCurrentPage] = useState(1)
@@ -71,10 +75,52 @@ export function CandidateProvider({ children }: { children: ReactNode }) {
   const [statusFilter, setStatusFilterState] = useState("all")
   const [sortBy, setSortByState] = useState("uploaded_at")
   const [sortOrder, setSortOrderState] = useState<'asc' | 'desc'>("desc")
+  const [permissionKeys, setPermissionKeys] = useState<string[] | null>(null)
+  const shouldFetchCandidates = Boolean(pathname?.startsWith("/candidates"))
+
+  const loadPermissions = useCallback(async (opts?: { force?: boolean }) => {
+    try {
+      const data = await cachedFetchJson<any>("internal:super-admin:me", "/api/super-admin/me", undefined, {
+        ttlMs: 60_000,
+        force: Boolean(opts?.force),
+      })
+      const perms = Array.isArray(data?.permissions) ? data.permissions : []
+      setPermissionKeys(perms.map((p: any) => String(p)))
+      return perms
+    } catch (e: any) {
+      setPermissionKeys(null)
+      throw e
+    }
+  }, [])
+
+  useEffect(() => {
+    loadPermissions().catch((e: any) => {
+      setError(String(e?.message || "Failed to load permissions"))
+      setPermissionKeys([])
+    })
+  }, [])
 
   const fetchCandidates = useCallback(async (page = currentPage, perPage = pageSize, opts?: { force?: boolean }) => {
+    if (permissionKeys === null) return
+    const hasView = permissionKeys.includes("candidates.view") || permissionKeys.includes("candidates.edit")
+    const hasSearchOnly = permissionKeys.includes("candidates.search-only")
+    if (!hasView && !hasSearchOnly) {
+      setCandidates([])
+      setTotal(0)
+      setHasMore(false)
+      setLastFetched(new Date())
+      return
+    }
+    if (!hasView && hasSearchOnly && !searchQuery.trim()) {
+      setCandidates([])
+      setTotal(0)
+      setHasMore(false)
+      setLastFetched(new Date())
+      return
+    }
     try {
       setIsLoading(true)
+      setError(null)
       logger.info(`Fetching candidates from API (paginated): page=${page} perPage=${perPage} search=${searchQuery} status=${statusFilter} sort=${sortBy}:${sortOrder}`)
       const url = `/api/candidates?paginate=true&page=${page}&perPage=${perPage}&search=${encodeURIComponent(searchQuery)}&status=${encodeURIComponent(statusFilter)}&sortBy=${encodeURIComponent(sortBy)}&sortOrder=${encodeURIComponent(sortOrder)}`
       const data = await cachedFetchJson<any>(`internal:candidates:${url}`, url, undefined, {
@@ -95,19 +141,44 @@ export function CandidateProvider({ children }: { children: ReactNode }) {
       setTotal(totalCount)
       setHasMore(pageNum * per < totalCount)
       setLastFetched(new Date())
-    } catch (error) {
+    } catch (error: any) {
       logger.error('Error fetching candidates:', error)
+      const msg = String(error?.message || "Failed to load candidates")
+      setError(msg)
+      // If token expired or permissions call was stale, refresh permissions once and retry
+      if (/unauthorized/i.test(msg) || /forbidden/i.test(msg)) {
+        try {
+          await loadPermissions({ force: true })
+          const url = `/api/candidates?paginate=true&page=${page}&perPage=${perPage}&search=${encodeURIComponent(searchQuery)}&status=${encodeURIComponent(statusFilter)}&sortBy=${encodeURIComponent(sortBy)}&sortOrder=${encodeURIComponent(sortOrder)}`
+          const data = await cachedFetchJson<any>(`internal:candidates:${url}`, url, undefined, {
+            ttlMs: 5 * 60_000,
+            force: true,
+          })
+          const items = Array.isArray(data) ? data : (data.items || [])
+          const totalCount = Array.isArray(data) ? items.length : (data.total || items.length)
+          const pageNum = Array.isArray(data) ? page : (data.page || page)
+          const per = Array.isArray(data) ? perPage : (data.perPage || perPage)
+          setCandidates(items)
+          setTotal(totalCount)
+          setHasMore(pageNum * per < totalCount)
+          setLastFetched(new Date())
+          setError(null)
+        } catch (retryErr: any) {
+          setError(String(retryErr?.message || msg))
+        }
+      }
     } finally {
       setIsLoading(false)
     }
-  }, [pageSize, searchQuery, statusFilter, sortBy, sortOrder])
+  }, [pageSize, searchQuery, statusFilter, sortBy, sortOrder, permissionKeys])
 
   const refreshCandidates = useCallback(async () => {
+    if (!shouldFetchCandidates) return
     logger.info("Refreshing candidates...")
     invalidateSessionCache("internal:candidates:", { prefix: true })
     await fetchCandidates(1, pageSize, { force: true })
     setCurrentPage(1)
-  }, [fetchCandidates, pageSize])
+  }, [fetchCandidates, pageSize, shouldFetchCandidates])
 
   const loadMoreCandidates = useCallback(async () => {
     // Advance page if more results are available
@@ -120,11 +191,12 @@ export function CandidateProvider({ children }: { children: ReactNode }) {
     await fetchCandidates(nextPage, pageSize)
   }, [hasMore, currentPage, pageSize, fetchCandidates])
 
-  // Fetch on mount and whenever fetchCandidates changes
+  // Fetch only when visiting candidates screen
   useEffect(() => {
-    logger.info("CandidateProvider mounted or fetchCandidates changed, fetching candidates...")
+    if (!shouldFetchCandidates) return
+    logger.info("CandidateProvider active on candidates screen, fetching candidates...")
     fetchCandidates(currentPage, pageSize)
-  }, [fetchCandidates, currentPage, pageSize])
+  }, [fetchCandidates, currentPage, pageSize, shouldFetchCandidates])
 
   const setPage = (page: number) => {
     logger.info(`setPage called: ${page}`)
@@ -156,6 +228,7 @@ export function CandidateProvider({ children }: { children: ReactNode }) {
   const value = {
     candidates,
     isLoading,
+    error,
     hasMore,
     currentPage,
     pageSize,

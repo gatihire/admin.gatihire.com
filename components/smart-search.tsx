@@ -1,9 +1,10 @@
 "use client"
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useMemo, useRef } from "react"
 import dynamic from "next/dynamic"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent } from "@/components/ui/card"
+import { SuggestionInput } from "@/components/ui/suggestion-input"
 import { Badge } from "@/components/ui/badge"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Textarea } from "@/components/ui/textarea"
@@ -14,6 +15,7 @@ import { Label } from "@/components/ui/label"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { logger } from "@/lib/logger"
 import { getSessionCached, peekSessionCache } from "@/lib/utils"
+import { INTERNAL_SEARCH_SUGGESTIONS } from "@/lib/search-suggestions"
 import {
   Search,
   Sparkles,
@@ -141,6 +143,7 @@ const getMatchColor = (score: number) => {
 
 export function SmartSearch() {
   const [searchMode, setSearchMode] = useState<"manual" | "smart" | "jd">("manual")
+  const [roleScope, setRoleScope] = useState<"current" | "current_past">("current_past")
   const [smartSearchQuery, setSmartSearchQuery] = useState("")
   const [jobDescription, setJobDescription] = useState("")
   const [searchResults, setSearchResults] = useState<SearchResult[]>([])
@@ -208,6 +211,7 @@ export function SmartSearch() {
   const [assignOpen, setAssignOpen] = useState(false)
   const [assignCandidateId, setAssignCandidateId] = useState<string>("")
   const [assignCandidateName, setAssignCandidateName] = useState<string>("")
+  const lastSidebarFiltersKeyRef = useRef<string>("")
 
   const { toast } = useToast()
 
@@ -221,6 +225,12 @@ export function SmartSearch() {
     if (page === 1) setHasSearched(true)
     setCurrentPage(page)
     setLastSearchParams(params) // Save params for pagination
+    if (params.sidebarFilters || params.roleScope) {
+      lastSidebarFiltersKeyRef.current = JSON.stringify({
+        sidebarFilters: params.sidebarFilters || sidebarFilters,
+        roleScope: params.roleScope || roleScope,
+      })
+    }
 
     // Check cache first
     const cacheKey = JSON.stringify({ ...params, page })
@@ -257,12 +267,29 @@ export function SmartSearch() {
 
     if (params.query) searchParams.set(params.type === 'smart' ? 'query' : 'keywords', params.query)
     if (params.jd) searchParams.set('jd', params.jd)
+    if (params.roleScope) searchParams.set('roleScope', params.roleScope)
     
     // Add manual filters if present
     if (params.filters) {
       Object.entries(params.filters).forEach(([key, value]) => {
         if (value) searchParams.set(key, String(value))
       })
+    }
+
+    if (params.sidebarFilters) {
+      const sf = params.sidebarFilters as SidebarFilters
+      if (sf.mustHaveKeywords.length) searchParams.set("mustHaveKeywords", sf.mustHaveKeywords.join(","))
+      if (sf.excludeKeywords.length) searchParams.set("excludeKeywords", sf.excludeKeywords.join(","))
+      if (sf.currentCity.length) searchParams.set("currentCity", sf.currentCity.join(","))
+      if (sf.experience.min) searchParams.set("expMin", sf.experience.min)
+      if (sf.experience.max) searchParams.set("expMax", sf.experience.max)
+      if (sf.salaryRange.min) searchParams.set("salaryMin", sf.salaryRange.min)
+      if (sf.salaryRange.max) searchParams.set("salaryMax", sf.salaryRange.max)
+      if (sf.education.length) searchParams.set("educationFilters", sf.education.join(","))
+      if (sf.gender.length) searchParams.set("genderFilters", sf.gender.join(","))
+      if (sf.languages.length) searchParams.set("languageFilters", sf.languages.join(","))
+      if (sf.showOnlyAvailable) searchParams.set("showOnlyAvailable", "true")
+      if (sf.hideInactive) searchParams.set("hideInactive", "true")
     }
     
     logger.info(`Search fetch: mode=${params.type} page=${page}`)
@@ -370,7 +397,7 @@ export function SmartSearch() {
       toast({ title: "Error", description: "Please enter a search query", variant: "destructive" })
       return
     }
-    const params = { type: 'smart', query: smartSearchQuery }
+    const params = { type: 'smart', query: smartSearchQuery, roleScope, sidebarFilters }
     setLastSearchParams(params)
     executeSearch(1, params)
   }
@@ -380,7 +407,7 @@ export function SmartSearch() {
       toast({ title: "Error", description: "Please paste a job description", variant: "destructive" })
       return
     }
-    const params = { type: 'jd', jd: jobDescription }
+    const params = { type: 'jd', jd: jobDescription, roleScope, sidebarFilters }
     setLastSearchParams(params)
     executeSearch(1, params)
   }
@@ -398,7 +425,9 @@ export function SmartSearch() {
         minExperience: manualFilters.minExperience,
         maxExperience: manualFilters.maxExperience,
         education: manualFilters.education,
-      }
+      },
+      roleScope,
+      sidebarFilters,
     }
     setLastSearchParams(params)
     executeSearch(1, params)
@@ -550,16 +579,28 @@ export function SmartSearch() {
     })
   }
 
-  // Apply filters whenever searchResults or sidebarFilters change
+  const serverFilterKey = useMemo(() => JSON.stringify({ sidebarFilters, roleScope }), [sidebarFilters, roleScope])
+
   useEffect(() => {
     if (searchResults.length > 0) {
-      const filtered = applyFilters(searchResults)
-      setFilteredResults(filtered)
-      setCurrentPage(1) // Reset to first page when filters change
+      if (serverPaginated) {
+        setFilteredResults(searchResults)
+      } else {
+        const filtered = applyFilters(searchResults)
+        setFilteredResults(filtered)
+        setCurrentPage(1)
+      }
     } else {
       setFilteredResults([])
     }
-  }, [searchResults, sidebarFilters])
+  }, [searchResults, sidebarFilters, serverPaginated])
+
+  useEffect(() => {
+    if (!hasSearched || !serverPaginated || !lastSearchParams) return
+    if (lastSidebarFiltersKeyRef.current === serverFilterKey) return
+    lastSidebarFiltersKeyRef.current = serverFilterKey
+    executeSearch(1, { ...lastSearchParams, sidebarFilters, roleScope })
+  }, [serverFilterKey, hasSearched, lastSearchParams, roleScope, serverPaginated])
 
   const openPreview = async (candidate: SearchResult) => {
     try {
@@ -614,6 +655,7 @@ export function SmartSearch() {
   const resetSearch = () => {
     setSmartSearchQuery("")
     setJobDescription("")
+    setRoleScope("current_past")
     setManualFilters({
       experienceType: "any",
       keywords: [],
@@ -1258,6 +1300,17 @@ export function SmartSearch() {
                     <span>Use Job Description</span>
                   </Button>
                 </div>
+                <div className="flex items-center justify-end gap-3 mb-4">
+                  <Label className="text-sm text-gray-600">Role scope</Label>
+                  <select
+                    value={roleScope}
+                    onChange={(e) => setRoleScope(e.target.value as "current" | "current_past")}
+                    className="text-sm border rounded px-2 py-1"
+                  >
+                    <option value="current">Current Role</option>
+                    <option value="current_past">Current + Past Role</option>
+                  </select>
+                </div>
 
                 {/* Manual Search Interface */}
                 {searchMode === "manual" && (
@@ -1459,13 +1512,14 @@ export function SmartSearch() {
                     <div className="space-y-4">
                       <div className="flex gap-4">
                         <div className="relative flex-1">
-                          <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
-                          <Input
-                            placeholder="e.g., 'Fleet manager with 5+ years experience in Delhi' or 'Truck driver with clean license'"
+                          <SuggestionInput
                             value={smartSearchQuery}
-                            onChange={(e) => setSmartSearchQuery(e.target.value)}
-                            onKeyPress={(e) => e.key === "Enter" && handleSmartSearch()}
-                            className="pl-12 h-12 text-lg"
+                            onValueChange={setSmartSearchQuery}
+                            suggestions={INTERNAL_SEARCH_SUGGESTIONS}
+                            placeholder="Type your requirements"
+                            inputClassName="h-12 text-lg"
+                            onEnter={handleSmartSearch}
+                            maxItems={8}
                           />
                         </div>
                         <Button onClick={handleSmartSearch} disabled={isSearching} size="lg" className="px-8">
@@ -1714,8 +1768,13 @@ export function SmartSearch() {
                             <div className="flex items-center text-xs text-gray-500 mt-1.5 space-x-3">
                                 <span className="flex items-center"><Clock className="h-3 w-3 mr-1" /> {result.totalExperience} Exp</span>
                                 {result.degree && <span className="flex items-center"><GraduationCap className="h-3 w-3 mr-1" /> {result.degree}</span>}
-                                <span className="flex items-center"><Mail className="h-3 w-3 mr-1" /> {result.email || "N/A"}</span>
-                                <span className="flex items-center"><Phone className="h-3 w-3 mr-1" /> {result.phone || "N/A"}</span>
+                                {result.matchingKeywords?.length ? (
+                                  <span className="flex items-center" title={result.matchingKeywords.join(", ")}>
+                                    <Code className="h-3 w-3 mr-1" />
+                                    {result.matchingKeywords.slice(0, 3).join(", ")}
+                                    {result.matchingKeywords.length > 3 ? ` +${result.matchingKeywords.length - 3}` : ""}
+                                  </span>
+                                ) : null}
                             </div>
                           </div>
                         </div>
@@ -1764,8 +1823,7 @@ export function SmartSearch() {
                       </div>
 
 
-                      {/* AI Match Analysis (Compact) */}
-                      {aiInsightsById[candidateKey(result)]?.visible === false ? null : (
+                      {aiInsightsById[candidateKey(result)]?.summary || aiInsightLoadingById[candidateKey(result)] ? (
                         <div className="mt-2 pt-2 border-t border-gray-100 bg-gray-50/30 p-2 rounded">
                           <div className="mb-2 text-xs text-gray-700 bg-purple-50/50 p-2 rounded border border-purple-100">
                             <span className="font-bold text-purple-700 mr-1">AI Insight:</span>
@@ -1795,7 +1853,7 @@ export function SmartSearch() {
                                 ) : null}
                               </>
                             ) : (
-                              <span className="text-gray-500 italic">Click “AI Insight” to generate.</span>
+                              <span className="text-gray-500 italic">Generating…</span>
                             )}
                           </div>
 
@@ -1843,7 +1901,7 @@ export function SmartSearch() {
                             </div>
                           </div>
                         </div>
-                      )}
+                      ) : null}
                     </CardContent>
                   </Card>
                 ))}
@@ -1856,16 +1914,16 @@ export function SmartSearch() {
                       Page {currentPageSafe} of {totalPages} • Showing {startIdx + 1}-{Math.min(endIdx, totalResults)} of {totalResults}
                     </span>
                     <div className="flex items-center gap-2">
-                      <Button variant="outline" size="sm" disabled={currentPageSafe <= 1} onClick={() => executeSearch(1, lastSearchParams)}>
+                      <Button variant="outline" size="sm" disabled={currentPageSafe <= 1} onClick={() => executeSearch(1, { ...lastSearchParams, sidebarFilters, roleScope })}>
                         First
                       </Button>
-                      <Button variant="outline" size="sm" disabled={currentPageSafe <= 1} onClick={() => executeSearch(Math.max(1, currentPageSafe - 1), lastSearchParams)}>
+                      <Button variant="outline" size="sm" disabled={currentPageSafe <= 1} onClick={() => executeSearch(Math.max(1, currentPageSafe - 1), { ...lastSearchParams, sidebarFilters, roleScope })}>
                         Prev
                       </Button>
-                      <Button variant="outline" size="sm" disabled={currentPageSafe >= totalPages} onClick={() => executeSearch(Math.min(totalPages, currentPageSafe + 1), lastSearchParams)}>
+                      <Button variant="outline" size="sm" disabled={currentPageSafe >= totalPages} onClick={() => executeSearch(Math.min(totalPages, currentPageSafe + 1), { ...lastSearchParams, sidebarFilters, roleScope })}>
                         Next
                       </Button>
-                      <Button variant="outline" size="sm" disabled={currentPageSafe >= totalPages} onClick={() => executeSearch(totalPages, lastSearchParams)}>
+                      <Button variant="outline" size="sm" disabled={currentPageSafe >= totalPages} onClick={() => executeSearch(totalPages, { ...lastSearchParams, sidebarFilters, roleScope })}>
                         Last
                       </Button>
                     </div>

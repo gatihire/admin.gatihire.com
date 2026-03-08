@@ -1,28 +1,32 @@
 "use client";
 
 import Image from "next/image";
-import { Users, Search, FileText, Settings, ChevronLeft, ChevronRight, Moon, Sun, BarChart, Briefcase, Building2 } from "lucide-react";
+import { Users, Search, FileText, Settings, ChevronLeft, ChevronRight, Moon, Sun, BarChart, Briefcase, Building2, Shield } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 
 interface SidebarProps {
   isHrUser?: boolean;
+  permissionKeys?: string[];
+  isSuperAdmin?: boolean;
   collapsed: boolean;
   setCollapsed: (collapsed: boolean) => void;
 }
 
 const navItems = [
-  { href: "/upload", name: "Upload", icon: FileText },
-  { href: "/jobs", name: "Jobs", icon: Briefcase },
-  { href: "/candidates", name: "Candidates", icon: Users },
-  { href: "/clients", name: "Clients", icon: Building2 },
-  { href: "/search", name: "Smart Search", icon: Search },
-  { href: "/jd-generator", name: "JD Generator", icon: FileText },
-  { href: "/analytics", name: "My Analytics", icon: BarChart, isHrOnly: true },
-  { href: "/admin", name: "Admin", icon: Settings },
+  { href: "/upload", name: "Upload", icon: FileText, anyOf: ["candidates.edit"] },
+  { href: "/jobs", name: "Jobs", icon: Briefcase, anyOf: ["jobs.view", "jobs.post", "jobs.edit"] },
+  { href: "/candidates", name: "Candidates", icon: Users, anyOf: ["candidates.view", "candidates.edit"] },
+  { href: "/clients", name: "Clients", icon: Building2, anyOf: ["jobs.view", "jobs.post", "jobs.edit"] },
+  { href: "/search", name: "Smart Search", icon: Search, anyOf: ["candidates.view", "candidates.edit", "candidates.search", "candidates.search-only"] },
+  { href: "/jd-generator", name: "JD Generator", icon: FileText, anyOf: ["jobs.post", "jobs.edit"] },
+  { href: "/admin/google-candidates", name: "Google Candidates", icon: Users, anyOf: ["users.manage"] },
+  { href: "/analytics", name: "My Analytics", icon: BarChart, anyOf: ["analytics.view"], isHrOnly: true },
+  { href: "/super-admin", name: "Super Admin", icon: Shield, anyOf: ["roles.manage", "users.manage"], superAdminOnly: true },
+  { href: "/admin", name: "Admin", icon: Settings, anyOf: ["export.data", "users.manage"] },
 ];
 
-export default function Sidebar({ isHrUser = false, collapsed, setCollapsed }: SidebarProps) {
+export default function Sidebar({ isHrUser = false, permissionKeys = [], isSuperAdmin = false, collapsed, setCollapsed }: SidebarProps) {
   const [isDark, setIsDark] = useState(false);
   const router = useRouter();
   const pathname = usePathname() || "";
@@ -47,7 +51,10 @@ export default function Sidebar({ isHrUser = false, collapsed, setCollapsed }: S
     });
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {}
     document.cookie = "auth=; path=/; expires=Thu, 01 Jan 1970 00:00:00 UTC;";
     document.cookie = "hr_user=; path=/; expires=Thu, 01 Jan 1970 00:00:00 UTC;";
     router.push("/login");
@@ -81,6 +88,9 @@ export default function Sidebar({ isHrUser = false, collapsed, setCollapsed }: S
         <ul className="space-y-2">
           {navItems.map((item) => {
             if ((item as any).isHrOnly && !isHrUser) return null;
+            if ((item as any).superAdminOnly && !isSuperAdmin) return null;
+            const anyOf = Array.isArray((item as any).anyOf) ? (item as any).anyOf : null
+            if (anyOf && !anyOf.some((p: string) => permissionKeys.includes(p))) return null
             const Icon = item.icon;
             const isActive = activeHref === (item as any).href;
             return (

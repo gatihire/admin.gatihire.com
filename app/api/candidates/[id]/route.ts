@@ -1,18 +1,16 @@
 import { NextRequest, NextResponse } from "next/server"
 import { SupabaseCandidateService } from "@/lib/supabase-candidates"
 import { logger } from "@/lib/logger"
+import { filterRecordByRule, getFieldRule, getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
+import { supabaseAdmin } from "@/lib/supabase"
 
 export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  // Authorization: require login cookie or valid admin token
-  const authCookie = request.cookies.get("auth")?.value
-  const authHeader = request.headers.get("authorization")
-  const hasAdminToken = authHeader === `Bearer ${process.env.ADMIN_TOKEN}`
-  if (authCookie !== "true" && !hasAdminToken) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-  }
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "candidates.edit")) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
 
   try {
     const { id: candidateId } = await params
@@ -56,6 +54,16 @@ export async function DELETE(
     logger.info("✅ Candidate deleted from Supabase")
 
     logger.info(`=== Candidate ${candidateId} Deleted Successfully ===`)
+    supabaseAdmin
+      .from("analytics_events")
+      .insert({
+        actor_auth_user_id: ctx.authUser.id,
+        event_name: "candidate.deleted",
+        entity_type: "candidates",
+        entity_id: candidateId,
+        metadata: {},
+      })
+      .then(() => {})
     
     return NextResponse.json({ 
       success: true, 
@@ -75,12 +83,10 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  // Authorization: require login cookie or valid admin token
-  const authCookie = request.cookies.get("auth")?.value
-  const authHeader = request.headers.get("authorization")
-  const hasAdminToken = authHeader === `Bearer ${process.env.ADMIN_TOKEN}`
-  if (authCookie !== "true" && !hasAdminToken) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "candidates.view") && !hasPermission(ctx, "candidates.edit")) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
   }
 
   try {
@@ -151,7 +157,22 @@ export async function GET(
       summary: candidate.summary,
     }
 
-    return NextResponse.json(transformedCandidate)
+    const fieldRule = getFieldRule(ctx, "candidates.view", "candidates")
+    const canViewPii = hasPermission(ctx, "candidates.edit") || hasPermission(ctx, "candidates.pii.view")
+    const canViewSalary = hasPermission(ctx, "candidates.edit") || hasPermission(ctx, "candidates.salary.view")
+    const masked = (() => {
+      const out: any = filterRecordByRule(transformedCandidate, fieldRule)
+      if (!canViewPii) {
+        delete out.email
+        delete out.phone
+      }
+      if (!canViewSalary) {
+        delete out.currentSalary
+        delete out.expectedSalary
+      }
+      return out
+    })()
+    return NextResponse.json(masked)
 
   } catch (error) {
     console.error("❌ Failed to get candidate:", error)
@@ -166,13 +187,9 @@ export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  // Authorization: require login cookie or valid admin token
-  const authCookie = request.cookies.get("auth")?.value
-  const authHeader = request.headers.get("authorization")
-  const hasAdminToken = authHeader === `Bearer ${process.env.ADMIN_TOKEN}`
-  if (authCookie !== "true" && !hasAdminToken) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-  }
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "candidates.edit")) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
 
   try {
     const { id: candidateId } = await params
@@ -202,6 +219,16 @@ export async function PATCH(
     // Update the candidate in Supabase
     await SupabaseCandidateService.updateCandidate(candidateId, updates)
     console.log("✅ Candidate updated successfully")
+    supabaseAdmin
+      .from("analytics_events")
+      .insert({
+        actor_auth_user_id: ctx.authUser.id,
+        event_name: "candidate.updated",
+        entity_type: "candidates",
+        entity_id: candidateId,
+        metadata: { updates },
+      })
+      .then(() => {})
 
     return NextResponse.json({ 
       success: true, 

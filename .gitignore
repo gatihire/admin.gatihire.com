@@ -24,6 +24,7 @@ yarn-error.log*
 
 # separate app (hosted elsewhere)
 board-app/
+GatiHire Landing page/
 
 # macOS
 .DS_Store

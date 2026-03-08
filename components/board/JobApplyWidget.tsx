@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { ApplyFlowDialog, BoardJobLite } from "@/components/board/ApplyFlowDialog"
 import { ExternalLink, Upload } from "lucide-react"
+import { trackEvent } from "@/lib/analytics-client"
 
 type Props = {
   job: {
@@ -43,7 +44,14 @@ export function JobApplyWidget({ job }: Props) {
         </CardHeader>
         <CardContent className="p-6">
           {isOpen ? (
-            <Button className="w-full gap-2" variant={isExternal ? "outline" : "default"} onClick={() => setOpen(true)}>
+            <Button
+              className="w-full gap-2"
+              variant={isExternal ? "outline" : "default"}
+              onClick={() => {
+                trackEvent({ event_name: "board.apply.started", entity_type: "jobs", entity_id: job.id, metadata: { job_id: job.id, surface: "job_page" } })
+                setOpen(true)
+              }}
+            >
               {isExternal ? <ExternalLink className="h-4 w-4" /> : <Upload className="h-4 w-4" />}
               {isExternal ? "Apply on company site" : "Upload your CV to apply"}
             </Button>

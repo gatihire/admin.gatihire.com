@@ -1,12 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
-
-function requireAuth(request: NextRequest) {
-  const authCookie = request.cookies.get("auth")?.value
-  if (authCookie === "true") return true
-  const authHeader = request.headers.get("authorization")
-  return Boolean(authHeader?.startsWith("Bearer "))
-}
+import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 
 function nowIso() {
   return new Date().toISOString()
@@ -29,7 +23,11 @@ function randomSuffix(len = 5) {
 }
 
 export async function GET(request: NextRequest) {
-  if (!requireAuth(request)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "jobs.view") && !hasPermission(ctx, "jobs.post") && !hasPermission(ctx, "jobs.edit")) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  }
 
   const { data, error } = await supabaseAdmin.from("clients").select("*").order("created_at", { ascending: false })
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
@@ -37,7 +35,11 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  if (!requireAuth(request)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "jobs.post") && !hasPermission(ctx, "jobs.edit")) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  }
 
   const body = (await request.json().catch(() => null)) as any
   if (!body?.name || typeof body.name !== "string") return NextResponse.json({ error: "Name is required" }, { status: 400 })

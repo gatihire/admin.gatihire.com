@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import { supabase } from "@/lib/supabase"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
+import { SuggestionInput } from "@/components/ui/suggestion-input"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
@@ -13,7 +13,9 @@ import { Drawer, DrawerContent, DrawerHeader, DrawerTitle, DrawerTrigger } from 
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ApplyFlowDialog, BoardJobLite, clearCandidateIntent, readCandidateIntent } from "@/components/board/ApplyFlowDialog"
-import { ArrowRight, Briefcase, Building2, Filter, MapPin, Search, SlidersHorizontal, UserRound } from "lucide-react"
+import { ArrowRight, Briefcase, Building2, Filter, MapPin, SlidersHorizontal, UserRound } from "lucide-react"
+import { ensureSessionStart, trackEvent, trackPageView } from "@/lib/analytics-client"
+import { INTERNAL_SEARCH_SUGGESTIONS } from "@/lib/search-suggestions"
 
 type Job = {
   id: string
@@ -97,6 +99,7 @@ export function BoardPage() {
   const [candidateLoading, setCandidateLoading] = useState(false)
 
   const [query, setQuery] = useState("")
+  const [draftQuery, setDraftQuery] = useState("")
   const [experience, setExperience] = useState<string>("any")
   const [locationOpen, setLocationOpen] = useState(false)
   const [location, setLocation] = useState<string>("Anywhere in India")
@@ -118,13 +121,40 @@ export function BoardPage() {
   }, [])
 
   useEffect(() => {
+    const q = query.trim()
+    if (!q) return
+    const t = setTimeout(() => {
+      trackEvent({ event_name: "board.search", metadata: { query: q } })
+    }, 600)
+    return () => clearTimeout(t)
+  }, [query])
+
+  useEffect(() => {
+    setDraftQuery(query)
+  }, [query])
+
+  const commitSearch = () => {
+    const q = draftQuery.trim()
+    setQuery(q)
+  }
+
+  useEffect(() => {
     let unsub: any = null
     ;(async () => {
       const { data } = await supabase.auth.getSession()
       setIsAuthed(!!data.session)
+      const token = data.session?.access_token || null
+      await ensureSessionStart(token)
+      await trackPageView(token)
     })()
     const sub = supabase.auth.onAuthStateChange((_event, session) => {
       setIsAuthed(!!session)
+      const token = session?.access_token || null
+      ensureSessionStart(token)
+      trackPageView(token)
+      if (session?.access_token) {
+        trackEvent({ event_name: "login_succeeded", metadata: { method: "oauth" }, access_token: session.access_token })
+      }
     })
     unsub = sub.data.subscription
     return () => {
@@ -260,6 +290,7 @@ export function BoardPage() {
   }, [jobs, query, derivedPreferredRoles, candidate, derivedJobTypes, employmentType, shiftType, department, location, sortBy, experience])
 
   const openApply = (job: Job) => {
+    trackEvent({ event_name: "board.apply.started", entity_type: "jobs", entity_id: job.id, metadata: { job_id: job.id, surface: "job_list" } })
     setApplyJob({
       id: job.id,
       title: job.title,
@@ -346,10 +377,10 @@ export function BoardPage() {
         <div className="container mx-auto px-4 py-4 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
             <div className="h-9 w-9 rounded-lg bg-zinc-900 text-white flex items-center justify-center font-bold">Tz</div>
-            <div className="min-w-0">
-              <div className="font-semibold leading-tight truncate">Truckinzy Jobs</div>
+            {/* <div className="min-w-0">
+            <div className="font-semibold leading-tight truncate">GatiHire Jobs</div>
               <div className="text-xs text-muted-foreground truncate">Logistics • Transport • Supply Chain</div>
-            </div>
+            </div> */}
           </div>
           <div className="flex items-center gap-2">
             {isAuthed ? (
@@ -366,7 +397,7 @@ export function BoardPage() {
               <Button
                 onClick={async () => {
                   try {
-                    localStorage.setItem("truckinzy_candidate_intent", JSON.stringify({ type: "apply", jobId: "__browse__" }))
+                    localStorage.setItem("gatihire_candidate_intent", JSON.stringify({ type: "apply", jobId: "__browse__" }))
                   } catch {}
                   await supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: `${window.location.origin}/board` } })
                 }}
@@ -383,12 +414,14 @@ export function BoardPage() {
           <CardContent className="p-4">
             <div className="grid grid-cols-1 lg:grid-cols-[1fr_200px_260px_140px] gap-3 items-stretch">
               <div className="relative">
-                <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
-                <Input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
+                <SuggestionInput
+                  value={draftQuery}
+                  onValueChange={setDraftQuery}
+                  suggestions={INTERNAL_SEARCH_SUGGESTIONS}
                   placeholder="job title, company, skill or department"
-                  className="pl-9 h-10 bg-white"
+                  inputClassName="h-10 bg-white"
+                  maxItems={8}
+                  onEnter={commitSearch}
                 />
                 <div className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted-foreground hidden md:flex">
                   {PLACEHOLDERS[placeholderIndex]}
@@ -438,7 +471,7 @@ export function BoardPage() {
                 </PopoverContent>
               </Popover>
 
-              <Button className="h-10" onClick={() => {}}>
+              <Button className="h-10" onClick={commitSearch}>
                 Search jobs
               </Button>
             </div>
@@ -523,13 +556,35 @@ export function BoardPage() {
                         <div className="min-w-0 flex-1">
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
-                              <Link href={`/board/${job.id}`} className="block font-semibold text-base sm:text-lg leading-tight hover:underline truncate">
+                              <Link
+                                href={`/board/${job.id}`}
+                                onClick={() =>
+                                  trackEvent({
+                                    event_name: "board.job.viewed",
+                                    entity_type: "jobs",
+                                    entity_id: job.id,
+                                    metadata: { job_id: job.id, surface: "job_list" },
+                                  })
+                                }
+                                className="block font-semibold text-base sm:text-lg leading-tight hover:underline truncate"
+                              >
                                 {job.title}
                               </Link>
                               <div className="mt-1 text-sm text-muted-foreground truncate">{job.client_name || "Company"}</div>
                             </div>
                             <Button variant="ghost" size="icon" asChild className="shrink-0">
-                              <Link href={`/board/${job.id}`} aria-label="View details">
+                              <Link
+                                href={`/board/${job.id}`}
+                                aria-label="View details"
+                                onClick={() =>
+                                  trackEvent({
+                                    event_name: "board.job.viewed",
+                                    entity_type: "jobs",
+                                    entity_id: job.id,
+                                    metadata: { job_id: job.id, surface: "job_list" },
+                                  })
+                                }
+                              >
                                 <ArrowRight className="h-4 w-4" />
                               </Link>
                             </Button>
@@ -593,14 +648,15 @@ export function BoardPage() {
                 ) : (
                   <div className="space-y-3">
                     <div className="rounded-lg border bg-muted/30 p-3">
-                      <div className="font-semibold">Know more about latest logistics jobs</div>
-                      <div className="mt-1 text-sm text-muted-foreground">Create a profile to get a personalised feed and easy apply.</div>
+                      <div className="font-semibold">India's Fastest Growing Logistics Hiring Platform</div>
+                      <div className="mt-1 text-sm text-muted-foreground">Create your profile in 60 seconds. Get hired faster.</div>
                     </div>
                     <Button
                       className="w-full gap-2"
                       onClick={async () => {
+                        trackEvent({ event_name: "board.signup.started", metadata: { method: "google" } })
                         try {
-                          localStorage.setItem("truckinzy_candidate_intent", JSON.stringify({ type: "apply", jobId: "__browse__" }))
+                          localStorage.setItem("gatihire_candidate_intent", JSON.stringify({ type: "apply", jobId: "__browse__" }))
                         } catch {}
                         await supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: `${window.location.origin}/board` } })
                       }}

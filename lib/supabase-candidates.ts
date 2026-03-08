@@ -71,6 +71,47 @@ export class SupabaseCandidateService {
     }
   }
 
+  private static buildInList(values: string[]) {
+    const items = values.map((value) => `"${String(value).replace(/"/g, '\\"')}"`).join(",")
+    return `(${items})`
+  }
+
+  private static async getInternalUserFilters() {
+    const { data: roleRows } = await supabaseAdmin.from("user_roles").select("auth_user_id")
+    const authUserIds = Array.from(
+      new Set(
+        (roleRows ?? [])
+          .map((row: any) => String(row?.auth_user_id || "").trim())
+          .filter((id: string) => id.length > 0)
+      )
+    )
+
+    if (authUserIds.length === 0) return { authUserIds: [], emails: [] }
+
+    const { data: profileRows } = await supabaseAdmin
+      .from("internal_users")
+      .select("email")
+      .in("auth_user_id", authUserIds)
+
+    const emails = (profileRows ?? [])
+      .map((row: any) => String(row?.email || "").trim().toLowerCase())
+      .filter((email: string) => email.length > 0)
+
+    return { authUserIds, emails }
+  }
+
+  private static applyInternalUserExclusions(query: any, filters: { authUserIds: string[]; emails: string[] }) {
+    if (filters.authUserIds.length > 0) {
+      const list = this.buildInList(filters.authUserIds)
+      query = query.or(`auth_user_id.is.null,auth_user_id.not.in.${list}`)
+    }
+    if (filters.emails.length > 0) {
+      const list = this.buildInList(filters.emails)
+      query = query.or(`email.is.null,email.not.in.${list}`)
+    }
+    return query
+  }
+
   // Convert ComprehensiveCandidateData to Supabase insert format
   private static mapCandidateToInsert(candidate: Omit<ComprehensiveCandidateData, 'id'>): CandidateInsert {
     return {
@@ -136,37 +177,74 @@ export class SupabaseCandidateService {
   }
 
   // Search candidates using Full Text Search (search_vector)
-  static async searchCandidatesByText(query: string, limit: number = 50): Promise<ComprehensiveCandidateData[]> {
+  static async searchCandidatesByText(query: string, limit: number = 50, includeDetails: boolean = true): Promise<ComprehensiveCandidateData[]> {
     try {
       if (!query.trim()) return [];
 
       // Format query for websearch_to_tsquery or plainto_tsquery
       // "websearch" handles quotes and +/- better
-      const { data, error } = await supabase
+      const filters = await this.getInternalUserFilters()
+      let queryBuilder: any = supabaseAdmin
         .from('candidates')
         .select('*')
         .textSearch('search_vector', query, {
           type: 'websearch',
           config: 'english'
         })
-        .limit(limit);
+        .limit(limit)
+
+      queryBuilder = this.applyInternalUserExclusions(queryBuilder, filters)
+      const { data, error } = await queryBuilder
+
+      let rows = data
 
       if (error) {
-        console.error('Error searching candidates by text:', error);
-        throw error;
+        console.warn('Text search failed, falling back to ilike search:', error)
+        rows = null
       }
 
-      const candidates = (data || []).map(row => this.mapRowToCandidate(row));
+      if (!rows || rows.length === 0) {
+        const terms = query
+          .toLowerCase()
+          .replace(/[^a-z0-9\s]/g, ' ')
+          .split(/\s+/)
+          .map((t) => t.trim())
+          .filter((t) => t.length >= 3)
+          .slice(0, 8)
+
+        if (!terms.length) return []
+
+        const parts: string[] = []
+        for (const t of terms) {
+          const like = `%${t}%`
+          parts.push(`name.ilike.${like}`)
+          parts.push(`current_role.ilike.${like}`)
+          parts.push(`current_company.ilike.${like}`)
+          parts.push(`location.ilike.${like}`)
+          parts.push(`summary.ilike.${like}`)
+          parts.push(`resume_text.ilike.${like}`)
+        }
+
+        let fallbackBuilder: any = supabaseAdmin.from('candidates').select('*').or(parts.join(',')).limit(limit)
+        fallbackBuilder = this.applyInternalUserExclusions(fallbackBuilder, filters)
+        const { data: fallbackRows, error: fallbackError } = await fallbackBuilder
+        if (fallbackError) {
+          console.error('Fallback ilike search failed:', fallbackError)
+          return []
+        }
+        rows = fallbackRows
+      }
+
+      const candidates = (rows || []).map((row: CandidateRow) => this.mapRowToCandidate(row));
       
-      // We need to attach work/edu for these results too
-      // Reuse the logic from getAllCandidates/getCandidatesPaginated
-      // Ideally extract this to a helper, but for now duplicate inline to be safe
-      const candidateIds = candidates.map(c => c.id).filter((id): id is string => !!id);
+      const candidateIds = includeDetails
+        ? candidates.map((c: ComprehensiveCandidateData) => c.id).filter((id: string): id is string => !!id)
+        : []
       if (candidateIds.length > 0) {
          try {
           const [{ data: workExps }, { data: educations }] = await Promise.all([
-            supabase.from('work_experience').select('*').in('candidate_id', candidateIds),
-            supabase.from('education').select('*').in('candidate_id', candidateIds)
+            supabaseAdmin.from('work_experience').select('*').in('candidate_id', candidateIds),
+            supabaseAdmin.from('education').select('*').in('candidate_id', candidateIds)
           ]);
 
           const workByCandidate = new Map<string, any[]>();
@@ -197,7 +275,7 @@ export class SupabaseCandidateService {
             });
           });
 
-          candidates.forEach(c => {
+          candidates.forEach((c: ComprehensiveCandidateData) => {
             if (c.id) {
                 c.workExperience = workByCandidate.get(c.id) || [];
                 c.education = eduByCandidate.get(c.id) || [];
@@ -215,24 +293,55 @@ export class SupabaseCandidateService {
     }
   }
 
+  static async searchCandidatesByCurrentRole(terms: string[], limit: number = 200): Promise<ComprehensiveCandidateData[]> {
+    try {
+      const cleanTerms = Array.from(new Set((terms || []).map((t) => String(t || "").trim()).filter(Boolean))).slice(0, 8)
+      if (cleanTerms.length === 0) return []
+
+      const filters = await this.getInternalUserFilters()
+      const clauses = cleanTerms.map((t) => `current_role.ilike.%${t}%`)
+      let queryBuilder: any = supabaseAdmin
+        .from('candidates')
+        .select('*')
+        .or(clauses.join(','))
+        .limit(limit)
+
+      queryBuilder = this.applyInternalUserExclusions(queryBuilder, filters)
+      const { data, error } = await queryBuilder
+      if (error) {
+        console.error('Current role search failed:', error)
+        return []
+      }
+
+      return (data || []).map((row: CandidateRow) => this.mapRowToCandidate(row))
+    } catch (error) {
+      console.error('Failed to search candidates by current role:', error)
+      return []
+    }
+  }
+
   // Get all candidates
   static async getAllCandidates(includeDetails: boolean = true): Promise<ComprehensiveCandidateData[]> {
     try {
-      const { data, error } = await supabase
+      const filters = await this.getInternalUserFilters()
+      let queryBuilder: any = supabase
         .from('candidates')
         .select('*')
         .order('uploaded_at', { ascending: false })
+
+      queryBuilder = this.applyInternalUserExclusions(queryBuilder, filters)
+      const { data, error } = await queryBuilder
 
       if (error) {
         console.error('Error fetching candidates:', error)
         throw error
       }
 
-      const candidates = (data || []).map(row => this.mapRowToCandidate(row))
+      const candidates = (data || []).map((row: CandidateRow) => this.mapRowToCandidate(row))
 
       // Attach detailed work experience and education in bulk
       if (includeDetails) {
-        const candidateIds = candidates.map(c => c.id).filter((id): id is string => !!id)
+        const candidateIds = candidates.map((c: ComprehensiveCandidateData) => c.id).filter((id: string): id is string => !!id)
         if (candidateIds.length > 0) {
           try {
             const chunkSize = 200
@@ -281,7 +390,7 @@ export class SupabaseCandidateService {
               })
             })
 
-            candidates.forEach(c => {
+            candidates.forEach((c: ComprehensiveCandidateData) => {
               const cid = c.id
               if (cid) {
                 c.workExperience = workByCandidate.get(cid) || []
@@ -321,7 +430,8 @@ export class SupabaseCandidateService {
     const to = from + perPage - 1
 
     try {
-      let query = supabase
+      const filters = await this.getInternalUserFilters()
+      let query = supabaseAdmin
         .from('candidates')
         .select('*', { count: 'exact' })
         .order(sortBy, { ascending: sortOrder === 'asc' })
@@ -363,6 +473,8 @@ export class SupabaseCandidateService {
         query = query.or(searchConditions.join(','))
       }
 
+      query = this.applyInternalUserExclusions(query, filters)
+
       // IMPORTANT: Apply range (pagination) AFTER filters to ensure we search entire database first
       const { data, error, count } = await query.range(from, to)
 
@@ -371,15 +483,15 @@ export class SupabaseCandidateService {
         throw error
       }
 
-      const candidates = (data || []).map(row => this.mapRowToCandidate(row))
+      const candidates = (data || []).map((row: CandidateRow) => this.mapRowToCandidate(row))
 
       // Attach detailed work experience and education for the paginated set
-      const candidateIds = candidates.map(c => c.id).filter(Boolean)
+      const candidateIds = candidates.map((c: ComprehensiveCandidateData) => c.id).filter(Boolean)
       if (candidateIds.length > 0) {
         try {
           const [{ data: workExps, error: workErr }, { data: educations, error: eduErr }] = await Promise.all([
-            supabase.from('work_experience').select('*').in('candidate_id', candidateIds),
-            supabase.from('education').select('*').in('candidate_id', candidateIds)
+            supabaseAdmin.from('work_experience').select('*').in('candidate_id', candidateIds),
+            supabaseAdmin.from('education').select('*').in('candidate_id', candidateIds)
           ])
 
           if (workErr) console.warn('Work experience fetch (paginated) error:', workErr)
@@ -411,7 +523,7 @@ export class SupabaseCandidateService {
             })
           })
 
-          candidates.forEach(c => {
+          candidates.forEach((c: ComprehensiveCandidateData) => {
             if (c.id) {
                 c.workExperience = workByCandidate.get(c.id) || [];
                 c.education = eduByCandidate.get(c.id) || [];
@@ -527,7 +639,7 @@ export class SupabaseCandidateService {
     try {
       const candidateData = this.mapCandidateToInsert(candidate)
       
-      const { data, error } = await supabase
+      const { data, error } = await supabaseAdmin
         .from('candidates')
         .insert([candidateData])
         .select('id')
@@ -543,7 +655,7 @@ export class SupabaseCandidateService {
       // Store work experience data if available
       if (candidate.workExperience && candidate.workExperience.length > 0) {
         for (const exp of candidate.workExperience) {
-          const { error: insertError } = await supabase
+          const { error: insertError } = await supabaseAdmin
             .from('work_experience')
             .insert({
               candidate_id: candidateId,
@@ -563,7 +675,7 @@ export class SupabaseCandidateService {
       // Store education data if available
       if (candidate.education && candidate.education.length > 0) {
         for (const edu of candidate.education) {
-          const { error: insertError } = await supabase
+          const { error: insertError } = await supabaseAdmin
             .from('education')
             .insert({
               candidate_id: candidateId,
@@ -869,7 +981,7 @@ export class SupabaseCandidateService {
       // Always update the updated_at timestamp
       updateData.updated_at = new Date().toISOString()
 
-      const { error } = await supabase
+      const { error } = await supabaseAdmin
         .from('candidates')
         .update(updateData)
         .eq('id', id)
@@ -882,7 +994,7 @@ export class SupabaseCandidateService {
       // Handle work experience separately if provided
       if (updates.workExperience && updates.workExperience.length > 0) {
         // First delete existing work experience entries for this candidate
-        const { error: deleteError } = await supabase
+        const { error: deleteError } = await supabaseAdmin
           .from('work_experience')
           .delete()
           .eq('candidate_id', id)
@@ -894,7 +1006,7 @@ export class SupabaseCandidateService {
         
         // Then insert new work experience entries
         for (const exp of updates.workExperience) {
-          const { error: insertError } = await supabase
+          const { error: insertError } = await supabaseAdmin
             .from('work_experience')
             .insert({
               candidate_id: id,
@@ -914,7 +1026,7 @@ export class SupabaseCandidateService {
       // Handle education separately if provided
       if (updates.education && updates.education.length > 0) {
         // First delete existing education entries for this candidate
-        const { error: deleteError } = await supabase
+        const { error: deleteError } = await supabaseAdmin
           .from('education')
           .delete()
           .eq('candidate_id', id)
@@ -926,7 +1038,7 @@ export class SupabaseCandidateService {
         
         // Then insert new education entries
         for (const edu of updates.education) {
-          const { error: insertError } = await supabase
+          const { error: insertError } = await supabaseAdmin
             .from('education')
             .insert({
               candidate_id: id,
@@ -952,14 +1064,49 @@ export class SupabaseCandidateService {
   // Delete candidate
   static async deleteCandidate(id: string): Promise<boolean> {
     try {
-      const { error } = await supabase
+      // 1. Get candidate info to find file name
+      const { data: candidate, error: fetchErr } = await supabaseAdmin
+        .from('candidates')
+        .select('file_name, auth_user_id')
+        .eq('id', id)
+        .single()
+
+      if (fetchErr) {
+        console.error('Error fetching candidate for deletion:', fetchErr)
+        throw fetchErr
+      }
+
+      // 2. Delete file from storage if it exists
+      if (candidate?.file_name) {
+        try {
+          await deleteFileFromSupabase(candidate.file_name)
+          console.log(`Deleted file ${candidate.file_name} from storage`)
+        } catch (storageErr) {
+          console.warn('Failed to delete file from storage during candidate deletion:', storageErr)
+          // Continue deleting the record even if file deletion fails
+        }
+      }
+
+      // 3. Delete from related tables (in case CASCADE is not set up)
+      await Promise.all([
+        supabaseAdmin.from('work_experience').delete().eq('candidate_id', id),
+        supabaseAdmin.from('education').delete().eq('candidate_id', id),
+        supabaseAdmin.from('file_storage').delete().eq('candidate_id', id),
+        supabaseAdmin.from('parsing_jobs').delete().eq('candidate_id', id),
+        supabaseAdmin.from('resume_parse_jobs').delete().eq('candidate_id', id),
+        supabaseAdmin.from('applications').delete().eq('candidate_id', id),
+        supabaseAdmin.from('job_invites').delete().eq('candidate_id', id),
+      ])
+
+      // 4. Delete the candidate record
+      const { error: deleteErr } = await supabaseAdmin
         .from('candidates')
         .delete()
         .eq('id', id)
 
-      if (error) {
-        console.error('Error deleting candidate:', error)
-        throw error
+      if (deleteErr) {
+        console.error('Error deleting candidate record:', deleteErr)
+        throw deleteErr
       }
 
       return true
@@ -1071,7 +1218,7 @@ export class SupabaseCandidateService {
   // Search candidates using full-text search
   static async searchCandidates(query: string): Promise<ComprehensiveCandidateData[]> {
     try {
-      const { data, error } = await supabase
+      const { data, error } = await supabaseAdmin
         .rpc('search_candidates', { search_query: query })
 
       if (error) {
@@ -1080,23 +1227,23 @@ export class SupabaseCandidateService {
       }
 
       // Get full candidate data for search results
-      const candidateIds = (data || []).map((result: any) => result.id)
+      const candidateIds = (data || []).map((result: any) => result.result_id || result.id).filter(Boolean)
       
       if (candidateIds.length === 0) {
         return []
       }
 
-      const { data: candidates, error: candidatesError } = await supabase
-        .from('candidates')
-        .select('*')
-        .in('id', candidateIds)
+      const filters = await this.getInternalUserFilters()
+      let queryBuilder = supabaseAdmin.from('candidates').select('*').in('id', candidateIds)
+      queryBuilder = this.applyInternalUserExclusions(queryBuilder, filters)
+      const { data: candidates, error: candidatesError } = await queryBuilder
 
       if (candidatesError) {
         console.error('Error fetching search results:', candidatesError)
         throw candidatesError
       }
 
-      return (candidates || []).map(row => this.mapRowToCandidate(row))
+      return (candidates || []).map((row: CandidateRow) => this.mapRowToCandidate(row))
     } catch (error) {
       console.error('Failed to search candidates:', error)
       throw error
@@ -1106,32 +1253,38 @@ export class SupabaseCandidateService {
   // Search candidates by skills
   static async searchCandidatesBySkills(skills: string[]): Promise<ComprehensiveCandidateData[]> {
     try {
-      const { data, error } = await supabase
+      const { data, error } = await supabaseAdmin
         .rpc('search_candidates_by_skills', { skills })
 
       if (error) {
+        const msg = String((error as any)?.message || "")
+        const code = String((error as any)?.code || "")
+        if (code === "42883" && /unnest\(jsonb\) does not exist/i.test(msg)) {
+          console.warn("Skill search RPC is incompatible with current DB schema (technical_skills is jsonb). Falling back.")
+          return []
+        }
         console.error('Error searching candidates by skills:', error)
         throw error
       }
 
       // Get full candidate data for search results
-      const candidateIds = (data || []).map((result: any) => result.id)
+      const candidateIds = (data || []).map((result: any) => result.result_id || result.id).filter(Boolean)
       
       if (candidateIds.length === 0) {
         return []
       }
 
-      const { data: candidates, error: candidatesError } = await supabase
-        .from('candidates')
-        .select('*')
-        .in('id', candidateIds)
+      const filters = await this.getInternalUserFilters()
+      let queryBuilder = supabaseAdmin.from('candidates').select('*').in('id', candidateIds)
+      queryBuilder = this.applyInternalUserExclusions(queryBuilder, filters)
+      const { data: candidates, error: candidatesError } = await queryBuilder
 
       if (candidatesError) {
         console.error('Error fetching skill search results:', candidatesError)
         throw candidatesError
       }
 
-      return (candidates || []).map(row => this.mapRowToCandidate(row))
+      return (candidates || []).map((row: CandidateRow) => this.mapRowToCandidate(row))
     } catch (error) {
       console.error('Failed to search candidates by skills:', error)
       throw error
@@ -1147,7 +1300,7 @@ export class SupabaseCandidateService {
       }
 
       // Call the match_candidates function - Supabase will handle vector conversion
-      const { data, error } = await supabase
+      const { data, error } = await supabaseAdmin
         .rpc('match_candidates', {
           query_embedding: embedding,
           match_threshold: threshold,
@@ -1168,10 +1321,10 @@ export class SupabaseCandidateService {
       const similarityMap = new Map(data.map((r: any) => [r.id, r.similarity]))
 
       // Fetch full candidate data
-      const { data: candidates, error: candidatesError } = await supabase
-        .from('candidates')
-        .select('*')
-        .in('id', candidateIds)
+      const filters = await this.getInternalUserFilters()
+      let queryBuilder = supabaseAdmin.from('candidates').select('*').in('id', candidateIds)
+      queryBuilder = this.applyInternalUserExclusions(queryBuilder, filters)
+      const { data: candidates, error: candidatesError } = await queryBuilder
 
       if (candidatesError) {
         console.error('Error fetching vector search results:', candidatesError)
@@ -1179,7 +1332,7 @@ export class SupabaseCandidateService {
       }
 
       // Map to ComprehensiveCandidateData and preserve similarity score
-      const results = (candidates || []).map(row => {
+      const results = (candidates || []).map((row: CandidateRow) => {
         const candidate = this.mapRowToCandidate(row)
         // Attach similarity score for relevance ranking
         ;(candidate as any).vectorSimilarity = similarityMap.get(row.id) || 0

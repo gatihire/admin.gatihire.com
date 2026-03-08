@@ -121,7 +121,10 @@ export async function cachedFetchJson<T>(
   return getSessionCached<T>(
     key,
     async () => {
-      const res = await fetch(input, init)
+      const res = await fetch(input, {
+        credentials: (init as any)?.credentials ?? "include",
+        ...init,
+      })
       const data = await res.json().catch(() => null)
       if (!res.ok) {
         const msg = (data as any)?.error || (data as any)?.message || "Request failed"
@@ -134,7 +137,13 @@ export async function cachedFetchJson<T>(
 }
 
 export function getBoardAppBaseUrl() {
-  const raw = String(process.env.NEXT_PUBLIC_BOARD_APP_BASE_URL || process.env.BOARD_APP_BASE_URL || "").trim()
+  const raw = String(
+    process.env.NEXT_PUBLIC_CANDIDATE_APP_BASE_URL
+      || process.env.CANDIDATE_APP_BASE_URL
+      || process.env.NEXT_PUBLIC_BOARD_APP_BASE_URL
+      || process.env.BOARD_APP_BASE_URL
+      || ""
+  ).trim()
   const base = raw.length ? raw : "http://localhost:3001"
   return base.replace(/\/$/, "")
 }

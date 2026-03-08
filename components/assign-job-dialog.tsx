@@ -86,7 +86,7 @@ export function AssignJobDialog({ candidateId, open, onOpenChange, candidateName
         const inv = await fetch("/api/job-invites", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jobId: selectedJob, candidateId, resend: true })
+          body: JSON.stringify({ jobId: selectedJob, candidateId, resend: true, sendWhatsapp: true })
         })
         const data = await inv.json().catch(() => null)
         if (!inv.ok) throw new Error(data?.error || "Failed to create invite")

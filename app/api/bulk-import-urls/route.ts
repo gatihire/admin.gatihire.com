@@ -6,7 +6,7 @@ import { SupabaseCandidateService } from '@/lib/supabase-candidates';
 import { ensureResumeBucketExists } from '@/lib/supabase';
 import { supabaseAdmin } from '@/lib/supabase';
 import { logger } from '@/lib/logger';
-import { cookies } from 'next/headers';
+import { getInternalAuthContext, hasPermission } from '@/lib/internal-auth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -275,13 +275,9 @@ async function processFile(
 }
 
 export async function POST(req: NextRequest) {
-  // Authorization: require login cookie or valid admin token (same as upload-resume)
-  const authCookie = req.cookies.get('auth')?.value;
-  const authHeader = req.headers.get('authorization');
-  const hasAdminToken = authHeader === `Bearer ${process.env.ADMIN_TOKEN}`;
-  if (authCookie !== 'true' && !hasAdminToken) {
-    return new Response('Unauthorized', { status: 401 });
-  }
+  const ctx = await getInternalAuthContext(req)
+  if (!ctx) return new Response('Unauthorized', { status: 401 })
+  if (!hasPermission(ctx, 'candidates.edit')) return new Response('Forbidden', { status: 403 })
 
   const body = await req.json();
   const rawUrls: string[] = body.urls || [];

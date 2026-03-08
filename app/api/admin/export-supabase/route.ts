@@ -1,14 +1,11 @@
 import { NextRequest, NextResponse } from "next/server"
 import { SupabaseCandidateService } from "@/lib/supabase-candidates"
+import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 
 export async function GET(request: NextRequest) {
-  // Authorization: require login cookie or valid admin token
-  const authCookie = request.cookies.get("auth")?.value
-  const authHeader = request.headers.get("authorization")
-  const hasAdminToken = authHeader === `Bearer ${process.env.ADMIN_TOKEN}`
-  if (authCookie !== "true" && !hasAdminToken) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-  }
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "export.data")) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
 
   try {
     const { searchParams } = new URL(request.url)

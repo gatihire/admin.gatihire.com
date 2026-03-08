@@ -212,6 +212,17 @@ async function assessResumeDocument(text: string): Promise<{ isResume: boolean; 
     return { isResume: true, docType: "resume", confidence: 0.8, reason: "Looks like a resume." }
   }
 
+  const hasEmail = emailRe.test(lower)
+  const hasPhone = phoneRe.test(lower)
+  const hasLinkedIn = lower.includes("linkedin.com")
+  const hasContactSignal = hasEmail || hasPhone || hasLinkedIn
+  const hasSectionSignal = /\bexperience\b|\bemployment\b|\bwork history\b|\beducation\b|\bskills\b|\bprojects?\b|\bportfolio\b/i.test(lower)
+  const hasResumeKeyword = /\bresume\b|\bcv\b/i.test(lower.slice(0, 400))
+
+  if (t.length >= 200 && hasContactSignal && (hasSectionSignal || hasResumeKeyword || score >= 2)) {
+    return { isResume: true, docType: "resume", confidence: 0.65, reason: "Resume signals detected." }
+  }
+
   if (score <= -3) {
     return {
       isResume: false,
@@ -289,9 +300,18 @@ function isExtractionErrorMarker(text: string): boolean {
   return /^(error extracting text from|doc processing error:)/i.test(t)
 }
 
+function normalizeForNameMatch(value: string): string {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[^\p{L}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
+}
+
 function isNameConsistentWithText(name: string, resumeText: string): boolean {
-  const n = (name || "").trim().toLowerCase()
-  const t = (resumeText || "").trim().toLowerCase()
+  const n = normalizeForNameMatch(name)
+  const t = normalizeForNameMatch(resumeText)
   if (!n || !t) return false
   const tokens = n.split(/\s+/).filter((x) => x.length >= 3)
   if (!tokens.length) return false
@@ -475,8 +495,8 @@ ${limitedText}
 
 Return ONLY the JSON object:`
 
-    // Try different Gemini models with fallback (prioritize 2.0-flash which is available)
-    const models = [process.env.GEMINI_MODEL || "gemini-2.0-flash", "gemini-2.5-flash"]
+    // Try different Gemini models with fallback (prioritize gemini-3.1-flash-lite which is available)
+    const models = [process.env.GEMINI_MODEL || "gemini-3.1-flash-lite-preview", "gemini-2.5-flash"]
     let lastError = null
 
     for (const modelName of models) {
@@ -863,7 +883,7 @@ function extractNameFromText(text: string): string {
     }
     
     // Look for name patterns with more flexibility
-    const namePattern = /^[A-Z][a-zA-Z\s\.\-']{2,50}$/
+    const namePattern = /^[\p{L}][\p{L}\s\.\-']{2,50}$/u
     if (namePattern.test(trimmedLine) && trimmedLine.split(' ').length >= 2 && trimmedLine.split(' ').length <= 4) {
       return trimmedLine
     }
@@ -886,7 +906,7 @@ function extractActualPersonName(text: string): string | null {
     if (w.length < 2 || w.length > 4) return false
     if (/^\d|@/.test(s)) return false
     if (s.length < 3 || s.length > 60) return false
-    const lettersOnly = w.every(t => /^[A-Za-z\-'.]+$/.test(t))
+    const lettersOnly = w.every(t => /^[\p{L}\-'.]+$/u.test(t))
     return lettersOnly
   }
   const candidates: { name: string; score: number; idx: number }[] = []
@@ -909,6 +929,21 @@ function extractActualPersonName(text: string): string | null {
   if (candidates.length) {
     candidates.sort((a, b) => b.score - a.score || a.idx - b.idx)
     return candidates[0].name
+  }
+
+  if (lines.length) {
+    const top = lines[0]
+    const cleaned = top.replace(emailRegex, " ").replace(phoneRegex, " ").trim()
+    const tokens = cleaned.split(/\s+/).filter((tok) => /^[\p{L}]{2,}$/u.test(tok))
+    const stop = new Set(stopWords.map((x) => x.toLowerCase()))
+    const nameTokens: string[] = []
+    for (const tok of tokens) {
+      if (stop.has(tok.toLowerCase())) break
+      if (tok.length > 20) break
+      nameTokens.push(tok)
+      if (nameTokens.length >= 4) break
+    }
+    if (nameTokens.length >= 2) return nameTokens.join(" ")
   }
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i].toLowerCase()

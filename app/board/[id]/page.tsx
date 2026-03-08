@@ -7,6 +7,7 @@ import { Separator } from "@/components/ui/separator"
 import { ArrowLeft, MapPin, Briefcase, Clock, DollarSign, Calendar } from "lucide-react"
 import { supabase } from "@/lib/supabase"
 import { JobApplyWidget } from "@/components/board/JobApplyWidget"
+import { BoardAnalytics } from "@/components/board/BoardAnalytics"
 
 export const revalidate = 0
 
@@ -44,6 +45,7 @@ export default async function JobPage(props: { params: Promise<{ id: string }> }
 
   return (
     <div className="min-h-screen bg-gray-50 pb-12">
+      <BoardAnalytics jobId={id} />
       <header className="bg-white border-b sticky top-0 z-10">
         <div className="container mx-auto py-4 px-4 flex items-center justify-between">
             <Button variant="ghost" asChild>

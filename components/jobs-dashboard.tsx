@@ -3,15 +3,18 @@
 import { useMemo, useState, useEffect } from "react"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Plus, Search, MapPin, Briefcase, Users, Clock, MoreHorizontal } from "lucide-react"
+import { Plus, Search, MapPin, Briefcase, Clock, MoreHorizontal } from "lucide-react"
 import { CreateJobDialog } from "./create-job-dialog"
 import { formatDistanceToNow } from "date-fns"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { cachedFetchJson, getBoardJobApplyUrl, getSessionCached, invalidateSessionCache, peekSessionCache } from "@/lib/utils"
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Pagination, PaginationContent, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious } from "@/components/ui/pagination"
+import { SuggestionInput } from "@/components/ui/suggestion-input"
+import { INTERNAL_SEARCH_SUGGESTIONS } from "@/lib/search-suggestions"
 
 interface Job {
   id: string
@@ -46,6 +49,13 @@ interface Job {
   skills_must_have?: string[] | null
   skills_good_to_have?: string[] | null
   sub_category?: string | null
+  source?: string | null
+  is_external_link?: boolean | null
+  external_link?: string | null
+  auto_matchmaking_enabled?: boolean | null
+  messaging_preferences?: string | null
+  outreach_sent_count?: number | null
+  outreach_responded_count?: number | null
 }
 
 export function JobsDashboard() {
@@ -55,6 +65,10 @@ export function JobsDashboard() {
   const [clients, setClients] = useState<{ id: string; name: string; slug: string; logo_url?: string | null }[]>([])
   const [statusFilter, setStatusFilter] = useState<string>("all")
   const [clientFilter, setClientFilter] = useState<string>("all")
+  const [sourceFilter, setSourceFilter] = useState<string>("all")
+  const [page, setPage] = useState<number>(1)
+  const perPage = 50
+  const [total, setTotal] = useState<number>(0)
   const [createOpen, setCreateOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
   const [editingJob, setEditingJob] = useState<Job | null>(null)
@@ -66,7 +80,6 @@ export function JobsDashboard() {
   const jobCountsCacheKey = "internal:jobs:counts"
 
   useEffect(() => {
-    fetchJobs()
     fetchClients()
   }, [])
 
@@ -96,57 +109,55 @@ export function JobsDashboard() {
     const payload = await getSessionCached(
       jobCountsCacheKey,
       async () => {
-        const counts: Record<string, number> = {}
-        const pendings: Record<string, number> = {}
-        const dbCounts: Record<string, number> = {}
-        await Promise.all(
-          (data || []).map(async (job: Job) => {
-            try {
-              const apps = await cachedFetchJson<any[]>(
-                `internal:jobs:/api/applications?jobId=${job.id}`,
-                `/api/applications?jobId=${job.id}`,
-                undefined,
-                { ttlMs: 60_000 },
-              )
-              counts[job.id] = apps.length
-              pendings[job.id] = (apps || []).filter((a: any) => a.status === "applied").length
-            } catch {}
-            try {
-              const dm = await cachedFetchJson<{ total: number }>(
-                `internal:jobs:/api/jobs/${job.id}/matches?countOnly=1`,
-                `/api/jobs/${job.id}/matches?countOnly=1`,
-                undefined,
-                { ttlMs: 60_000 },
-              )
-              dbCounts[job.id] = dm.total || 0
-            } catch {}
-          })
+        const ids = (data || []).map((j) => j.id).filter(Boolean)
+        const idsKey = ids.slice().sort().join(",")
+        const out = await cachedFetchJson<{
+          appCounts: Record<string, number>
+          pendingCounts: Record<string, number>
+          dbMatchCounts: Record<string, number>
+        }>(
+          `internal:jobs:/api/jobs/stats?ids=${idsKey}`,
+          `/api/jobs/stats?ids=${encodeURIComponent(idsKey)}`,
+          undefined,
+          { ttlMs: 60_000 },
         )
-        return { appCounts: counts, pendingCounts: pendings, dbMatchCounts: dbCounts }
+        return out
       },
       { ttlMs: 60_000, force: Boolean(opts?.force) },
     )
     applyCounts(payload as { appCounts: Record<string, number>; pendingCounts: Record<string, number>; dbMatchCounts: Record<string, number> })
   }
 
-  const fetchJobs = async (opts?: { force?: boolean }) => {
+  const fetchJobs = async (opts?: { force?: boolean; page?: number }) => {
     const force = Boolean(opts?.force)
-    const cachedJobs = !force ? peekSessionCache<Job[]>(jobsCacheKey) : null
-    const cachedCounts = !force ? peekSessionCache<{ appCounts: Record<string, number>; pendingCounts: Record<string, number>; dbMatchCounts: Record<string, number> }>(jobCountsCacheKey) : null
-    if (cachedJobs && cachedJobs.length) {
-      setJobs(cachedJobs)
+    const targetPage = Math.max(1, Number(opts?.page ?? page) || 1)
+    const url = `/api/jobs?paginate=true&page=${targetPage}&perPage=${perPage}&status=${encodeURIComponent(statusFilter)}&source=${encodeURIComponent(sourceFilter)}&clientId=${encodeURIComponent(clientFilter)}&search=${encodeURIComponent(searchQuery)}`
+    const cacheKey = `${jobsCacheKey}:${url}`
+
+    const cachedPage = !force ? peekSessionCache<{ items: Job[]; total: number }>(cacheKey) : null
+    const cachedCounts = !force
+      ? peekSessionCache<{ appCounts: Record<string, number>; pendingCounts: Record<string, number>; dbMatchCounts: Record<string, number> }>(jobCountsCacheKey)
+      : null
+
+    if (cachedPage && Array.isArray(cachedPage.items)) {
+      setJobs(cachedPage.items)
+      setTotal(typeof cachedPage.total === "number" ? cachedPage.total : cachedPage.items.length)
       setLoading(false)
     } else {
       setLoading(true)
     }
+
     if (cachedCounts) applyCounts(cachedCounts)
+
     try {
-      const data = await cachedFetchJson<Job[]>(jobsCacheKey, "/api/jobs", undefined, {
-        ttlMs: 2 * 60_000,
+      const data = await cachedFetchJson<{ items: Job[]; total: number; page: number; perPage: number }>(cacheKey, url, undefined, {
+        ttlMs: 60_000,
         force,
       })
-      setJobs(data)
-      await fetchJobCounts(data, { force })
+      const items = Array.isArray((data as any)?.items) ? (data as any).items : []
+      setJobs(items)
+      setTotal(typeof (data as any)?.total === "number" ? (data as any).total : items.length)
+      await fetchJobCounts(items, { force })
     } catch (error) {
       console.error("Failed to fetch jobs", error)
     } finally {
@@ -154,27 +165,24 @@ export function JobsDashboard() {
     }
   }
 
-  const clientsById = useMemo(() => new Map(clients.map((c) => [c.id, c])), [clients])
+  const refreshAll = async () => {
+    invalidateSessionCache("internal:jobs:", { prefix: true })
+    invalidateSessionCache(jobCountsCacheKey)
+    setPage(1)
+    await fetchJobs({ force: true, page: 1 })
+    await fetchClients({ force: true })
+  }
 
-  const filteredJobs = jobs
-    .filter((job) => {
-      if (statusFilter === "all") return true
-      return job.status === statusFilter
-    })
-    .filter((job) => {
-      if (clientFilter === "all") return true
-      return (job.client_id || "") === clientFilter
-    })
-    .filter((job) => {
-      const q = searchQuery.toLowerCase()
-      return (
-        job.title.toLowerCase().includes(q) ||
-        String(job.industry || "").toLowerCase().includes(q) ||
-        String(job.location || "").toLowerCase().includes(q) ||
-        (job.client_name || "").toLowerCase().includes(q) ||
-        (job.client_id && clientsById.get(job.client_id)?.name.toLowerCase().includes(q))
-      )
-    })
+  const clientsById = useMemo(() => new Map(clients.map((c) => [c.id, c])), [clients])
+  const totalPages = Math.max(1, Math.ceil(total / perPage))
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      fetchJobs({ force: true })
+    }, 250)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, statusFilter, clientFilter, sourceFilter, searchQuery])
 
   return (
     <div className="space-y-6">
@@ -248,66 +256,145 @@ export function JobsDashboard() {
         )}
       </div>
 
-      <div className="flex items-center gap-2">
-        <div className="relative flex-1 max-w-sm">
-          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Search jobs..."
-            className="pl-8"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
-        </div>
+      <Card className="border-zinc-200">
+        <CardContent className="pt-4 space-y-4">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-12">
+            <div className="md:col-span-4">
+              <div className="text-xs text-zinc-500 mb-1">Search</div>
+              <div className="relative">
+                <SuggestionInput
+                  value={searchQuery}
+                  onValueChange={(v) => {
+                    setSearchQuery(v)
+                    setPage(1)
+                  }}
+                  suggestions={INTERNAL_SEARCH_SUGGESTIONS}
+                  placeholder="Search jobs..."
+                />
+              </div>
+            </div>
 
-        <div className="w-[180px]">
-          <Select value={statusFilter} onValueChange={setStatusFilter}>
-            <SelectTrigger>
-              <SelectValue placeholder="Status" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All statuses</SelectItem>
-              <SelectItem value="open">Open</SelectItem>
-              <SelectItem value="inactive">Closed</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+            <div className="md:col-span-2">
+              <div className="text-xs text-zinc-500 mb-1">Status</div>
+              <Select
+                value={statusFilter}
+                onValueChange={(v) => {
+                  setStatusFilter(v)
+                  setPage(1)
+                }}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Status" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All statuses</SelectItem>
+                  <SelectItem value="open">Open</SelectItem>
+                  <SelectItem value="inactive">Closed</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
 
-        <div className="w-[240px]">
-          <Select value={clientFilter} onValueChange={setClientFilter}>
-            <SelectTrigger>
-              <SelectValue placeholder="Client" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All clients</SelectItem>
-              {clients.map((c) => (
-                <SelectItem key={c.id} value={c.id}>
-                  {c.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
+            <div className="md:col-span-3">
+              <div className="text-xs text-zinc-500 mb-1">Source</div>
+              <Tabs
+                value={sourceFilter}
+                onValueChange={(v) => {
+                  setSourceFilter(v)
+                  setPage(1)
+                }}
+              >
+                <TabsList className="w-full justify-start">
+                  <TabsTrigger value="all" className="flex-1">All</TabsTrigger>
+                  <TabsTrigger value="truckinzy" className="flex-1">Truckinzy Side</TabsTrigger>
+                  <TabsTrigger value="employee" className="flex-1">Employee Side</TabsTrigger>
+                </TabsList>
+              </Tabs>
+            </div>
+
+            <div className="md:col-span-2">
+              <div className="text-xs text-zinc-500 mb-1">Client</div>
+              <Select
+                value={clientFilter}
+                onValueChange={(v) => {
+                  setClientFilter(v)
+                  setPage(1)
+                }}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Client" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All clients</SelectItem>
+                  {clients.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="md:col-span-1">
+              <div className="text-xs text-zinc-500 mb-1">&nbsp;</div>
+              <Button variant="outline" className="w-full" onClick={refreshAll}>
+                Refresh
+              </Button>
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <div className="text-sm text-gray-600">
+              Page <span className="font-medium">{page}</span> of <span className="font-medium">{totalPages}</span> • Showing{" "}
+              <span className="font-medium">{jobs.length}</span> of <span className="font-medium">{total}</span>
+            </div>
+            <Pagination>
+              <PaginationContent>
+                <PaginationItem>
+                  <PaginationPrevious
+                    href="#"
+                    aria-disabled={page <= 1}
+                    onClick={(e) => {
+                      e.preventDefault()
+                      if (page > 1) setPage(page - 1)
+                    }}
+                  />
+                </PaginationItem>
+                <PaginationItem>
+                  <PaginationLink href="#" isActive>
+                    {page}
+                  </PaginationLink>
+                </PaginationItem>
+                <PaginationItem>
+                  <PaginationNext
+                    href="#"
+                    aria-disabled={page >= totalPages}
+                    onClick={(e) => {
+                      e.preventDefault()
+                      if (page < totalPages) setPage(page + 1)
+                    }}
+                  />
+                </PaginationItem>
+              </PaginationContent>
+            </Pagination>
+          </div>
+        </CardContent>
+      </Card>
 
       {loading ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {[1, 2, 3].map(i => (
+          {[1, 2, 3].map((i) => (
             <div key={i} className="h-40 bg-gray-100 rounded-lg animate-pulse" />
           ))}
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {filteredJobs.map((job) => {
+          {jobs.map((job) => {
             const clientName = (job.client_id && clientsById.get(job.client_id)?.name) || job.client_name || ""
             const clientLogo = job.client_id ? (clientsById.get(job.client_id)?.logo_url || null) : null
             const pending = pendingCounts[job.id] || 0
 
             return (
-              <Card
-                key={job.id}
-                className="cursor-pointer border-zinc-200 hover:border-zinc-300 hover:shadow-sm transition flex flex-col"
-                onClick={() => router.push(`/jobs/${job.id}`)}
-              >
+              <Card key={job.id} className="cursor-pointer border-zinc-200 hover:border-zinc-300 hover:shadow-sm transition flex flex-col" onClick={() => router.push(`/jobs/${job.id}`)}>
                 <CardHeader className="pb-3">
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-center gap-2">
@@ -362,6 +449,15 @@ export function JobsDashboard() {
                         >
                           Change status
                         </DropdownMenuItem>
+                        {!job.is_external_link && (
+                          <DropdownMenuItem
+                            onClick={() => {
+                              window.open(`/jobs/${job.id}/outreach`, "_blank")
+                            }}
+                          >
+                            Send Outreach Messages
+                          </DropdownMenuItem>
+                        )}
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </div>
@@ -389,6 +485,18 @@ export function JobsDashboard() {
                       <Briefcase className="h-3.5 w-3.5" />
                       <span className="truncate">{job.employment_type ? String(job.employment_type).replace(/_/g, " ") : "—"}</span>
                     </div>
+                    {job.is_external_link && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">External Link</span>
+                      </div>
+                    )}
+                    {job.outreach_sent_count && job.outreach_sent_count > 0 && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs bg-green-100 text-green-800 px-2 py-1 rounded">
+                          {job.outreach_sent_count} outreach sent • {job.outreach_responded_count || 0} responded
+                        </span>
+                      </div>
+                    )}
                   </div>
                 </CardContent>
 
@@ -417,11 +525,8 @@ export function JobsDashboard() {
               </Card>
             )
           })}
-          {filteredJobs.length === 0 && (
-            <div className="col-span-full text-center py-12 text-muted-foreground">
-              No jobs found. Create one to get started.
-            </div>
-          )}
+
+          {jobs.length === 0 && <div className="col-span-full text-center py-12 text-muted-foreground">No jobs found.</div>}
         </div>
       )}
     </div>

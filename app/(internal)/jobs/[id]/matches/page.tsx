@@ -1,19 +1,21 @@
 import Link from "next/link"
-import { supabase } from "@/lib/supabase"
+import { supabaseAdmin } from "@/lib/supabase"
 import { Button } from "@/components/ui/button"
 import { CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { ArrowLeft, ExternalLink } from "lucide-react"
 import MatchesClient from "@/components/job-matches-client"
 import { getBoardJobApplyUrl } from "@/lib/utils"
+import { requireAnyInternalPermission } from "@/lib/server-internal-permissions"
 
 interface JobPageProps {
   params: Promise<{ id: string }>
 }
 
 export default async function MatchesPage(props: JobPageProps) {
+  await requireAnyInternalPermission(["jobs.view", "jobs.edit", "jobs.post"])
   const { id } = await props.params
-  const { data: job } = await supabase.from("jobs").select("*").eq("id", id).single()
+  const { data: job } = await supabaseAdmin.from("jobs").select("*").eq("id", id).single()
 
   return (
     <div className="space-y-6">

@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
+import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -73,7 +74,18 @@ interface CreateJobDialogProps {
   }>
 }
 
+function formatMoneyIN(value: number) {
+  if (!value) return ""
+  return new Intl.NumberFormat("en-IN").format(value)
+}
+
+function parseMoneyIN(raw: string) {
+  const digits = raw.replace(/[^\d]/g, "")
+  return digits ? parseInt(digits, 10) : 0
+}
+
 export function CreateJobDialog({ onJobCreated, open, onOpenChange, trigger, jobId, initialValues }: CreateJobDialogProps) {
+  const router = useRouter()
   const [loading, setLoading] = useState(false)
   const { toast } = useToast()
   const [clients, setClients] = useState<{ id: string; name: string; slug: string }[]>([])
@@ -96,6 +108,11 @@ export function CreateJobDialog({ onJobCreated, open, onOpenChange, trigger, job
     client_id: (initialValues as any)?.client_id || "",
     apply_type: (initialValues as any)?.apply_type || "in_platform",
     external_apply_url: (initialValues as any)?.external_apply_url || "",
+    source: (initialValues as any)?.source || "truckinzy",
+    is_external_link: (initialValues as any)?.is_external_link || false,
+    external_link: (initialValues as any)?.external_link || "",
+    auto_matchmaking_enabled: (initialValues as any)?.auto_matchmaking_enabled !== false,
+    messaging_preferences: (initialValues as any)?.messaging_preferences || "both",
     skills_must_have: Array.isArray((initialValues as any)?.skills_must_have)
       ? ((initialValues as any).skills_must_have as string[])
         : [],
@@ -115,6 +132,12 @@ export function CreateJobDialog({ onJobCreated, open, onOpenChange, trigger, job
   const [internalOpen, setInternalOpen] = useState(false)
   const [industryOpen, setIndustryOpen] = useState(false)
   const [generateHintOpen, setGenerateHintOpen] = useState(false)
+  const [outreachProgressOpen, setOutreachProgressOpen] = useState(false)
+  const [outreachProgressTitle, setOutreachProgressTitle] = useState<string>("")
+  const [outreachProgressDetail, setOutreachProgressDetail] = useState<string>("")
+  const [outreachProgressJobId, setOutreachProgressJobId] = useState<string>("")
+  const [outreachProgressCounts, setOutreachProgressCounts] = useState<{ email: number; whatsapp: number; total: number } | null>(null)
+  const [outreachProgressError, setOutreachProgressError] = useState<string | null>(null)
   const [minRequirements, setMinRequirements] = useState("")
   const [mustSkillInput, setMustSkillInput] = useState("")
   const [goodSkillInput, setGoodSkillInput] = useState("")
@@ -222,6 +245,11 @@ export function CreateJobDialog({ onJobCreated, open, onOpenChange, trigger, job
         client_id: (initialValues as any)?.client_id || "",
         apply_type: (initialValues as any)?.apply_type || "in_platform",
         external_apply_url: (initialValues as any)?.external_apply_url || "",
+        source: (initialValues as any)?.source || "truckinzy",
+        is_external_link: (initialValues as any)?.is_external_link || false,
+        external_link: (initialValues as any)?.external_link || "",
+        auto_matchmaking_enabled: (initialValues as any)?.auto_matchmaking_enabled !== false,
+        messaging_preferences: (initialValues as any)?.messaging_preferences || "both",
         skills_must_have: Array.isArray((initialValues as any)?.skills_must_have) ? ((initialValues as any).skills_must_have as string[]) : [],
         skills_good_to_have: Array.isArray((initialValues as any)?.skills_good_to_have) ? ((initialValues as any).skills_good_to_have as string[]) : [],
         education_min: (initialValues as any)?.education_min || "",
@@ -293,6 +321,11 @@ export function CreateJobDialog({ onJobCreated, open, onOpenChange, trigger, job
         client_id: optional(formData.client_id),
         apply_type: formData.apply_type === "external" ? "external" : "in_platform",
         external_apply_url: formData.apply_type === "external" ? optional(formData.external_apply_url) : null,
+        source: formData.source,
+        is_external_link: formData.is_external_link,
+        external_link: formData.is_external_link ? optional(formData.external_link) : null,
+        auto_matchmaking_enabled: formData.auto_matchmaking_enabled,
+        messaging_preferences: formData.messaging_preferences,
         industry: optional(formData.industry),
         sub_category: optional(formData.sub_category),
         location: formData.location,
@@ -329,14 +362,58 @@ export function CreateJobDialog({ onJobCreated, open, onOpenChange, trigger, job
         body: JSON.stringify(payload)
       })
 
-      if (!res.ok) throw new Error("Failed to create job")
+      const created = await res.json().catch(() => null)
+      if (!res.ok) throw new Error(created?.error || "Failed to create job")
 
       toast({
         title: "Success",
         description: jobId ? "Job updated successfully" : "Job created successfully",
       })
+
+      const createdJobId = String(created?.id || "")
+      const shouldAutoOutreach = !jobId && !formData.is_external_link && formData.auto_matchmaking_enabled && (formData.messaging_preferences === "email" || formData.messaging_preferences === "whatsapp" || formData.messaging_preferences === "both")
+      const pref = formData.messaging_preferences
+
       setIsOpen(false)
       onJobCreated()
+
+      if (shouldAutoOutreach && createdJobId) {
+        setOutreachProgressOpen(true)
+        setOutreachProgressJobId(createdJobId)
+        setOutreachProgressCounts(null)
+        setOutreachProgressError(null)
+        setOutreachProgressTitle("Finding relevant candidates")
+        setOutreachProgressDetail("Preparing to send outreach messages…")
+
+        try {
+          setOutreachProgressTitle("Preparing messages")
+          const outRes = await fetch(`/api/jobs/${createdJobId}/outreach`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              jobId: createdJobId,
+              messagingPreference: pref,
+              autoMatchmaking: true,
+            })
+          })
+
+          const outData = await outRes.json().catch(() => null)
+          if (!outRes.ok) throw new Error(outData?.error || "Failed to send outreach")
+
+          const emailCount = Number(outData?.sent_by_channel?.email || 0)
+          const whatsappCount = Number(outData?.sent_by_channel?.whatsapp || 0)
+          const total = Number(outData?.messages_sent || emailCount + whatsappCount || 0)
+
+          setOutreachProgressCounts({ email: emailCount, whatsapp: whatsappCount, total })
+          setOutreachProgressTitle("Outreach completed")
+          setOutreachProgressDetail(`Sent ${total} messages (${emailCount} email, ${whatsappCount} WhatsApp).`)
+        } catch (e: any) {
+          setOutreachProgressTitle("Outreach failed")
+          setOutreachProgressDetail("Could not send outreach messages.")
+          setOutreachProgressError(e?.message || "Failed")
+        }
+      }
+
       setFormData({
         title: "",
         industry: "",
@@ -355,6 +432,11 @@ export function CreateJobDialog({ onJobCreated, open, onOpenChange, trigger, job
         client_id: "",
         apply_type: "in_platform",
         external_apply_url: "",
+        source: "truckinzy",
+        is_external_link: false,
+        external_link: "",
+        auto_matchmaking_enabled: true,
+        messaging_preferences: "both",
         skills_must_have: [],
         skills_good_to_have: [],
         education_min: "",
@@ -383,10 +465,20 @@ export function CreateJobDialog({ onJobCreated, open, onOpenChange, trigger, job
   const INDUSTRY_OPTIONS = [
     "Logistics",
     "Transportation",
-    "Supply Chain",
     "Warehousing",
+    "Supply Chain",
+    "Freight Forwarding",
+    "3PL / 4PL",
+    "Last-mile Delivery",
+    "Line Haul",
+    "E-commerce Logistics",
+    "Cold Chain",
     "Manufacturing",
-    "E-commerce",
+    "Retail",
+    "FMCG",
+    "Automotive",
+    "Construction",
+    "Healthcare",
     "Technology",
     "Finance",
   ]
@@ -521,13 +613,14 @@ export function CreateJobDialog({ onJobCreated, open, onOpenChange, trigger, job
               </Select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="location">Job location</Label>
-              <Input
-                id="location"
-                value={formData.location}
-                onChange={(e) => setFormData({ ...formData, location: e.target.value })}
-              />
-            </div>
+            <Label htmlFor="location">Job location</Label>
+            <Input
+              id="location"
+              value={formData.location}
+              placeholder="e.g. Bhiwandi, Manesar, Sriperumbudur"
+              onChange={(e) => setFormData({ ...formData, location: e.target.value })}
+            />
+          </div>
           </div>
 
           <div className="space-y-2">
@@ -595,8 +688,8 @@ export function CreateJobDialog({ onJobCreated, open, onOpenChange, trigger, job
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-4">
-            <div className="space-y-2">
+          <div className="grid grid-cols-12 gap-4">
+            <div className="col-span-4 space-y-2">
               <Label htmlFor="salary_type">Salary type</Label>
               <Select value={formData.salary_type} onValueChange={(val) => setFormData({ ...formData, salary_type: val })}>
                 <SelectTrigger>
@@ -604,31 +697,40 @@ export function CreateJobDialog({ onJobCreated, open, onOpenChange, trigger, job
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="monthly">Monthly</SelectItem>
+                  <SelectItem value="annual">Annual</SelectItem>
                   <SelectItem value="daily">Daily</SelectItem>
                   <SelectItem value="per_trip">Per Trip</SelectItem>
                   <SelectItem value="hourly">Hourly</SelectItem>
                 </SelectContent>
               </Select>
             </div>
-            <div className="space-y-2">
+            <div className="col-span-4 space-y-2">
               <Label htmlFor="salary_min">Min amount</Label>
-              <Input
-                id="salary_min"
-                type="number"
-                min={0}
-                value={formData.salary_min}
-                onChange={(e) => setFormData({ ...formData, salary_min: parseInt(e.target.value || "0", 10) })}
-              />
+              <div className="relative">
+                <span className="absolute left-3 top-2.5 text-muted-foreground">₹</span>
+                <Input
+                  id="salary_min"
+                  inputMode="numeric"
+                  placeholder="e.g. 25,000"
+                  className="pl-7"
+                  value={formatMoneyIN(formData.salary_min)}
+                  onChange={(e) => setFormData({ ...formData, salary_min: parseMoneyIN(e.target.value) })}
+                />
+              </div>
             </div>
-            <div className="space-y-2">
+            <div className="col-span-4 space-y-2">
               <Label htmlFor="salary_max">Max amount</Label>
-              <Input
-                id="salary_max"
-                type="number"
-                min={0}
-                value={formData.salary_max}
-                onChange={(e) => setFormData({ ...formData, salary_max: parseInt(e.target.value || "0", 10) })}
-              />
+              <div className="relative">
+                <span className="absolute left-3 top-2.5 text-muted-foreground">₹</span>
+                <Input
+                  id="salary_max"
+                  inputMode="numeric"
+                  placeholder="e.g. 35,000"
+                  className="pl-7"
+                  value={formatMoneyIN(formData.salary_max)}
+                  onChange={(e) => setFormData({ ...formData, salary_max: parseMoneyIN(e.target.value) })}
+                />
+              </div>
             </div>
           </div>
 
@@ -667,27 +769,112 @@ export function CreateJobDialog({ onJobCreated, open, onOpenChange, trigger, job
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label>Apply type</Label>
-              <Select value={formData.apply_type} onValueChange={(val) => setFormData({ ...formData, apply_type: val })}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="in_platform">In-platform apply</SelectItem>
-                  <SelectItem value="external">External apply (company site)</SelectItem>
-                </SelectContent>
-              </Select>
+          <div className="rounded-xl border bg-muted/30 p-4">
+            <div className="text-sm font-semibold mb-4">Application & Outreach Settings</div>
+            
+            <div className="grid grid-cols-2 gap-4 mb-4">
+              <div className="space-y-2">
+                <Label>Job Source</Label>
+                <Select value={formData.source} onValueChange={(val) => setFormData({ ...formData, source: val })}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="truckinzy">Truckinzy Side</SelectItem>
+                    <SelectItem value="employee">Employee Side</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">Where this job posting originates from</p>
+              </div>
+              <div className="space-y-2">
+                <Label>Apply Method</Label>
+                <Select value={formData.apply_type} onValueChange={(val) => setFormData({ ...formData, apply_type: val })}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="in_platform">Apply on GatiHire</SelectItem>
+                    <SelectItem value="external">External Company Site</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">How candidates will apply to this job</p>
+              </div>
             </div>
-            <div className="space-y-2">
-              <Label>External apply URL</Label>
-              <Input
-                value={formData.external_apply_url}
-                disabled={formData.apply_type !== "external"}
-                placeholder={formData.apply_type === "external" ? "https://company.com/careers/job-id" : "Not required"}
-                onChange={(e) => setFormData({ ...formData, external_apply_url: e.target.value })}
-              />
+
+            {formData.apply_type === "external" && (
+              <div className="space-y-2 mb-4 p-3 bg-blue-50 rounded-lg border border-blue-200">
+                <Label htmlFor="external_apply_url" className="text-blue-900">External Application URL</Label>
+                <Input
+                  id="external_apply_url"
+                  value={formData.external_apply_url}
+                  placeholder="https://company.com/careers/job-id"
+                  onChange={(e) => setFormData({ ...formData, external_apply_url: e.target.value })}
+                  className="border-blue-200 focus:ring-blue-500"
+                />
+                <p className="text-xs text-blue-700">Candidates will be redirected to this URL to complete their application</p>
+              </div>
+            )}
+
+            <div className="space-y-4 border-t pt-4">
+              <div className="p-3 bg-amber-50 rounded-lg border border-amber-200">
+                <div className="flex items-start space-x-3">
+                  <Checkbox
+                    id="is_external_link"
+                    checked={formData.is_external_link}
+                    onCheckedChange={(checked) => setFormData({ ...formData, is_external_link: checked as boolean })}
+                    className="mt-1"
+                  />
+                  <div className="flex-1">
+                    <Label htmlFor="is_external_link" className="font-medium text-amber-900">External Link Job (No outreach/matchmaking)</Label>
+                    <p className="text-xs text-amber-700 mt-1">Enable this for jobs that should not have candidate outreach or matchmaking. These jobs will be listed as external opportunities only.</p>
+                  </div>
+                </div>
+                
+                {formData.is_external_link && (
+                  <div className="mt-3 space-y-2 ml-6">
+                    <Label htmlFor="external_link" className="text-amber-900">External Job Posting URL</Label>
+                    <Input
+                      id="external_link"
+                      value={formData.external_link}
+                      placeholder="https://external-company.com/job-posting"
+                      onChange={(e) => setFormData({ ...formData, external_link: e.target.value })}
+                      className="border-amber-200 focus:ring-amber-500"
+                    />
+                    <p className="text-xs text-amber-700">The actual job posting URL on the external company's website</p>
+                  </div>
+                )}
+              </div>
+
+              {!formData.is_external_link && (
+                <div className="grid grid-cols-2 gap-4 p-3 bg-green-50 rounded-lg border border-green-200">
+                  <div className="space-y-2">
+                    <Label className="text-green-900">Messaging Preferences</Label>
+                    <Select value={formData.messaging_preferences} onValueChange={(val) => setFormData({ ...formData, messaging_preferences: val })}>
+                      <SelectTrigger className="border-green-200">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="both">Email + WhatsApp</SelectItem>
+                        <SelectItem value="email">Email Only</SelectItem>
+                        <SelectItem value="whatsapp">WhatsApp Only</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-green-700">How to reach out to matched candidates</p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-green-900">Auto Matchmaking</Label>
+                    <div className="flex items-center space-x-2">
+                      <Checkbox
+                        id="auto_matchmaking_enabled"
+                        checked={formData.auto_matchmaking_enabled}
+                        onCheckedChange={(checked) => setFormData({ ...formData, auto_matchmaking_enabled: checked as boolean })}
+                      />
+                      <Label htmlFor="auto_matchmaking_enabled" className="text-green-900">Enable automatic candidate matching</Label>
+                    </div>
+                    <p className="text-xs text-green-700">Automatically find and outreach to relevant candidates</p>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -717,7 +904,7 @@ export function CreateJobDialog({ onJobCreated, open, onOpenChange, trigger, job
                 <Input
                   value={mustSkillInput}
                   onChange={(e) => setMustSkillInput(e.target.value)}
-                  placeholder="Type a skill and press Enter"
+                  placeholder="e.g. Warehouse Mgmt, Excel, Tally (Type & Enter)"
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
                       e.preventDefault()
@@ -985,6 +1172,48 @@ export function CreateJobDialog({ onJobCreated, open, onOpenChange, trigger, job
                 {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 Generate
               </Button>
+            </div>
+          </div>
+        </UiDialogContent>
+      </UiDialog>
+
+      <UiDialog open={outreachProgressOpen} onOpenChange={setOutreachProgressOpen}>
+        <UiDialogContent className="sm:max-w-[520px]">
+          <UiDialogHeader>
+            <UiDialogTitle>{outreachProgressTitle || "Outreach"}</UiDialogTitle>
+          </UiDialogHeader>
+          <div className="space-y-3">
+            <div className="text-sm text-muted-foreground">{outreachProgressDetail}</div>
+            {!outreachProgressCounts && !outreachProgressError ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Working…
+              </div>
+            ) : null}
+            {outreachProgressCounts ? (
+              <div className="rounded-lg border bg-muted/30 p-3 text-sm">
+                <div>Total sent: {outreachProgressCounts.total}</div>
+                <div>Email: {outreachProgressCounts.email}</div>
+                <div>WhatsApp: {outreachProgressCounts.whatsapp}</div>
+              </div>
+            ) : null}
+            {outreachProgressError ? (
+              <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{outreachProgressError}</div>
+            ) : null}
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setOutreachProgressOpen(false)}>
+                Close
+              </Button>
+              {outreachProgressJobId ? (
+                <Button
+                  onClick={() => {
+                    setOutreachProgressOpen(false)
+                    window.open(`/jobs/${outreachProgressJobId}/outreach`, "_blank")
+                  }}
+                >
+                  View Dashboard
+                </Button>
+              ) : null}
             </div>
           </div>
         </UiDialogContent>

@@ -3,22 +3,20 @@ import { supabaseAdmin } from "@/lib/supabase"
 import { uploadFileToSupabase } from "@/lib/supabase-storage-utils"
 import { ensureClientLogosBucketExists } from "@/lib/supabase"
 import { CLIENT_LOGOS_BUCKET_NAME } from "@/lib/supabase-storage-utils"
+import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 
 export const runtime = "nodejs"
-
-function requireAuth(request: NextRequest) {
-  const authCookie = request.cookies.get("auth")?.value
-  if (authCookie === "true") return true
-  const authHeader = request.headers.get("authorization")
-  return Boolean(authHeader?.startsWith("Bearer "))
-}
 
 function sanitizeName(name: string) {
   return name.replace(/[^a-zA-Z0-9._-]+/g, "_")
 }
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  if (!requireAuth(request)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "jobs.post") && !hasPermission(ctx, "jobs.edit")) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  }
   const { id } = await params
 
   const ok = await ensureClientLogosBucketExists()

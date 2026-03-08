@@ -1,15 +1,11 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { SupabaseCandidateService } from "@/lib/supabase-candidates"
 import { logger } from "@/lib/logger"
+import { filterRecordByRule, getFieldRule, getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 
 export async function GET(request: NextRequest) {
-  // Authorization: require login cookie or valid admin token
-  const authCookie = request.cookies.get("auth")?.value
-  const authHeader = request.headers.get("authorization")
-  const hasAdminToken = authHeader === `Bearer ${process.env.ADMIN_TOKEN}`
-  if (authCookie !== "true" && !hasAdminToken) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-  }
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
 
   try {
     const { searchParams } = new URL(request.url)
@@ -21,8 +17,37 @@ export async function GET(request: NextRequest) {
     const sortBy = searchParams.get('sortBy') ?? 'uploaded_at'
     const sortOrder = (searchParams.get('sortOrder') as 'asc' | 'desc') ?? 'desc'
 
+    const canView = hasPermission(ctx, "candidates.view") || hasPermission(ctx, "candidates.edit")
+    const canSearchOnly = hasPermission(ctx, "candidates.search-only")
+    if (!canView && !canSearchOnly) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+    }
+
+    if (!canView && canSearchOnly && !search.trim()) {
+      if (paginate) {
+        return NextResponse.json({ items: [], page, perPage, total: 0 })
+      }
+      return NextResponse.json([])
+    }
+
     logger.info(`GET /api/candidates paginate=${paginate} page=${page} perPage=${perPage} search="${search}" status="${status}"`)
     logger.info(`Fetching candidates from Supabase${paginate ? ' (paginated)' : ''}`)
+    const fieldRule = getFieldRule(ctx, "candidates.view", "candidates")
+    const canViewPii = hasPermission(ctx, "candidates.edit") || hasPermission(ctx, "candidates.pii.view")
+    const canViewSalary = hasPermission(ctx, "candidates.edit") || hasPermission(ctx, "candidates.salary.view")
+
+    const mask = (record: any) => {
+      const out = { ...record }
+      if (!canViewPii) {
+        delete out.email
+        delete out.phone
+      }
+      if (!canViewSalary) {
+        delete out.currentSalary
+        delete out.expectedSalary
+      }
+      return out
+    }
 
     if (paginate) {
       const { items, total } = await SupabaseCandidateService.getCandidatesPaginated({
@@ -91,7 +116,31 @@ export async function GET(request: NextRequest) {
       logger.info(`Paginated: page=${page} perPage=${perPage} total=${total} returned=${transformedCandidates.length}`)
       logger.info(`Returning paginated: page=${page} perPage=${perPage} total=${total} items=${transformedCandidates.length}`)
 
-      return NextResponse.json({ items: transformedCandidates, page, perPage, total })
+      const response = NextResponse.json({
+        items: transformedCandidates.map((c) => mask(filterRecordByRule(c, fieldRule))),
+        page,
+        perPage,
+        total,
+      })
+
+      if (ctx.refreshedSession) {
+        response.cookies.set("sb-access-token", ctx.refreshedSession.access_token, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === "production",
+          sameSite: "strict",
+          path: "/",
+          maxAge: ctx.refreshedSession.expires_in,
+        })
+        response.cookies.set("sb-refresh-token", ctx.refreshedSession.refresh_token, {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === "production",
+          sameSite: "strict",
+          path: "/",
+          maxAge: 60 * 60 * 24 * 30,
+        })
+      }
+
+      return response
     }
 
     const candidates = await SupabaseCandidateService.getAllCandidates()
@@ -151,7 +200,24 @@ export async function GET(request: NextRequest) {
     }))
 
     logger.info(`Retrieved ${transformedCandidates.length} candidates from Supabase`)
-    return NextResponse.json(transformedCandidates)
+    const response = NextResponse.json(transformedCandidates.map((c) => mask(filterRecordByRule(c, fieldRule))))
+    if (ctx.refreshedSession) {
+      response.cookies.set("sb-access-token", ctx.refreshedSession.access_token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        path: "/",
+        maxAge: ctx.refreshedSession.expires_in,
+      })
+      response.cookies.set("sb-refresh-token", ctx.refreshedSession.refresh_token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        path: "/",
+        maxAge: 60 * 60 * 24 * 30,
+      })
+    }
+    return response
   } catch (error) {
     console.error("❌ Failed to fetch candidates from Supabase:", error)
     return NextResponse.json(

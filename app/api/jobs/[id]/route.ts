@@ -1,14 +1,17 @@
 import { NextRequest, NextResponse } from "next/server"
-import { supabase, supabaseAdmin } from "@/lib/supabase"
+import { supabaseAdmin } from "@/lib/supabase"
+import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
+    const ctx = await getInternalAuthContext(request)
+    if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    if (!hasPermission(ctx, "jobs.view") && !hasPermission(ctx, "jobs.edit") && !hasPermission(ctx, "jobs.post")) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+    }
+
     const { id } = await params
-    const { data, error } = await supabase
-      .from("jobs")
-      .select("*")
-      .eq("id", id)
-      .single()
+    const { data, error } = await supabaseAdmin.from("jobs").select("*").eq("id", id).single()
 
     if (error) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 })
@@ -21,12 +24,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 }
 
 export async function PUT(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  // Add proper auth check
-  const authCookie = request.cookies.get("auth")?.value
-  if (authCookie !== "true") {
-      // Allow if valid bearer token present
-      const authHeader = request.headers.get("authorization")
-      if (!authHeader) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "jobs.edit") && !hasPermission(ctx, "jobs.post")) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
   }
 
   try {
@@ -115,12 +116,9 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
 }
 
 export async function DELETE(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-   // Add proper auth check
-   const authCookie = request.cookies.get("auth")?.value
-   if (authCookie !== "true") {
-       const authHeader = request.headers.get("authorization")
-       if (!authHeader) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-   }
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "jobs.edit")) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
 
   try {
     const { id } = await params

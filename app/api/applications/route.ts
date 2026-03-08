@@ -1,21 +1,20 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabase, supabaseAdmin } from "@/lib/supabase"
+import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 
 export async function GET(request: NextRequest) {
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "applications.view") && !hasPermission(ctx, "applications.manage")) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  }
+
   try {
     const { searchParams } = new URL(request.url)
     const jobId = searchParams.get("jobId")
     const candidateId = searchParams.get("candidateId")
 
-    // Check for auth cookie or hr_user cookie to verify authentication
-    const authCookie = request.cookies.get("auth")
-    const hrUserCookie = request.cookies.get("hr_user")
-    
-    // If authenticated (via custom auth), use admin client to bypass RLS
-    // Otherwise use standard client (which will likely return 0 rows due to RLS)
-    const client = (authCookie?.value === "true" || hrUserCookie?.value) ? supabaseAdmin : supabase
-
-    let query = client
+    let query = supabaseAdmin
       .from("applications")
       .select(`
         *,
@@ -46,7 +45,9 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  // Relaxed auth to ensure actions work in local/dev environments
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "applications.manage")) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
 
   try {
     const body = await request.json()
@@ -77,6 +78,7 @@ export async function POST(request: NextRequest) {
         notes,
         source,
         match_score,
+        created_by: ctx.authUser.id,
         applied_at: new Date().toISOString()
       })
       .select()
@@ -94,6 +96,7 @@ export async function POST(request: NextRequest) {
                 status: status || 'applied',
                 notes,
                 source,
+                created_by: ctx.authUser.id,
                 applied_at: new Date().toISOString()
             })
             .select()
@@ -109,6 +112,7 @@ export async function POST(request: NextRequest) {
             candidate_id,
             status: status || 'applied',
             notes,
+            created_by: ctx.authUser.id,
             applied_at: new Date().toISOString()
           })
           .select()
@@ -122,6 +126,17 @@ export async function POST(request: NextRequest) {
       console.error("Error creating application:", error)
       return NextResponse.json({ error: error.message }, { status: 500 })
     }
+
+    supabaseAdmin
+      .from("analytics_events")
+      .insert({
+        actor_auth_user_id: ctx.authUser.id,
+        event_name: "application.created",
+        entity_type: "applications",
+        entity_id: data?.id ?? null,
+        metadata: { job_id, candidate_id, status: status || "applied" },
+      })
+      .then(() => {})
 
     return NextResponse.json(data)
   } catch (error) {

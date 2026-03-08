@@ -1,12 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
-
-function requireAuth(request: NextRequest) {
-  const authCookie = request.cookies.get("auth")?.value
-  if (authCookie === "true") return true
-  const authHeader = request.headers.get("authorization")
-  return Boolean(authHeader?.startsWith("Bearer "))
-}
+import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 
 function nowIso() {
   return new Date().toISOString()
@@ -22,7 +16,11 @@ function slugify(value: string) {
 }
 
 export async function PUT(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  if (!requireAuth(request)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "jobs.post") && !hasPermission(ctx, "jobs.edit")) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  }
   const { id } = await params
 
   const body = (await request.json().catch(() => null)) as any
@@ -78,7 +76,9 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
 }
 
 export async function DELETE(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  if (!requireAuth(request)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "jobs.edit")) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
   const { id } = await params
 
   const { error } = await supabaseAdmin.from("clients").delete().eq("id", id)

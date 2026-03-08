@@ -84,6 +84,17 @@ export async function POST(request: NextRequest) {
       throw error
     }
 
+    supabaseAdmin
+      .from("analytics_events")
+      .insert({
+        actor_auth_user_id: String(user.id),
+        event_name: "board.apply.submitted",
+        entity_type: "jobs",
+        entity_id: jobId,
+        metadata: { job_id: jobId, candidate_id: candidateId, source: "candidate_board" },
+      })
+      .then(() => {})
+
     return NextResponse.json({ success: true })
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "Internal Server Error" }, { status: 500 })

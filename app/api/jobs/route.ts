@@ -1,20 +1,56 @@
 import { NextRequest, NextResponse } from "next/server"
-import { supabase, supabaseAdmin } from "@/lib/supabase"
+import { supabaseAdmin } from "@/lib/supabase"
 import { parseSearchRequirement, intelligentCandidateSearch } from "@/lib/intelligent-search"
 import { SupabaseCandidateService } from "@/lib/supabase-candidates"
+import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 
 export async function GET(request: NextRequest) {
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "jobs.view") && !hasPermission(ctx, "jobs.edit") && !hasPermission(ctx, "jobs.post")) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  }
+
   try {
     const { searchParams } = new URL(request.url)
+    const paginate = searchParams.get("paginate") === "true"
+    const page = Math.max(1, Number(searchParams.get("page") ?? "1") || 1)
+    const perPageRaw = Number(searchParams.get("perPage") ?? "50") || 50
+    const perPage = Math.min(100, Math.max(1, perPageRaw))
+
     const status = searchParams.get("status")
+    const source = searchParams.get("source")
+    const clientId = searchParams.get("clientId")
+    const q = (searchParams.get("search") || "").trim()
 
-    let query = supabase
-      .from("jobs")
-      .select("*")
-      .order("created_at", { ascending: false })
+    let query = supabaseAdmin.from("jobs").select("*", { count: paginate ? "exact" : undefined as any })
+    query = query.order("created_at", { ascending: false })
 
-    if (status) {
+    if (status && status !== "all") {
       query = query.eq("status", status)
+    }
+    if (source && source !== "all") {
+      query = query.eq("source", source)
+    }
+    if (clientId && clientId !== "all") {
+      query = query.eq("client_id", clientId)
+    }
+    if (q) {
+      const term = `%${q.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`
+      query = query.or(`title.ilike.${term},location.ilike.${term},industry.ilike.${term},client_name.ilike.${term}`)
+    }
+
+    if (paginate) {
+      const from = (page - 1) * perPage
+      const to = from + perPage - 1
+      const { data, error, count } = await query.range(from, to)
+
+      if (error) {
+        console.error("Error fetching jobs:", error)
+        return NextResponse.json({ error: error.message }, { status: 500 })
+      }
+
+      return NextResponse.json({ items: data || [], page, perPage, total: count ?? 0 })
     }
 
     const { data, error } = await query
@@ -32,15 +68,10 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  // Authorization check (simplified for now, ideally verify auth cookie or token)
-  const authCookie = request.cookies.get("auth")?.value
-  // Assuming 'true' means logged in HR/Admin for this context based on previous code
-  if (authCookie !== "true") {
-     // Also check for Bearer token for API calls
-     const authHeader = request.headers.get("authorization")
-     if (!authHeader?.startsWith("Bearer ")) {
-         return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-     }
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "jobs.post") && !hasPermission(ctx, "jobs.edit")) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
   }
 
   try {
@@ -78,6 +109,11 @@ export async function POST(request: NextRequest) {
       client_name,
       client_id,
       sections,
+      source,
+      is_external_link,
+      external_link,
+      auto_matchmaking_enabled,
+      messaging_preferences,
     } = body || {}
 
     if (!title) {
@@ -133,6 +169,12 @@ export async function POST(request: NextRequest) {
         status: status || 'open',
         client_name,
         client_id: normalizeOptionalString(client_id),
+        source: normalizeOptionalString(source) || "truckinzy",
+        is_external_link: is_external_link === true,
+        external_link: is_external_link === true ? normalizeOptionalString(external_link) : null,
+        auto_matchmaking_enabled: auto_matchmaking_enabled !== false,
+        messaging_preferences: normalizeOptionalString(messaging_preferences) || "both",
+        created_by: ctx.authUser.id,
       })
       .select()
       .single()
@@ -202,6 +244,17 @@ export async function POST(request: NextRequest) {
         console.error("Failed to generate initial matches:", matchErr)
         // Don't fail the job creation if matching fails
     }
+
+    supabaseAdmin
+      .from("analytics_events")
+      .insert({
+        actor_auth_user_id: ctx.authUser.id,
+        event_name: "job.created",
+        entity_type: "jobs",
+        entity_id: data?.id ?? null,
+        metadata: { title: data?.title ?? null, status: data?.status ?? null },
+      })
+      .then(() => {})
 
     return NextResponse.json(data)
   } catch (error) {

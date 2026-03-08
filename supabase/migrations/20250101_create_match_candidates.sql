@@ -2,14 +2,14 @@
 create extension if not exists vector;
 
 -- Add embedding column to candidates table if it doesn't exist
-alter table candidates add column if not exists embedding vector(768);
+alter table candidates add column if not exists embedding vector(1536);
 
 -- Create index for faster vector search if it doesn't exist
 create index if not exists candidates_embedding_idx on candidates using ivfflat (embedding vector_cosine_ops);
 
 -- Create the match_candidates function for vector search
 create or replace function match_candidates (
-  query_embedding vector(768),
+  query_embedding vector(1536),
   match_threshold float,
   match_count int
 )

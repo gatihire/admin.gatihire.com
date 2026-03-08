@@ -1,24 +1,25 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
-import { Search, Download, Eye, Filter, User, MapPin, Briefcase, Building, RefreshCw, Star, Trash } from "lucide-react"
+import { Search, Download, Eye, Filter, User, MapPin, Briefcase, Building, RefreshCw, Trash } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { CandidatePreviewDialog } from "./candidate-preview-dialog"
 import { useCandidates } from "@/contexts/candidate-context"
 import { logger } from "@/lib/logger"
 import { Pagination, PaginationContent, PaginationItem, PaginationLink, PaginationPrevious, PaginationNext, PaginationEllipsis } from "@/components/ui/pagination"
+import { SuggestionInput } from "@/components/ui/suggestion-input"
+import { INTERNAL_SEARCH_SUGGESTIONS } from "@/lib/search-suggestions"
 
 interface Candidate {
   _id: string
   name: string
-  email: string
-  phone: string
+  email?: string
+  phone?: string
   currentRole: string
   desiredRole?: string
   currentCompany?: string
@@ -49,6 +50,7 @@ export function CandidateDashboard() {
   const { 
     candidates, 
     isLoading, 
+    error,
     refreshCandidates, 
     lastFetched,
     currentPage,
@@ -62,7 +64,6 @@ export function CandidateDashboard() {
     setStatusFilter,
     sortBy,
     setSortBy,
-    sortOrder,
     setSortOrder,
   } = useCandidates()
   
@@ -80,12 +81,6 @@ export function CandidateDashboard() {
   // Manual search handler
   const handleSearch = () => {
     setSearchQuery(localSearchTerm)
-  }
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      handleSearch()
-    }
   }
 
   // Sync context search query to local (in case it's cleared elsewhere)
@@ -539,6 +534,11 @@ export function CandidateDashboard() {
 
   return (
     <div className="space-y-6">
+      {error ? (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error}
+        </div>
+      ) : null}
       {/* Enhanced Header */}
       <div className="flex flex-col sm:flex-row justify-end items-start sm:items-center space-y-4 sm:space-y-0">
         <div className="flex items-center space-x-2">
@@ -567,13 +567,13 @@ export function CandidateDashboard() {
           <div className="flex flex-col sm:flex-row gap-4">
             <div className="flex flex-1 gap-2">
               <div className="relative flex-1">
-                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
-                <Input
-                  placeholder="Search by name, role, company, location, or skills..."
+                <SuggestionInput
                   value={localSearchTerm}
-                  onChange={(e) => setLocalSearchTerm(e.target.value)}
-                  onKeyDown={handleKeyDown}
-                  className="pl-10"
+                  onValueChange={setLocalSearchTerm}
+                  suggestions={INTERNAL_SEARCH_SUGGESTIONS}
+                  placeholder="Search by name, role, company, location, or skills..."
+                  className="w-full"
+                  onEnter={handleSearch}
                 />
               </div>
               <Button onClick={handleSearch}>Search</Button>

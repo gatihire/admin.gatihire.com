@@ -1,19 +1,11 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
+import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 
 export const runtime = "nodejs"
 
 function nowIso() {
   return new Date().toISOString()
-}
-
-function requireAuth(request: NextRequest) {
-  const authCookie = request.cookies.get("auth")?.value
-  if (authCookie === "true") return true
-  const hrUserCookie = request.cookies.get("hr_user")?.value
-  if (hrUserCookie) return true
-  const authHeader = request.headers.get("authorization")
-  return Boolean(authHeader?.startsWith("Bearer "))
 }
 
 async function ensureDefaultRounds(jobId: string) {
@@ -32,7 +24,11 @@ async function ensureDefaultRounds(jobId: string) {
 }
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  if (!requireAuth(request)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "jobs.view") && !hasPermission(ctx, "jobs.edit") && !hasPermission(ctx, "jobs.post")) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  }
   const { id: jobId } = await params
 
   await ensureDefaultRounds(jobId)
@@ -48,7 +44,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 }
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  if (!requireAuth(request)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "jobs.edit") && !hasPermission(ctx, "jobs.post")) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  }
   const { id: jobId } = await params
   const body = (await request.json().catch(() => null)) as any
 
@@ -77,7 +77,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 }
 
 export async function PUT(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  if (!requireAuth(request)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "jobs.edit") && !hasPermission(ctx, "jobs.post")) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  }
   const { id: jobId } = await params
   const body = (await request.json().catch(() => null)) as any
   const roundId = typeof body?.id === "string" ? body.id : null
@@ -104,7 +108,11 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
 }
 
 export async function DELETE(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  if (!requireAuth(request)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "jobs.edit") && !hasPermission(ctx, "jobs.post")) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  }
   const { id: jobId } = await params
   const body = (await request.json().catch(() => null)) as any
   const roundId = typeof body?.id === "string" ? body.id : null

@@ -1,12 +1,15 @@
+"use client"
+
 import { useMemo, useState, useEffect } from "react"
 import dynamic from "next/dynamic"
+import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useToast } from "@/components/ui/use-toast"
 import { Input } from "@/components/ui/input"
-import { Loader2, ArrowLeft, Calendar, ExternalLink, Eye, Link2, Mail, MessageSquare, RotateCw, Save, User, Pencil, Plus, Sparkles } from "lucide-react"
+import { Loader2, ArrowLeft, Calendar, ExternalLink, Eye, Link2, Mail, MessageSquare, RotateCw, Save, User, Pencil, Plus, Sparkles, Send, MessageCircle, CheckCircle, XCircle, Clock, ExternalLinkIcon } from "lucide-react"
 import { format, formatDistanceToNow } from "date-fns"
 import { Textarea } from "@/components/ui/textarea"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
@@ -14,7 +17,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { Label } from "@/components/ui/label"
-import { cachedFetchJson, getBoardJobApplyUrl, invalidateSessionCache, normalizeExternalUrl } from "@/lib/utils"
+import { cachedFetchJson, getBoardAppBaseUrl, getBoardJobApplyUrl, invalidateSessionCache, normalizeExternalUrl } from "@/lib/utils"
 
 const CandidatePreviewDialogDynamic = dynamic(() => import("./candidate-preview-dialog").then(m => m.CandidatePreviewDialog), {
   ssr: false,
@@ -31,6 +34,8 @@ interface Job {
   client_name?: string | null
   industry?: string | null
   employment_type?: string | null
+  is_external_link?: boolean | null
+  source?: string | null
 }
 
 type Client = {
@@ -113,6 +118,7 @@ const STATUS_COLUMNS = [
 ]
 
 export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
+  const router = useRouter()
   const [applications, setApplications] = useState<Application[]>([])
   const [loading, setLoading] = useState(true)
   const [invites, setInvites] = useState<JobInvite[]>([])
@@ -128,6 +134,8 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
   }>(null)
   const [clientOpen, setClientOpen] = useState(false)
   const [inviteEmail, setInviteEmail] = useState("")
+  const [invitePhone, setInvitePhone] = useState("")
+  const [inviteSendWhatsapp, setInviteSendWhatsapp] = useState(true)
   const [inviteCreating, setInviteCreating] = useState(false)
   const [inviteResendingId, setInviteResendingId] = useState<string | null>(null)
 
@@ -160,8 +168,14 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null)
   const [noteContent, setNoteContent] = useState("")
 
+  // Outreach data state
+  const [outreachCandidates, setOutreachCandidates] = useState<any[]>([])
+  const [outreachStats, setOutreachStats] = useState<any>(null)
+  const [outreachLoading, setOutreachLoading] = useState(false)
+
   useEffect(() => {
     fetchApplications()
+    fetchOutreachData()
   }, [job.id])
 
   useEffect(() => {
@@ -174,6 +188,24 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
         toast({ title: "Invites failed", description: e?.message || "Failed to load invites", variant: "destructive" })
       })
   }, [job.id])
+
+  const fetchOutreachData = async () => {
+    if (job.is_external_link) return // Don't fetch outreach for external link jobs
+    
+    setOutreachLoading(true)
+    try {
+      const res = await fetch(`/api/jobs/${job.id}/outreach`)
+      if (res.ok) {
+        const data = await res.json()
+        setOutreachCandidates(data.candidates || [])
+        setOutreachStats(data.stats || null)
+      }
+    } catch (error) {
+      console.error("Failed to fetch outreach data", error)
+    } finally {
+      setOutreachLoading(false)
+    }
+  }
 
   const fetchInterviewData = async (opts?: { force?: boolean }) => {
     setInterviewLoading(true)
@@ -338,8 +370,8 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
     }
   }
 
-  const inviteBase = (process.env.NEXT_PUBLIC_BOARD_APP_BASE_URL || "").replace(/\/$/, "")
-  const inviteLink = (token: string) => (inviteBase ? `${inviteBase}/invite/${token}` : `/invite/${token}`)
+  const inviteBase = getBoardAppBaseUrl()
+  const inviteLink = (token: string) => `${inviteBase}/invite/${token}`
 
   const publicApplyUrl = getBoardJobApplyUrl(job.id)
 
@@ -384,20 +416,86 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
     }
   }
 
+  const getStatusIcon = (status: string) => {
+    switch (status) {
+      case "sent":
+        return "📤"
+      case "opened":
+        return "👁️"
+      case "applied":
+        return "✅"
+      case "rejected":
+        return "❌"
+      default:
+        return "📊"
+    }
+  }
+
+  const messageStatusBadge = (status: string, type: "email" | "whatsapp") => {
+    const baseClasses = "px-2 py-1 rounded-full text-xs font-medium border"
+    switch (status) {
+      case "pending":
+        return `${baseClasses} bg-yellow-50 text-yellow-700 border-yellow-200`
+      case "sent":
+        return `${baseClasses} bg-blue-50 text-blue-700 border-blue-200`
+      case "delivered":
+        return `${baseClasses} bg-green-50 text-green-700 border-green-200`
+      case "opened":
+        return `${baseClasses} bg-purple-50 text-purple-700 border-purple-200`
+      case "failed":
+        return `${baseClasses} bg-red-50 text-red-700 border-red-200`
+      default:
+        return `${baseClasses} bg-gray-50 text-gray-700 border-gray-200`
+    }
+  }
+
+  const getMessageIcon = (type: "email" | "whatsapp", status: string) => {
+    if (type === "email") {
+      return <Mail className="h-4 w-4" />
+    } else {
+      return <MessageCircle className="h-4 w-4" />
+    }
+  }
+
   const createInvite = async () => {
     const email = inviteEmail.trim()
     if (!email) return
+    if (!/^\S+@\S+\.\S+$/.test(email)) {
+      toast({ title: "Invalid email", description: "Enter a valid email address.", variant: "destructive" })
+      return
+    }
+    const phoneRaw = invitePhone.trim()
+    const phone = phoneRaw ? phoneRaw.replace(/\s+/g, "") : ""
+    if (phone && !/^\+?\d{8,15}$/.test(phone)) {
+      toast({ title: "Invalid phone", description: "Enter a valid WhatsApp number.", variant: "destructive" })
+      return
+    }
+    const sendWhatsapp = inviteSendWhatsapp && Boolean(phone)
     setInviteCreating(true)
     try {
       const res = await fetch("/api/job-invites", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobId: job.id, email })
+        body: JSON.stringify({ jobId: job.id, email, phone: phone || undefined, sendWhatsapp })
       })
       const data = await res.json().catch(() => null)
       if (!res.ok) throw new Error(data?.error || "Failed to create invite")
       setInviteEmail("")
-      toast({ title: "Invite created", description: data?.emailSent ? "Email sent" : "Invite link created" })
+      setInvitePhone("")
+      if (data?.emailError) {
+        toast({ title: "Invite created, email failed", description: String(data.emailError), variant: "destructive" })
+      } else {
+        const parts = [data?.emailSent ? "Email sent." : "Invite link ready."]
+        if (data?.whatsappSent) {
+          parts.push("WhatsApp sent.")
+        } else if (data?.whatsappError) {
+          parts.push("WhatsApp failed.")
+        }
+        toast({
+          title: data?.created === false ? "Invite already exists" : "Invite created",
+          description: parts.join(" "),
+        })
+      }
       invalidateSessionCache(`internal:job-invites:${job.id}`)
       const refreshed = await cachedFetchJson<{ invites: JobInvite[] }>(
         `internal:job-invites:${job.id}`,
@@ -409,7 +507,6 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
       if (data?.link) {
         try {
           await navigator.clipboard.writeText(data.link)
-          toast({ title: "Copied invite link", description: data.link })
         } catch {
           // ignore
         }
@@ -431,7 +528,11 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
       })
       const data = await res.json().catch(() => null)
       if (!res.ok) throw new Error(data?.error || "Failed to resend")
-      toast({ title: "Resent", description: data?.emailSent ? "Invite email resent." : "Invite link ready." })
+      if (data?.emailError) {
+        toast({ title: "Resend failed", description: String(data.emailError), variant: "destructive" })
+      } else {
+        toast({ title: "Resent", description: data?.emailSent ? "Invite email resent." : "Invite link ready." })
+      }
       invalidateSessionCache(`internal:job-invites:${job.id}`)
       const refreshed = await cachedFetchJson<{ invites: JobInvite[] }>(
         `internal:job-invites:${job.id}`,
@@ -503,6 +604,15 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
         description: `Candidate moved to ${newStatus}`,
       })
       invalidateSessionCache(`internal:applications:job:${job.id}`)
+      invalidateSessionCache(`internal:job-interviews:${job.id}`)
+
+      if (newStatus === "interview") {
+        setActiveStage("interview")
+        setInterviewRoundId("")
+        window.setTimeout(() => {
+          fetchInterviewData({ force: true })
+        }, 0)
+      }
     } catch (error) {
       toast({
         title: "Error",
@@ -647,6 +757,16 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
             <Badge className={job.status === 'open' ? 'bg-green-500' : 'bg-gray-500'}>
               {job.status}
             </Badge>
+            {(job as any).is_external_link && (
+              <Badge variant="outline" className="bg-orange-50 text-orange-700 border-orange-200">
+                External Link
+              </Badge>
+            )}
+            {(job as any).source && (
+              <Badge variant="outline" className="bg-purple-50 text-purple-700 border-purple-200">
+                {(job as any).source === 'truckinzy' ? 'Truckinzy' : 'Employee'} Side
+              </Badge>
+            )}
             <a 
                 href={publicApplyUrl}
                 target="_blank" 
@@ -655,6 +775,17 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
             >
                 View Public Page <ExternalLink className="h-3 w-3" />
             </a>
+            {!job.is_external_link && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="ml-2"
+                onClick={() => window.open(`/jobs/${job.id}/outreach`, "_blank")}
+              >
+                <Send className="mr-2 h-4 w-4" />
+                Outreach Dashboard
+              </Button>
+            )}
           </div>
         </div>
       </div>
@@ -794,151 +925,416 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
             onClick={() => setActiveStage("invites")}
           >
             <span className={`text-xs font-medium mb-1 ${activeStage === "invites" ? "text-blue-700" : "text-gray-500"}`}>Invites</span>
-            <span className={`text-lg font-bold ${activeStage === "invites" ? "text-blue-700" : "text-gray-900"}`}>{invites.length}</span>
+            <span className={`text-lg font-bold ${activeStage === "invites" ? "text-blue-700" : "text-gray-900"}`}>
+              {invites.length + (outreachCandidates?.length || 0)}
+            </span>
           </div>
         </div>
 
         <div className="space-y-3">
-        {activeStage === "invites" ? (
-          <div className="grid gap-3">
-            <Card className="shadow-sm">
-              <CardContent className="p-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0">
-                    <div className="font-medium">Invite candidates to apply</div>
-                    <div className="mt-1 text-sm text-gray-500">
-                      Flow: <span className="font-medium text-gray-700">Sent</span> → <span className="font-medium text-gray-700">Opened</span> → <span className="font-medium text-gray-700">Applied</span>. Candidates land on the Board app and can sign up before applying.
+          {activeStage === "invites" ? (
+            <div className="grid gap-4">
+            {/* Outreach Stats Card */}
+            {!job.is_external_link && outreachStats && (
+              <Card className="shadow-sm border-blue-100 bg-gradient-to-r from-blue-50 to-indigo-50">
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="font-bold text-blue-900 text-lg">📧 Outreach Campaign</div>
+                      <div className="text-sm text-blue-700">Candidate outreach and messaging status</div>
+                    </div>
+                    <div className="flex items-center gap-6 text-sm">
+                      <div className="text-center bg-white rounded-lg p-3 shadow-sm">
+                        <div className="font-bold text-blue-900 text-lg">{outreachStats.total_outreached || 0}</div>
+                        <div className="text-blue-600 font-medium">Outreached</div>
+                      </div>
+                      <div className="text-center bg-white rounded-lg p-3 shadow-sm">
+                        <div className="font-bold text-green-700 text-lg">{outreachStats.responded || 0}</div>
+                        <div className="text-green-600 font-medium">Responded</div>
+                      </div>
+                      <div className="text-center bg-white rounded-lg p-3 shadow-sm">
+                        <div className="font-bold text-purple-700 text-lg">{outreachStats.messages_sent || 0}</div>
+                        <div className="text-purple-600 font-medium">Messages</div>
+                      </div>
                     </div>
                   </div>
-                  <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
-                    <div className="relative w-full sm:w-[320px]">
-                      <Mail className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-                      <Input
-                        value={inviteEmail}
-                        onChange={(e) => setInviteEmail(e.target.value)}
-                        placeholder="Candidate email"
-                        className="pl-9"
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            e.preventDefault()
-                            createInvite()
-                          }
-                        }}
-                      />
+                </CardContent>
+              </Card>
+            )}
+
+            {/* Create Invite Card */}
+            <Card className="shadow-sm border-indigo-100 bg-gradient-to-br from-white to-indigo-50">
+              <CardContent className="p-6">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 mb-2">
+                      <div className="h-8 w-8 rounded-full bg-indigo-100 flex items-center justify-center">
+                        <Mail className="h-4 w-4 text-indigo-600" />
+                      </div>
+                      <div className="font-bold text-lg text-indigo-900">Invite Candidates to Apply</div>
                     </div>
-                    <Button onClick={createInvite} disabled={!inviteEmail.trim() || inviteCreating} className="shrink-0">
-                      {inviteCreating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                      Create invite
-                    </Button>
+                    <div className="text-sm text-indigo-700 bg-indigo-100/50 rounded-lg p-3">
+                      {job.is_external_link 
+                        ? "Create invite links for external job opportunities"
+                        : "🎯 Flow: Send outreach → Candidate receives message → Applies via unique link"
+                      }
+                    </div>
+                  </div>
+                  <div className="flex w-full flex-col gap-3 sm:w-auto">
+                    <div className="flex w-full flex-col gap-3 sm:flex-row sm:items-center">
+                      <div className="relative w-full sm:w-[320px]">
+                        <Mail className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-indigo-400" />
+                        <Input
+                          type="email"
+                          inputMode="email"
+                          autoComplete="email"
+                          value={inviteEmail}
+                          onChange={(e) => setInviteEmail(e.target.value)}
+                          placeholder="Enter candidate email address"
+                          className="pl-9 border-indigo-200 focus:ring-indigo-500"
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault()
+                              createInvite()
+                            }
+                          }}
+                        />
+                      </div>
+                      <div className="relative w-full sm:w-[240px]">
+                        <MessageCircle className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-indigo-400" />
+                        <Input
+                          type="tel"
+                          inputMode="tel"
+                          value={invitePhone}
+                          onChange={(e) => setInvitePhone(e.target.value)}
+                          placeholder="WhatsApp number (optional)"
+                          className="pl-9 border-indigo-200 focus:ring-indigo-500"
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault()
+                              createInvite()
+                            }
+                          }}
+                        />
+                      </div>
+                      <Button
+                        onClick={createInvite}
+                        disabled={!inviteEmail.trim() || inviteCreating}
+                        className="shrink-0 bg-indigo-600 hover:bg-indigo-700 text-white"
+                      >
+                        {inviteCreating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Send className="mr-2 h-4 w-4" />}
+                        Create Invite
+                      </Button>
+                    </div>
+                    <label className="flex items-center gap-2 text-xs text-indigo-700">
+                      <input
+                        type="checkbox"
+                        checked={inviteSendWhatsapp}
+                        onChange={(e) => setInviteSendWhatsapp(e.target.checked)}
+                        disabled={!invitePhone.trim()}
+                        className="h-4 w-4 rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                      Send WhatsApp if a phone number is provided
+                    </label>
                   </div>
                 </div>
               </CardContent>
             </Card>
 
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                <div className="w-full sm:w-[200px]">
-                  <Select value={inviteStatusFilter} onValueChange={setInviteStatusFilter}>
-                    <SelectTrigger className="h-9">
-                      <SelectValue placeholder="Status" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All statuses</SelectItem>
-                      <SelectItem value="sent">Sent</SelectItem>
-                      <SelectItem value="opened">Opened</SelectItem>
-                      <SelectItem value="applied">Applied</SelectItem>
-                      <SelectItem value="rejected">Rejected</SelectItem>
-                    </SelectContent>
-                  </Select>
+            {/* Outreach Candidates Section */}
+            {!job.is_external_link && outreachCandidates.length > 0 && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between bg-gradient-to-r from-purple-50 to-pink-50 rounded-lg p-4 border border-purple-100">
+                  <div className="flex items-center gap-3">
+                    <div className="h-10 w-10 rounded-full bg-purple-100 flex items-center justify-center">
+                      <MessageCircle className="h-5 w-5 text-purple-600" />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-lg text-purple-900">Outreach Candidates</h3>
+                      <p className="text-sm text-purple-700">Candidates contacted via email and WhatsApp</p>
+                    </div>
+                  </div>
+                  <Badge variant="outline" className="bg-purple-100 text-purple-800 border-purple-200 px-3 py-1">
+                    {outreachCandidates.length} candidates
+                  </Badge>
                 </div>
-                <div className="w-full sm:w-[220px]">
-                  <Select value={inviteActivityFilter} onValueChange={setInviteActivityFilter}>
-                    <SelectTrigger className="h-9">
-                      <SelectValue placeholder="Activity" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All</SelectItem>
-                      <SelectItem value="opened">Opened link</SelectItem>
-                      <SelectItem value="not_opened">Not opened</SelectItem>
-                      <SelectItem value="applied">Applied</SelectItem>
-                      <SelectItem value="not_applied">Not applied</SelectItem>
-                    </SelectContent>
-                  </Select>
+                
+                {outreachCandidates.map((candidate) => (
+                  <Card key={candidate.id} className="shadow-sm border-purple-100 hover:shadow-md transition-shadow">
+                    <CardContent className="p-6">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-3 mb-3">
+                            <div className="h-12 w-12 rounded-full bg-gradient-to-br from-purple-100 to-pink-100 flex items-center justify-center">
+                              <span className="text-lg font-bold text-purple-700">
+                                {candidate.name?.split(" ").map((n: string) => n[0]).join("").toUpperCase() || "CN"}
+                              </span>
+                            </div>
+                            <div className="flex-1">
+                              <div className="font-bold text-lg text-gray-900">{candidate.name}</div>
+                              <div className="text-sm text-gray-600">{candidate.current_role}</div>
+                            </div>
+                            <Badge variant="outline" className={candidate.responded ? "bg-green-50 text-green-700 border-green-200 px-3 py-1" : "bg-gray-50 text-gray-700 border-gray-200 px-3 py-1"}>
+                              {candidate.responded ? "✅ Responded" : "⏳ No Response"}
+                            </Badge>
+                          </div>
+                          
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4 p-3 bg-gray-50 rounded-lg">
+                            <div className="flex items-center gap-2">
+                              <Mail className="h-4 w-4 text-gray-500" />
+                              <span className="text-sm text-gray-700">{candidate.email}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <MessageCircle className="h-4 w-4 text-gray-500" />
+                              <span className="text-sm text-gray-700">{candidate.phone}</span>
+                            </div>
+                          </div>
+
+                          {/* Message Status with Gmail/WhatsApp Icons */}
+                          {candidate.messages && candidate.messages.length > 0 && (
+                            <div className="space-y-3">
+                              <div className="flex items-center gap-2">
+                                <div className="text-sm font-bold text-gray-900">📨 Message Status:</div>
+                                <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">
+                                  {candidate.messages.length} messages sent
+                                </Badge>
+                              </div>
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                {candidate.messages.map((message: any) => (
+                                  <Card key={message.id} className="bg-white border-2 shadow-sm">
+                                    <CardContent className="p-3">
+                                      <div className="flex items-center justify-between mb-2">
+                                        <div className="flex items-center gap-2">
+                                          {message.type === "email" ? (
+                                            <Mail className="h-4 w-4 text-blue-600" />
+                                          ) : (
+                                            <MessageCircle className="h-4 w-4 text-green-600" />
+                                          )}
+                                          <span className="font-medium text-gray-900">
+                                            {message.type === "email" ? "Gmail" : "WhatsApp"}
+                                          </span>
+                                        </div>
+                                        <Badge variant="outline" className={messageStatusBadge(message.status, message.type)}>
+                                          {message.status}
+                                        </Badge>
+                                      </div>
+                                      <div className="text-xs text-gray-600">
+                                        {message.opened_at && (
+                                          <div className="flex items-center gap-1">
+                                            <Eye className="h-3 w-3" />
+                                            <span>Opened {formatDistanceToNow(new Date(message.opened_at), { addSuffix: true })}</span>
+                                          </div>
+                                        )}
+                                        {message.sent_at && (
+                                          <div className="flex items-center gap-1">
+                                            <Clock className="h-3 w-3" />
+                                            <span>Sent {formatDistanceToNow(new Date(message.sent_at), { addSuffix: true })}</span>
+                                          </div>
+                                        )}
+                                      </div>
+                                    </CardContent>
+                                  </Card>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                        
+                        <div className="flex flex-col gap-2">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-10 bg-blue-50 hover:bg-blue-100 text-blue-700 border-blue-200"
+                            onClick={() => {
+                              const link = candidate.messages?.[0]?.unique_link || "#"
+                              window.open(link, "_blank", "noopener,noreferrer")
+                            }}
+                          >
+                            <ExternalLinkIcon className="mr-2 h-4 w-4" />
+                            View Application
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-10 bg-green-50 hover:bg-green-100 text-green-700 border-green-200"
+                            onClick={() => {
+                              // Resend message functionality could be added here
+                              toast({ title: "Resend feature", description: "Resend functionality coming soon!" })
+                            }}
+                          >
+                            <RotateCw className="mr-2 h-4 w-4" />
+                            Resend Message
+                          </Button>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            )}
+
+            {/* Email Invites Section */}
+            <div className="space-y-4">
+              <div className="flex items-center justify-between bg-gradient-to-r from-blue-50 to-cyan-50 rounded-lg p-4 border border-blue-100">
+                <div className="flex items-center gap-3">
+                  <div className="h-10 w-10 rounded-full bg-blue-100 flex items-center justify-center">
+                    <Mail className="h-5 w-5 text-blue-600" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-lg text-blue-900">📧 Email Invites</h3>
+                    <p className="text-sm text-blue-700">Tracked invite links sent via email</p>
+                  </div>
                 </div>
-                <div className="w-full sm:w-[200px]">
-                  <Select value={inviteProfileFilter} onValueChange={setInviteProfileFilter}>
-                    <SelectTrigger className="h-9">
-                      <SelectValue placeholder="Profile" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All profiles</SelectItem>
-                      <SelectItem value="linked">Profile linked</SelectItem>
-                      <SelectItem value="not_linked">Not linked</SelectItem>
-                    </SelectContent>
-                  </Select>
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                  <div className="w-full sm:w-[170px]">
+                    <Select value={inviteStatusFilter} onValueChange={setInviteStatusFilter}>
+                      <SelectTrigger className="h-9 border-blue-200">
+                        <SelectValue placeholder="Status" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All statuses</SelectItem>
+                        <SelectItem value="sent">Sent</SelectItem>
+                        <SelectItem value="opened">Opened</SelectItem>
+                        <SelectItem value="applied">Applied</SelectItem>
+                        <SelectItem value="rejected">Rejected</SelectItem>
+                        <SelectItem value="expired">Expired</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="w-full sm:w-[170px]">
+                    <Select value={inviteActivityFilter} onValueChange={setInviteActivityFilter}>
+                      <SelectTrigger className="h-9 border-blue-200">
+                        <SelectValue placeholder="Activity" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All activity</SelectItem>
+                        <SelectItem value="opened">Opened</SelectItem>
+                        <SelectItem value="not_opened">Not opened</SelectItem>
+                        <SelectItem value="applied">Applied</SelectItem>
+                        <SelectItem value="not_applied">Not applied</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="w-full sm:w-[170px]">
+                    <Select value={inviteProfileFilter} onValueChange={setInviteProfileFilter}>
+                      <SelectTrigger className="h-9 border-blue-200">
+                        <SelectValue placeholder="Profile" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All profiles</SelectItem>
+                        <SelectItem value="linked">Linked</SelectItem>
+                        <SelectItem value="not_linked">Not linked</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <Badge variant="outline" className="bg-blue-100 text-blue-800 border-blue-200 px-3 py-1">
+                    {filteredInvites.length} invites
+                  </Badge>
                 </div>
               </div>
-              <div className="text-xs text-muted-foreground">Showing {filteredInvites.length} invite{filteredInvites.length === 1 ? "" : "s"}</div>
-            </div>
 
             {!filteredInvites.length ? (
-              <div className="text-center py-12 text-gray-400 text-sm border-2 border-dashed border-gray-200 rounded-lg bg-gray-50/50">
-                No invites yet. Create one above to generate a tracked invite link.
+              <div className="text-center py-12 text-gray-400 text-sm border-2 border-dashed border-gray-200 rounded-lg bg-gradient-to-b from-gray-50 to-white">
+                <div className="flex flex-col items-center">
+                  <div className="h-16 w-16 rounded-full bg-gradient-to-br from-blue-100 to-indigo-100 flex items-center justify-center mb-4">
+                    <Mail className="h-8 w-8 text-blue-500" />
+                  </div>
+                  <p className="text-gray-600 font-medium mb-2">No email invites yet</p>
+                  <p className="text-gray-500 text-sm max-w-md">
+                    {job.is_external_link 
+                      ? "Create invite links for external job opportunities" 
+                      : "Create your first invite above to generate a tracked invite link"
+                    }
+                  </p>
+                </div>
               </div>
             ) : (
               filteredInvites.map((inv) => (
-                <Card key={inv.id} className="shadow-sm">
-                  <CardContent className="p-4 space-y-2">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <div className="font-medium text-base truncate">{inv.email}</div>
-                          <Badge variant="outline" className={inviteBadgeClass(inv.status || "sent")}>
-                            {(inv.status || "sent").toUpperCase()}
+                <Card key={inv.id} className="shadow-sm hover:shadow-md transition-shadow border-blue-100">
+                  <CardContent className="p-6 space-y-3">
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-3 mb-3">
+                          <div className="h-10 w-10 rounded-full bg-gradient-to-br from-blue-100 to-indigo-100 flex items-center justify-center">
+                            <Mail className="h-5 w-5 text-blue-600" />
+                          </div>
+                          <div className="font-bold text-lg text-gray-900 truncate">{inv.email}</div>
+                          <Badge variant="outline" className={`${inviteBadgeClass(inv.status || "sent")} px-3 py-1 text-sm`}>
+                            {getStatusIcon(inv.status || "sent")} {(inv.status || "sent").toUpperCase()}
                           </Badge>
                         </div>
 
-                        <div className="mt-2 grid gap-1 text-xs text-gray-500">
-                          <div>
-                            <span className="font-medium text-gray-700">Sent:</span> {inv.sent_at ? formatDistanceToNow(new Date(inv.sent_at), { addSuffix: true }) : "—"}
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
+                          <div className="flex items-center gap-2 p-2 bg-blue-50 rounded-lg">
+                            <div className="h-6 w-6 rounded-full bg-blue-100 flex items-center justify-center">
+                              <Send className="h-3 w-3 text-blue-600" />
+                            </div>
+                            <div>
+                              <div className="font-medium text-blue-900">Sent</div>
+                              <div className="text-blue-700 text-xs">{inv.sent_at ? formatDistanceToNow(new Date(inv.sent_at), { addSuffix: true }) : "—"}</div>
+                            </div>
                           </div>
-                          <div>
-                            <span className="font-medium text-gray-700">Opened:</span> {inv.opened_at ? formatDistanceToNow(new Date(inv.opened_at), { addSuffix: true }) : "—"}
+                          <div className="flex items-center gap-2 p-2 bg-green-50 rounded-lg">
+                            <div className="h-6 w-6 rounded-full bg-green-100 flex items-center justify-center">
+                              <Eye className="h-3 w-3 text-green-600" />
+                            </div>
+                            <div>
+                              <div className="font-medium text-green-900">Opened</div>
+                              <div className="text-green-700 text-xs">{inv.opened_at ? formatDistanceToNow(new Date(inv.opened_at), { addSuffix: true }) : "Not opened"}</div>
+                            </div>
                           </div>
-                          <div>
-                            <span className="font-medium text-gray-700">Applied:</span> {inv.applied_at ? formatDistanceToNow(new Date(inv.applied_at), { addSuffix: true }) : "—"}
-                          </div>
-                          <div>
-                            <span className="font-medium text-gray-700">Profile:</span> {inv.candidate_id ? "Linked" : "Not linked"}
-                          </div>
-                          <div>
-                            <span className="font-medium text-gray-700">Rejected:</span> {inv.rejected_at ? formatDistanceToNow(new Date(inv.rejected_at), { addSuffix: true }) : "—"}
+                          <div className="flex items-center gap-2 p-2 bg-purple-50 rounded-lg">
+                            <div className="h-6 w-6 rounded-full bg-purple-100 flex items-center justify-center">
+                              <CheckCircle className="h-3 w-3 text-purple-600" />
+                            </div>
+                            <div>
+                              <div className="font-medium text-purple-900">Applied</div>
+                              <div className="text-purple-700 text-xs">{inv.applied_at ? formatDistanceToNow(new Date(inv.applied_at), { addSuffix: true }) : "Not applied"}</div>
+                            </div>
                           </div>
                         </div>
+
+                        <div className="flex items-center gap-4 text-xs text-gray-500 bg-gray-50 rounded-lg p-3">
+                          <div className="flex items-center gap-1">
+                            <span className="font-medium text-gray-700">Profile:</span>
+                            <Badge variant="outline" className={inv.candidate_id ? "bg-green-50 text-green-700 border-green-200" : "bg-gray-50 text-gray-700 border-gray-200"}>
+                              {inv.candidate_id ? "✅ Linked" : "⏳ Not linked"}
+                            </Badge>
+                          </div>
+                          {inv.rejected_at && (
+                            <div className="flex items-center gap-1">
+                              <span className="font-medium text-gray-700">Rejected:</span>
+                              <span>{formatDistanceToNow(new Date(inv.rejected_at), { addSuffix: true })}</span>
+                            </div>
+                          )}
+                        </div>
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-col gap-2">
                         <Button
                           variant="outline"
                           size="sm"
-                          className="h-8"
+                          className="h-10 bg-blue-50 hover:bg-blue-100 text-blue-700 border-blue-200"
                           onClick={async () => {
                             const link = inviteLink(inv.token)
                             try {
                               await navigator.clipboard.writeText(link)
-                              toast({ title: "Copied", description: link })
+                              toast({ title: "✅ Copied invite link", description: "Link copied to clipboard" })
                             } catch {
-                              toast({ title: "Copy failed", description: link, variant: "destructive" })
+                              toast({ title: "❌ Copy failed", description: link, variant: "destructive" })
                             }
                           }}
                         >
                           <Link2 className="mr-2 h-4 w-4" />
-                          Copy link
+                          Copy Link
                         </Button>
 
                         <Button
                           variant="outline"
                           size="sm"
-                          className="h-8"
+                          className="h-10 bg-green-50 hover:bg-green-100 text-green-700 border-green-200"
                           disabled={inviteResendingId === inv.id}
                           onClick={() => resendInvite(inv.email, inv.id)}
                         >
@@ -949,9 +1345,10 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
                         <Button
                           variant="secondary"
                           size="sm"
-                          className="h-8"
+                          className="h-10 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200"
                           onClick={() => window.open(inviteLink(inv.token), "_blank", "noopener,noreferrer")}
                         >
+                          <ExternalLink className="mr-2 h-4 w-4" />
                           Open
                         </Button>
                       </div>
@@ -960,10 +1357,10 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
                 </Card>
               ))
             )}
+            </div>
           </div>
-        ) : (
-          <>
-          {activeStage === "interview" ? (
+        ) : null}
+        {activeStage === "interview" ? (
             <>
               <Dialog open={roundEditorOpen} onOpenChange={setRoundEditorOpen}>
                 <DialogContent className="sm:max-w-[520px]">
@@ -1293,47 +1690,51 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
               </div>
             </>
           ) : null}
+        </div>
 
           {activeStage !== "interview" ? (
             <>
               {(activeStage === "all" ? applications : applications.filter((a) => a.status === activeStage)).map((app) => (
-                <Card key={app.id} className="shadow-sm hover:shadow-md transition-shadow">
+                <Card
+                  key={app.id}
+                  className={`shadow-sm hover:shadow-md transition-shadow ${app.status === "pending" ? "bg-yellow-50 border-yellow-200" : ""}`}
+                >
                   <CardContent className="p-4 space-y-4">
-                <div className="flex justify-between items-start">
-                    <div className="flex gap-3">
-                         <Avatar className="h-10 w-10 border border-gray-200">
-                            <AvatarFallback className="bg-blue-100 text-blue-700">
-                                {app.candidates?.name?.substring(0, 2).toUpperCase() || "CN"}
-                            </AvatarFallback>
+                    <div className="flex justify-between items-start">
+                      <div className="flex gap-3">
+                        <Avatar className="h-10 w-10 border border-gray-200">
+                          <AvatarFallback className="bg-blue-100 text-blue-700">
+                            {app.candidates?.name?.substring(0, 2).toUpperCase() || "CN"}
+                          </AvatarFallback>
                         </Avatar>
                         <div>
-                            <div className="font-medium text-base flex items-center gap-2">
-                                {app.candidates?.name}
-                                {app.match_score !== undefined && app.match_score !== null && (
-                                    <Badge variant="outline" className={`text-xs font-normal ${
-                                        app.match_score >= 0.8 ? "bg-green-50 text-green-700 border-green-200" :
-                                        app.match_score >= 0.6 ? "bg-yellow-50 text-yellow-700 border-yellow-200" :
-                                        "bg-gray-50 text-gray-700 border-gray-200"
-                                    }`}>
-                                        {Math.round(app.match_score * 100)}% Match
-                                    </Badge>
-                                )}
-                            </div>
-                            <div className="text-sm text-gray-500">
-                                {app.candidates?.current_role || "No role specified"}
-                            </div>
+                          <div className="font-medium text-base flex items-center gap-2">
+                            {app.candidates?.name}
+                            {app.match_score !== undefined && app.match_score !== null && (
+                              <Badge variant="outline" className={`text-xs font-normal ${
+                                app.match_score >= 0.8 ? "bg-green-50 text-green-700 border-green-200" :
+                                app.match_score >= 0.6 ? "bg-yellow-50 text-yellow-700 border-yellow-200" :
+                                "bg-gray-50 text-gray-700 border-gray-200"
+                              }`}>
+                                {Math.round(app.match_score * 100)}% Match
+                              </Badge>
+                            )}
+                          </div>
+                          <div className="text-sm text-gray-500">
+                            {app.candidates?.current_role || "No role specified"}
+                          </div>
                         </div>
-                    </div>
-                    
-                    <div className="flex items-center gap-2">
+                      </div>
+                      
+                      <div className="flex items-center gap-2">
                         <Button 
-                            variant="outline" 
-                            size="sm" 
-                            className="h-8"
-                            onClick={() => openPreview(app)}
+                          variant="outline" 
+                          size="sm" 
+                          className="h-8"
+                          onClick={() => openPreview(app)}
                         >
-                            <Eye className="h-4 w-4 mr-2" />
-                            View Profile
+                          <Eye className="h-4 w-4 mr-2" />
+                          View Profile
                         </Button>
                         <Button
                           variant="outline"
@@ -1346,19 +1747,19 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
                           AI
                         </Button>
                         <Select value={app.status} onValueChange={(val) => requestStageChange(app, val)}>
-                            <SelectTrigger className="h-8 w-36">
-                                <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
+                          <SelectTrigger className="h-8 w-36">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
                             {STATUS_COLUMNS.map((s) => (
-                                <SelectItem key={s.id} value={s.id}>
+                              <SelectItem key={s.id} value={s.id}>
                                 {s.label}
-                                </SelectItem>
+                              </SelectItem>
                             ))}
-                            </SelectContent>
+                          </SelectContent>
                         </Select>
+                      </div>
                     </div>
-                </div>
 
                 <div className="grid grid-cols-2 gap-4 text-xs text-gray-500">
                     <div className="flex items-center gap-1">
@@ -1451,27 +1852,22 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
                   </div>
                 ) : null}
               </CardContent>
-              </Card>
+                </Card>
               ))}
 
-              {(activeStage === "all"
-                ? applications.length === 0
-                : applications.filter((a) => a.status === activeStage).length === 0) && (
-              <div className="text-center py-12 text-gray-400 text-sm border-2 border-dashed border-gray-200 rounded-lg bg-gray-50/50">
+              {(activeStage === "all" ? applications.length === 0 : applications.filter((a) => a.status === activeStage).length === 0) && (
+                <div className="text-center py-12 text-gray-400 text-sm border-2 border-dashed border-gray-200 rounded-lg bg-gray-50/50">
                   <div className="flex flex-col items-center">
-                      <div className="h-10 w-10 rounded-full bg-gray-100 flex items-center justify-center mb-3">
-                          <User className="h-5 w-5 text-gray-400" />
-                      </div>
-                      <p>No candidates in this stage</p>
+                    <div className="h-10 w-10 rounded-full bg-gray-100 flex items-center justify-center mb-3">
+                      <User className="h-5 w-5 text-gray-400" />
+                    </div>
+                    <p>No candidates in this stage</p>
                   </div>
-              </div>
+                </div>
               )}
             </>
           ) : null}
-          </>
-        )}
         </div>
-      </div>
 
       {selectedCandidate && (
         <CandidatePreviewDialogDynamic

@@ -17,8 +17,9 @@ export interface SearchRequirement {
   certifications?: string[];
   industry?: string;
   specificRequirements?: string[];
-  impliedResponsibilities?: string[];
 }
+
+export type RoleScope = "current" | "current_past"
 
 export async function parseSearchRequirement(naturalLanguageQuery: string): Promise<SearchRequirement> {
   console.log("=== Parsing Search Requirement with Gemini ===")
@@ -30,44 +31,29 @@ export async function parseSearchRequirement(naturalLanguageQuery: string): Prom
   }
 
   try {
-    const model = genAI.getGenerativeModel({ 
-      model: DEFAULT_GEMINI_MODEL
-    })
+    const model = genAI.getGenerativeModel({ model: DEFAULT_GEMINI_MODEL })
     
-    const prompt = `You are an expert HR recruiter with deep knowledge of logistics and transportation industry. Parse this job requirement and extract structured information with semantic understanding.
-    
-    CRITICAL INSTRUCTION: Analyze the job role deeply to understand what this person actually DOES. Generate a list of "impliedResponsibilities" that are standard for this role in logistics, even if not explicitly mentioned.
+    const prompt = `You are an expert HR recruiter with deep knowledge of logistics and transportation industry. Parse this job requirement and extract structured information with semantic understanding:
 
 "${naturalLanguageQuery}"
 
 Extract and return ONLY a JSON object with this exact structure:
 {
-  "role": "Job title/position (e.g., 'Fleet Manager', 'Truck Driver', 'Warehouse Manager')",
+  "role": "Job title/position (e.g., 'Fleet Manager', 'Truck Driver')",
   "experience": {
     "min": minimum years of experience (number or null),
     "max": maximum years of experience (number or null),
     "exact": exact years if specified (number or null)
   },
-  "location": "Required location/city/region",
-  "skills": ["Array of required technical and soft skills"],
+  "location": "Required location/city",
+  "skills": ["Array of required technical skills"],
   "education": "Education requirement",
   "certifications": ["Required certifications"],
-  "industry": "Industry type (logistics, transportation, warehousing, supply chain)",
-  "specificRequirements": ["Any other specific requirements including salary info"],
-  "impliedResponsibilities": ["Array of 5-7 specific daily tasks, KPIs, and responsibilities for this role in logistics (e.g., for 'Ops Exec': 'driver coordination', 'route planning', 'POD collection')"]
+  "industry": "Industry type (logistics, transportation, etc.)",
+  "specificRequirements": ["Any other specific requirements"]
 }
 
-Advanced Semantic Parsing Rules:
-- "Warehouse Manager" → role: "Warehouse Manager", skills: ["warehouse management", "inventory control"], impliedResponsibilities: ["inventory audit", "staff supervision", "safety compliance", "inward/outward management"]
-- "SAP software" → skills: ["SAP"], specificRequirements: ["SAP proficiency"]
-- "LIFO and FEFO" → skills: ["inventory management", "LIFO", "FEFO"]
-- "Minimum 3 years" → experience: {min: 3}
-- "Up to ₹30,000" → specificRequirements: ["salary up to 30000 INR"]
-- "Lodhwal, Ludhiana" → location: "Ludhiana"
-- "organizational and leadership abilities" → skills: ["organizational skills", "leadership"]
-- "proficiency in" → skills: [extract the skill]
-- "strong knowledge of" → skills: [extract the knowledge area]
-- "excellent" → skills: [extract the following skill/ability]
+Important parsing rules:
 - "5+ years" means min: 5
 - "2-5 years" means min: 2, max: 5
 - "Clean license" means certifications: ["Clean Driving License"]
@@ -76,16 +62,6 @@ Advanced Semantic Parsing Rules:
 - Location names should be extracted as-is
 - Include both hard skills and soft skills
 - Be precise and don't make assumptions
-
-Semantic Understanding:
-- Extract implicit skills from job titles
-- Recognize salary information and ranges
-- Identify inventory management methods (LIFO, FIFO, FEFO)
-- Understand software requirements (SAP, ERP, etc.)
-- Extract location information accurately including area names
-- Parse experience requirements (minimum, maximum, range)
-- Identify soft skills and leadership requirements
-- GENERATE implied responsibilities based on the role to help match candidates who mention these tasks in their resume/summary.
 
 Return ONLY the JSON object, no additional text.`
 
@@ -103,14 +79,8 @@ Return ONLY the JSON object, no additional text.`
       console.log("❌ Failed to parse Gemini response, using fallback")
       return extractBasicRequirements(naturalLanguageQuery)
     }
-  } catch (error: any) {
-    const errorMessage = error?.message || String(error)
-    console.error("❌ Gemini parsing failed:", errorMessage)
-    
-    if (errorMessage.includes("404") || errorMessage.includes("not found")) {
-      console.error("⚠️ Model not found. Check GEMINI_MODEL env var or API key permissions.")
-    }
-
+  } catch (error) {
+    console.error("❌ Gemini parsing failed:", error)
     console.log("🔄 Falling back to basic requirement extraction")
     return extractBasicRequirements(naturalLanguageQuery)
   }
@@ -120,7 +90,7 @@ function extractBasicRequirements(query: string): SearchRequirement {
   const lowerQuery = query.toLowerCase()
   const requirements: SearchRequirement = {}
 
-  // Extract experience with various patterns including salary-based experience hints
+  // Extract experience with various patterns
   const expPatterns = [
     /(\d+)\+?\s*years?/,           // "5+ years", "5 years"
     /(\d+)-(\d+)\s*years?/,        // "2-5 years"
@@ -140,12 +110,11 @@ function extractBasicRequirements(query: string): SearchRequirement {
     }
   }
 
-  // Extract location with better coverage including area/locality names
+  // Extract location with better coverage
   const locationKeywords = [
     'delhi', 'mumbai', 'bangalore', 'chennai', 'kolkata', 'pune', 'hyderabad', 'ahmedabad',
     'gurgaon', 'gurugram', 'noida', 'faridabad', 'ghaziabad', 'navi mumbai', 'thane',
-    'jaipur', 'lucknow', 'chandigarh', 'indore', 'bhopal', 'patna', 'ranchi', 'ludhiana',
-    'lodhwal', 'manesar', 'bawal', 'dharuhera', 'bhiwadi', 'neemrana'
+    'jaipur', 'lucknow', 'chandigarh', 'indore', 'bhopal', 'patna', 'ranchi'
   ]
   
   for (const location of locationKeywords) {
@@ -155,16 +124,11 @@ function extractBasicRequirements(query: string): SearchRequirement {
     }
   }
 
-  // Extract role with comprehensive coverage including new logistics roles
+  // Extract role with comprehensive coverage
   const roleKeywords = [
     'fleet manager', 'truck driver', 'logistics coordinator', 'warehouse manager', 
     'supply chain manager', 'transport manager', 'operations manager', 'delivery manager',
-    'fleet supervisor', 'logistics executive', 'warehouse executive', 'transport coordinator',
-    'inventory manager', 'store manager', 'godown manager', 'warehouse incharge', 
-    'logistics manager', 'supply chain executive', 'procurement manager',
-    'transport executive', 'transport supervisor', 'fleet executive', 'operations executive',
-    // Singular/Plural variations
-    'operation executive', 'operation manager', 'logistic executive', 'logistic manager'
+    'fleet supervisor', 'logistics executive', 'warehouse executive', 'transport coordinator'
   ]
   
   for (const role of roleKeywords) {
@@ -174,14 +138,12 @@ function extractBasicRequirements(query: string): SearchRequirement {
     }
   }
 
-  // Extract skills with semantic understanding
+  // Extract skills
   const skillKeywords = [
     'gps tracking', 'fleet management', 'route optimization', 'supply chain', 'inventory management',
     'warehouse management', 'transportation', 'logistics', 'vehicle tracking', 'driver management',
     'fuel management', 'maintenance scheduling', 'compliance', 'safety regulations', 'dot regulations',
-    'clean license', 'cdl', 'commercial driver license', 'hazmat', 'hazmat certification',
-    'sap', 'erp', 'lifo', 'fefo', 'fifo', 'organizational skills', 'leadership', 'team management',
-    'data analysis', 'problem solving', 'communication skills'
+    'clean license', 'cdl', 'commercial driver license', 'hazmat', 'hazmat certification'
   ]
   
   const foundSkills = skillKeywords.filter(skill => lowerQuery.includes(skill))
@@ -189,10 +151,10 @@ function extractBasicRequirements(query: string): SearchRequirement {
     requirements.skills = foundSkills
   }
 
-  // Extract certifications with comprehensive coverage
+  // Extract certifications
   const certKeywords = [
     'cdl', 'commercial driver license', 'hazmat', 'hazmat certification', 'clean license',
-    'dot certification', 'safety certification', 'forklift certification', 'driving license'
+    'dot certification', 'safety certification', 'forklift certification'
   ]
   
   const foundCerts = certKeywords.filter(cert => lowerQuery.includes(cert))
@@ -201,26 +163,10 @@ function extractBasicRequirements(query: string): SearchRequirement {
   }
 
   // Extract education
-  const educationKeywords = ['bachelor', 'master', 'diploma', 'degree', 'b.tech', 'mba', 'graduate']
+  const educationKeywords = ['bachelor', 'master', 'diploma', 'degree', 'b.tech', 'mba']
   for (const edu of educationKeywords) {
     if (lowerQuery.includes(edu)) {
       requirements.education = edu
-      break
-    }
-  }
-
-  // Extract salary information
-  const salaryPatterns = [
-    /₹?(\d+(?:,\d+)*)/,  // ₹30,000 or 30000
-    /rs\.?\s*(\d+(?:,\d+)*)/,  // Rs. 30000
-    /salary.*?₹?(\d+(?:,\d+)*)/  // "salary up to ₹30,000"
-  ]
-  
-  for (const pattern of salaryPatterns) {
-    const match = lowerQuery.match(pattern)
-    if (match) {
-      requirements.specificRequirements = requirements.specificRequirements || []
-      requirements.specificRequirements.push(`salary ${match[1].replace(/,/g, '')} INR`)
       break
     }
   }
@@ -229,343 +175,197 @@ function extractBasicRequirements(query: string): SearchRequirement {
   return requirements
 }
 
-export interface MatchDetail {
-  category: 'Role' | 'Experience' | 'Location' | 'Skills' | 'Education' | 'Responsibility';
-  status: 'match' | 'partial' | 'miss';
-  score: number;
-  message: string;
-  weight: number;
-  maxWeight: number;
-}
-
-export interface ScoreBreakdown {
-  [key: string]: { earned: number; max: number; percentage: number };
-}
-
 export async function intelligentCandidateSearch(
   requirements: SearchRequirement, 
-  candidates: any[]
+  candidates: any[],
+  options?: { roleScope?: RoleScope }
 ): Promise<any[]> {
-  console.log("=== Intelligent Candidate Search ===")
-  console.log("Requirements:", JSON.stringify(requirements, null, 2))
-  console.log("Total candidates:", candidates.length)
+  const debug = process.env.SEARCH_DEBUG === "1"
+  const log = (...args: any[]) => {
+    if (debug) console.log(...args)
+  }
+  const roleScope = options?.roleScope ?? "current_past"
+
+  log("=== Intelligent Candidate Search ===")
+  log("Requirements:", JSON.stringify(requirements, null, 2))
+  log("Total candidates:", candidates.length)
 
   // First, try Supabase skill-based search if we have skills
   let supabaseResults: any[] = []
   if (requirements.skills && requirements.skills.length > 0) {
     try {
-      console.log("Trying Supabase skill-based search with skills:", requirements.skills)
+      log("Trying Supabase skill-based search with skills:", requirements.skills)
       supabaseResults = await SupabaseCandidateService.searchCandidatesBySkills(requirements.skills)
-      console.log(`Supabase found ${supabaseResults.length} candidates with matching skills`)
+      log(`Supabase found ${supabaseResults.length} candidates with matching skills`)
     } catch (error) {
-      console.log("Supabase skill search failed, continuing with local filtering:", error)
+      log("Supabase skill search failed, continuing with local filtering:", error)
     }
   }
 
   // If no Supabase results, use all candidates
   const candidatesToFilter = supabaseResults.length > 0 ? supabaseResults : candidates
-  console.log(`Filtering through ${candidatesToFilter.length} candidates`)
+  log(`Filtering through ${candidatesToFilter.length} candidates`)
 
   // Intelligent filtering based on parsed requirements
-  const filteredCandidates = candidatesToFilter.map(candidate => {
+  const filteredCandidates = candidatesToFilter.reduce((acc, candidate) => {
     let score = 0
-    let matchDetails: MatchDetail[] = []
-    let missingCriteria: string[] = []
-    let scoreBreakdown: ScoreBreakdown = {}
+    let matchingCriteria: string[] = []
+    let roleQualified = true
     
-    console.log(`\n📝 Analyzing candidate: ${candidate.name} (${candidate.currentRole})`)
+    log(`\n📝 Analyzing candidate: ${candidate.name} (${candidate.currentRole})`)
+    log(`📍 Location: ${candidate.location}`)
+    log(`⏱️ Experience: ${candidate.totalExperience}`)
+    log(`🛠️ Skills: ${(candidate.technicalSkills || []).join(', ')}`)
 
-    // Weights Configuration (Total: 100)
-    const weights = {
-      role: 30,
-      responsibility: 20,
-      experience: 15,
-      skills: 15,
-      location: 15,
-      education: 5
-    }
-
-    let totalMaxPossibleScore = 0
-
-    // Role matching (30%) - STRICT: Role must match or be very similar
+    // Role matching
     if (requirements.role) {
-      totalMaxPossibleScore += weights.role
-      const roleMatch = calculateRoleMatch(requirements.role, candidate)
-      const earned = roleMatch * weights.role;
-      score += earned;
-      
-      scoreBreakdown['Role'] = { earned: Math.round(earned), max: weights.role, percentage: Math.round(roleMatch * 100) };
-
-      if (roleMatch > 0.8) {
-        matchDetails.push({
-          category: 'Role',
-          status: 'match',
-          score: roleMatch,
-          message: `Role matches "${requirements.role}"`,
-          weight: earned,
-          maxWeight: weights.role
-        })
-      } else if (roleMatch >= 0.3) {
-        matchDetails.push({
-          category: 'Role',
-          status: 'partial',
-          score: roleMatch,
-          message: `Related role "${candidate.currentRole}"`,
-          weight: earned,
-          maxWeight: weights.role
-        })
-      } else {
-        // Role doesn't match at all - this is a critical mismatch
-        matchDetails.push({
-          category: 'Role',
-          status: 'miss',
-          score: roleMatch,
-          message: `Role mismatch (${candidate.currentRole || 'Not specified'}) - will be filtered out`,
-          weight: earned,
-          maxWeight: weights.role
-        })
-        missingCriteria.push(`Role: ${requirements.role}`)
+      const roleMatch = calculateRoleMatch(requirements.role, candidate, roleScope)
+      log(`🎯 Role match score: ${roleMatch} (${requirements.role} vs ${candidate.currentRole})`)
+      if (roleScope === "current" && roleMatch < 0.2) {
+        roleQualified = false
+      }
+      if (roleMatch > 0.2) {
+        score += roleMatch * 30
+        matchingCriteria.push(`Role: ${candidate.currentRole} (${Math.round(roleMatch * 100)}%)`)
       }
     }
 
-    // Implied Responsibilities Matching (20%)
-    if (requirements.impliedResponsibilities && requirements.impliedResponsibilities.length > 0) {
-      totalMaxPossibleScore += weights.responsibility
-      const respScore = calculateResponsibilityMatch(requirements.impliedResponsibilities, candidate)
-      const earned = respScore * weights.responsibility;
-      score += earned;
-      
-      scoreBreakdown['Responsibility'] = { earned: Math.round(earned), max: weights.responsibility, percentage: Math.round(respScore * 100) };
-
-      matchDetails.push({
-        category: 'Responsibility',
-        status: respScore > 0.6 ? 'match' : respScore > 0.2 ? 'partial' : 'miss',
-        score: respScore,
-        message: `${Math.round(respScore * 100)}% match on key tasks`,
-        weight: earned,
-        maxWeight: weights.responsibility
-      })
-    }
-
-    // Experience matching (15%)
+    // Experience matching
     if (requirements.experience) {
-      totalMaxPossibleScore += weights.experience
       const expScore = calculateExperienceScore(requirements.experience, candidate.totalExperience)
-      const earned = expScore * weights.experience;
-      score += earned;
-      
-      scoreBreakdown['Experience'] = { earned: Math.round(earned), max: weights.experience, percentage: Math.round(expScore * 100) };
-
-      if (expScore > 0.8) {
-        matchDetails.push({
-          category: 'Experience',
-          status: 'match',
-          score: expScore,
-          message: `Meets experience (${candidate.totalExperience})`,
-          weight: earned,
-          maxWeight: weights.experience
-        })
-      } else if (expScore > 0.2) {
-        matchDetails.push({
-          category: 'Experience',
-          status: 'partial',
-          score: expScore,
-          message: `Partial experience (${candidate.totalExperience})`,
-          weight: earned,
-          maxWeight: weights.experience
-        })
-      } else {
-        matchDetails.push({
-          category: 'Experience',
-          status: 'miss',
-          score: expScore,
-          message: `Experience mismatch (Req: ${requirements.experience.min}+)`,
-          weight: earned,
-          maxWeight: weights.experience
-        })
-        missingCriteria.push(`Experience`)
+      log(`⏱️ Experience score: ${expScore} (${JSON.stringify(requirements.experience)} vs ${candidate.totalExperience})`)
+      score += expScore * 25
+      if (expScore > 0.2) {
+        matchingCriteria.push(`Experience: ${candidate.totalExperience} (${Math.round(expScore * 100)}%)`)
       }
     }
 
-    // Location matching (15%)
+    // Location matching
     if (requirements.location) {
-      totalMaxPossibleScore += weights.location
       const locationScore = calculateLocationScore(requirements.location, candidate.location)
-      const earned = locationScore * weights.location;
-      score += earned;
-      
-      scoreBreakdown['Location'] = { earned: Math.round(earned), max: weights.location, percentage: Math.round(locationScore * 100) };
-
-      if (locationScore > 0.8) {
-        matchDetails.push({
-          category: 'Location',
-          status: 'match',
-          score: locationScore,
-          message: `Matches location`,
-          weight: earned,
-          maxWeight: weights.location
-        })
-      } else if (locationScore > 0.2) {
-        matchDetails.push({
-          category: 'Location',
-          status: 'partial',
-          score: locationScore,
-          message: `Nearby (${candidate.location})`,
-          weight: earned,
-          maxWeight: weights.location
-        })
-      } else {
-        matchDetails.push({
-          category: 'Location',
-          status: 'miss',
-          score: locationScore,
-          message: `Location mismatch`,
-          weight: earned,
-          maxWeight: weights.location
-        })
-        missingCriteria.push(`Location`)
+      log(`📍 Location score: ${locationScore} (${requirements.location} vs ${candidate.location})`)
+      score += locationScore * 15
+      if (locationScore > 0.2) {
+        matchingCriteria.push(`Location: ${candidate.location} (${Math.round(locationScore * 100)}%)`)
       }
     }
 
-    // Skills matching (15%)
+    // Skills matching
     if (requirements.skills && requirements.skills.length > 0) {
-      totalMaxPossibleScore += weights.skills
       const skillsScore = calculateSkillsScore(requirements.skills, candidate)
-      const earned = skillsScore * weights.skills;
-      score += earned;
-      
-      scoreBreakdown['Skills'] = { earned: Math.round(earned), max: weights.skills, percentage: Math.round(skillsScore * 100) };
-
-      if (skillsScore > 0.6) {
-        matchDetails.push({
-          category: 'Skills',
-          status: 'match',
-          score: skillsScore,
-          message: `Good skills match`,
-          weight: earned,
-          maxWeight: weights.skills
-        })
-      } else if (skillsScore > 0.1) {
-        matchDetails.push({
-          category: 'Skills',
-          status: 'partial',
-          score: skillsScore,
-          message: `Some skills match`,
-          weight: earned,
-          maxWeight: weights.skills
-        })
-      } else {
-        matchDetails.push({
-          category: 'Skills',
-          status: 'miss',
-          score: skillsScore,
-          message: `Missing skills`,
-          weight: earned,
-          maxWeight: weights.skills
-        })
-        missingCriteria.push(`Skills`)
+      log(`🛠️ Skills score: ${skillsScore} (${requirements.skills.join(', ')} vs ${(candidate.technicalSkills || []).join(', ')})`)
+      score += skillsScore * 20
+      if (skillsScore > 0.1) {
+        matchingCriteria.push(`Skills match: ${Math.round(skillsScore * 100)}%`)
       }
     }
 
-    // Education matching (5%)
+    // Education matching
     if (requirements.education) {
-      totalMaxPossibleScore += weights.education
       const eduScore = calculateEducationScore(requirements.education, candidate)
-      const earned = eduScore * weights.education;
-      score += earned;
-      
-      scoreBreakdown['Education'] = { earned: Math.round(earned), max: weights.education, percentage: Math.round(eduScore * 100) };
-
-      matchDetails.push({
-        category: 'Education',
-        status: eduScore > 0.8 ? 'match' : eduScore > 0.2 ? 'partial' : 'miss',
-        score: eduScore,
-        message: candidate.highestQualification || 'Not specified',
-        weight: earned,
-        maxWeight: weights.education
-      })
+      log(`🎓 Education score: ${eduScore} (${requirements.education} vs ${candidate.highestQualification})`)
+      score += eduScore * 10
+      if (eduScore > 0.2) {
+        matchingCriteria.push(`Education: ${candidate.highestQualification} (${Math.round(eduScore * 100)}%)`)
+      }
     }
 
-    // Normalize Score based on active requirements
-    // If no requirements provided, score is 0
-    const normalizedScore = totalMaxPossibleScore > 0 
-      ? (score / totalMaxPossibleScore) * 100 
-      : 0
+    log(`📊 Total score: ${score}/100 (${Math.round(score)}%)`)
 
-    console.log(`📊 Raw score: ${score}/${totalMaxPossibleScore} -> Normalized: ${Math.round(normalizedScore)}%`)
+    if (!roleQualified) {
+      return acc
+    }
 
-    return {
+    acc.push({
       ...candidate,
-      relevanceScore: Math.min(0.99, normalizedScore / 100),
-      matchPercentage: Math.round(normalizedScore),
-      matchDetails,
-      scoreBreakdown,
-      gapAnalysis: missingCriteria,
+      relevanceScore: Math.min(0.95, score / 100),
+      matchPercentage: Math.round((score / 100) * 100),
+      matchingCriteria,
       parsedRequirements: requirements
-    }
-  })
+    })
+    return acc
+  }, [] as any[])
 
   // Sort by relevance score and filter out poor matches
-  // STRICT FILTERING: Only show candidates with meaningful matches
   const relevantCandidates = filteredCandidates
-    .filter(candidate => {
-      // Minimum 50% relevance score
-      if (candidate.relevanceScore < 0.50) return false
-      
-      // CRITICAL: If role is specified, candidate MUST have matching or similar role (at least 30% role match)
-      if (requirements.role) {
-        const roleMatch = calculateRoleMatch(requirements.role, candidate)
-        if (roleMatch < 0.3) {
-          console.log(`❌ Filtering out ${candidate.name}: Role mismatch (${candidate.currentRole} vs ${requirements.role}, match: ${roleMatch})`)
-          return false
-        }
-      }
-      
-      return true
-    })
-    .sort((a, b) => b.relevanceScore - a.relevanceScore)
+    .filter((candidate: any) => candidate.relevanceScore >= 0.12)
+    .sort((a: any, b: any) => b.relevanceScore - a.relevanceScore)
 
-  console.log(`Found ${relevantCandidates.length} relevant candidates`)
+  log(`Found ${relevantCandidates.length} relevant candidates`)
   return relevantCandidates
 }
 
-function calculateRoleMatch(requiredRole: string, candidate: any): number {
-  const candidateRole = (candidate.currentRole || candidate.desiredRole || '').toLowerCase()
+function getCandidateRoleText(candidate: any, roleScope: RoleScope): string {
+  const parts: string[] = []
+  const currentRole = extractCurrentRoleText(candidate)
+  if (currentRole) parts.push(currentRole)
+  if (roleScope === "current_past") {
+    if (candidate?.desiredRole) parts.push(String(candidate.desiredRole))
+    if (Array.isArray(candidate?.jobTitles)) parts.push(...candidate.jobTitles.map((t: any) => String(t)))
+    if (Array.isArray(candidate?.workExperience)) {
+      parts.push(...candidate.workExperience.map((exp: any) => exp?.role).filter(Boolean).map((t: any) => String(t)))
+    }
+  }
+  return parts.join(" ").toLowerCase()
+}
+
+function normalizeRoleText(value: string) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+function extractCurrentRoleText(candidate: any) {
+  if (candidate?.currentRole) return String(candidate.currentRole)
+  const exps = Array.isArray(candidate?.workExperience) ? candidate.workExperience : []
+  const present = exps.find((exp: any) => /present|current|till date/i.test(String(exp?.duration || "")))
+  if (present?.role) return String(present.role)
+  if (exps[0]?.role) return String(exps[0].role)
+  return ""
+}
+
+function calculateRoleMatch(requiredRole: string, candidate: any, roleScope: RoleScope): number {
+  const candidateRole = getCandidateRoleText(candidate, roleScope)
   const required = requiredRole.toLowerCase()
   
   if (!candidateRole) return 0
 
-  // Normalize helper to handle singular/plural variations (e.g. "operations" vs "operation")
-  const normalize = (str: string) => str.replace(/s\b/g, '').replace(/\s+/g, ' ').trim()
-  
-  const normCandidate = normalize(candidateRole)
-  const normRequired = normalize(required)
-
-  // Exact match (including normalized)
-  if (candidateRole.includes(required) || required.includes(candidateRole) || 
-      normCandidate.includes(normRequired) || normRequired.includes(normCandidate)) return 1
-
-  // Comprehensive role synonyms mapping with semantic understanding
-  const roleSynonyms: { [key: string]: string[] } = {
-    'fleet manager': ['fleet management', 'transportation manager', 'logistics manager', 'operations manager', 'fleet operations manager', 'vehicle fleet manager'],
-    'truck driver': ['driver', 'heavy vehicle driver', 'commercial driver', 'truck operator', 'heavy truck driver', 'delivery driver', 'commercial vehicle driver'],
-    'logistics coordinator': ['logistics executive', 'supply chain coordinator', 'logistics specialist', 'operations coordinator', 'logistics officer'],
-    'warehouse manager': ['warehouse executive', 'store manager', 'inventory manager', 'warehouse supervisor', 'store incharge', 'warehouse incharge', 'godown manager', 'warehouse operations manager', 'store operations manager', 'inventory operations manager'],
-    'supply chain manager': ['supply chain executive', 'procurement manager', 'operations manager', 'logistics manager', 'scm manager'],
-    'transport manager': ['transportation manager', 'fleet manager', 'logistics manager', 'dispatch manager', 'transport operations manager'],
-    'transport executive': ['transport manager', 'logistics executive', 'fleet executive', 'transport coordinator', 'operations executive', 'operation executive'],
-    'operations manager': ['operations executive', 'operations head', 'operations supervisor', 'fleet manager', 'logistics manager', 'operations incharge', 'operation manager'],
-    'warehouse executive': ['warehouse manager', 'store executive', 'inventory executive', 'warehouse supervisor', 'store keeper', 'godown executive'],
-    'inventory manager': ['inventory executive', 'stock manager', 'warehouse manager', 'store manager', 'inventory controller'],
-    'logistics manager': ['logistics executive', 'logistics coordinator', 'logistics head', 'logistics operations manager', 'supply chain manager'],
-    'operations executive': ['operations manager', 'operation executive', 'operations officer', 'operations coordinator'],
-    'operation executive': ['operations executive', 'operations manager', 'operations officer', 'operations coordinator']
+  const candNorm = normalizeRoleText(candidateRole)
+  const reqNorm = normalizeRoleText(required)
+  if (candNorm && reqNorm) {
+    if (candNorm.includes(reqNorm) || reqNorm.includes(candNorm)) return 1
   }
 
-  // Check synonyms against both original and normalized requirement
-  const synonyms = roleSynonyms[required] || roleSynonyms[normRequired] || []
+  // Comprehensive role synonyms mapping
+  const roleSynonyms: { [key: string]: string[] } = {
+    'fleet manager': ['fleet management', 'transportation manager', 'logistics manager', 'operations manager', 'fleet operations manager'],
+    'truck driver': ['driver', 'heavy vehicle driver', 'commercial driver', 'truck operator', 'heavy truck driver', 'delivery driver'],
+    'logistics coordinator': ['logistics executive', 'supply chain coordinator', 'logistics specialist', 'operations coordinator'],
+    'warehouse manager': ['warehouse executive', 'store manager', 'inventory manager', 'warehouse supervisor', 'store incharge'],
+    'supply chain manager': ['supply chain executive', 'procurement manager', 'operations manager', 'logistics manager'],
+    'transport manager': ['transportation manager', 'fleet manager', 'logistics manager', 'dispatch manager'],
+    'operations manager': ['operations executive', 'operations head', 'operations supervisor', 'fleet manager', 'logistics manager']
+  }
+
+  let best = 0
+  const synonyms = roleSynonyms[required] || []
   for (const synonym of synonyms) {
-    if (candidateRole.includes(synonym) || normalize(synonym).includes(normCandidate)) return 0.8
+    if (candidateRole.includes(synonym)) best = Math.max(best, 0.8)
+  }
+
+  if (candNorm && reqNorm) {
+    const reqTokens = reqNorm.split(" ").filter((t) => t.length > 2)
+    const candTokens = new Set(candNorm.split(" ").filter((t) => t.length > 2))
+    if (reqTokens.length > 0) {
+      const hits = reqTokens.filter((t) => candTokens.has(t)).length
+      const score = hits / reqTokens.length
+      if (score >= 0.7) best = Math.max(best, 0.8)
+      else if (score >= 0.5) best = Math.max(best, 0.6)
+      else if (score >= 0.34) best = Math.max(best, 0.4)
+    }
   }
 
   // Check if candidate has relevant skills for the role
@@ -579,10 +379,9 @@ function calculateRoleMatch(requiredRole: string, candidate: any): number {
     'fleet manager': ['fleet', 'transportation', 'logistics', 'vehicle', 'route', 'driver management', 'fuel management'],
     'truck driver': ['driving', 'vehicle', 'transportation', 'license', 'delivery', 'logistics', 'commercial driving'],
     'logistics coordinator': ['logistics', 'supply chain', 'coordination', 'planning', 'inventory', 'transportation'],
-    'warehouse manager': ['warehouse', 'inventory', 'store', 'godown', 'stock', 'warehousing', 'storage', 'inventory control', 'stock management'],
+    'warehouse manager': ['warehouse', 'inventory', 'store', 'logistics', 'supply chain', 'operations'],
     'supply chain manager': ['supply chain', 'procurement', 'logistics', 'inventory', 'operations', 'vendor management'],
-    'transport manager': ['transportation', 'fleet', 'logistics', 'route', 'dispatch', 'vehicle management'],
-    'transport executive': ['transportation', 'logistics', 'fleet', 'coordination', 'operations', 'vehicle']
+    'transport manager': ['transportation', 'fleet', 'logistics', 'route', 'dispatch', 'vehicle management']
   }
 
   const requiredSkills = roleSkillMap[required] || []
@@ -590,14 +389,7 @@ function calculateRoleMatch(requiredRole: string, candidate: any): number {
     requiredSkills.some(reqSkill => skill.includes(reqSkill))
   )
 
-  // STRICT: If role doesn't match and only has some related skills, give very low score
-  // Only allow skill-based matching if there's significant skill overlap (at least 2-3 skills)
-  if (skillMatches.length >= 2) {
-    return 0.4 // Partial match based on skills only
-  }
-  
-  // If role doesn't match at all, return 0 (will be filtered out)
-  return 0
+  return Math.max(best, skillMatches.length > 0 ? 0.6 : 0.2)
 }
 
 function calculateExperienceScore(requiredExp: any, candidateExp: string): number {
@@ -649,97 +441,28 @@ function calculateExperienceScore(requiredExp: any, candidateExp: string): numbe
 function calculateLocationScore(requiredLocation: string, candidateLocation: string): number {
   if (!candidateLocation) return 0.3
   
-  const required = requiredLocation.toLowerCase().trim()
-  const candidate = candidateLocation.toLowerCase().trim()
+  const required = requiredLocation.toLowerCase()
+  const candidate = candidateLocation.toLowerCase()
   
-  // 1. Direct match (Exact or Substring)
   if (candidate.includes(required) || required.includes(candidate)) return 1
   
-  // 2. Location Clusters (Bidirectional Proximity)
-  const locationClusters: string[][] = [
-    // NCR Region
-    ['delhi', 'new delhi', 'ncr', 'gurgaon', 'gurugram', 'noida', 'faridabad', 'ghaziabad', 'greater noida', 'manesar', 'bawal', 'dharuhera', 'bhiwadi', 'neemrana'],
-    // Mumbai Region
-    ['mumbai', 'bombay', 'navi mumbai', 'thane', 'kalyan', 'bhiwandi', 'vasai', 'virar', 'panvel'],
-    // Pune Region (sometimes considered near Mumbai for broader searches)
-    ['pune', 'pimpri', 'chinchwad', 'chakan', 'talegaon'],
-    // Punjab Region
-    ['ludhiana', 'chandigarh', 'mohali', 'jalandhar', 'amritsar', 'patiala', 'lodhwal'],
-    // Bangalore
-    ['bangalore', 'bengaluru', 'electronic city', 'whitefield', 'hosur'],
-    // Chennai
-    ['chennai', 'madras', 'kanchipuram', 'sriperumbudur', 'oragadam'],
-    // Hyderabad
-    ['hyderabad', 'secunderabad', 'cyberabad'],
-    // Kolkata
-    ['kolkata', 'calcutta', 'howrah', 'salt lake'],
-    // Gujarat
-    ['ahmedabad', 'gandhinagar', 'vadodara', 'surat', 'sanand'],
-    // MP
-    ['indore', 'dewas', 'pithampur', 'bhopal']
-  ]
+  // Check for major cities and their variations
+  const locationVariations: { [key: string]: string[] } = {
+    'delhi': ['delhi', 'ncr', 'new delhi', 'gurgaon', 'noida', 'faridabad'],
+    'mumbai': ['mumbai', 'bombay', 'navi mumbai', 'thane'],
+    'bangalore': ['bangalore', 'bengaluru'],
+    'chennai': ['chennai', 'madras']
+  }
   
-  // Find which cluster(s) the required location belongs to
-  for (const cluster of locationClusters) {
-    const isRequiredInCluster = cluster.some(city => required.includes(city) || city.includes(required))
-    
-    if (isRequiredInCluster) {
-      // Check if candidate is in the same cluster
-      const isCandidateInCluster = cluster.some(city => candidate.includes(city) || city.includes(candidate))
-      
-      if (isCandidateInCluster) {
-        return 0.85 // High score for nearby/same-region matches
+  for (const [city, variations] of Object.entries(locationVariations)) {
+    if (required.includes(city)) {
+      for (const variation of variations) {
+        if (candidate.includes(variation)) return 0.9
       }
     }
   }
   
   return 0.1
-}
-
-function calculateResponsibilityMatch(responsibilities: string[], candidate: any): number {
-  // Aggregate all relevant text from the candidate profile
-  const textToSearch = [
-    candidate.resumeText || '',
-    candidate.summary || '',
-    candidate.currentRole || '',
-    candidate.keyAchievements ? candidate.keyAchievements.join(' ') : '',
-    ...(candidate.workExperience || []).map((w: any) => `${w.role} ${w.description}`),
-    ...(candidate.projects || []).map((p: any) => p.description)
-  ].join(' ').toLowerCase();
-
-  if (!textToSearch.trim()) return 0;
-
-  let matchCount = 0;
-  let totalWeight = 0;
-
-  for (const resp of responsibilities) {
-    const phrase = resp.toLowerCase();
-    
-    // Exact phrase match gets high score
-    if (textToSearch.includes(phrase)) {
-      matchCount += 1.5;
-    } else {
-      // Keyword matching: split responsibility into keywords
-      const keywords = phrase.split(/\s+/).filter(w => w.length > 3 && !['with', 'that', 'this', 'from', 'into', 'manage', 'handle'].includes(w));
-      
-      if (keywords.length > 0) {
-        const matchedKeywords = keywords.filter(k => textToSearch.includes(k));
-        const matchRatio = matchedKeywords.length / keywords.length;
-        
-        // If more than 60% of significant keywords match, count it
-        if (matchRatio >= 0.6) {
-          matchCount += matchRatio;
-        }
-      }
-    }
-    totalWeight += 1;
-  }
-
-  // Normalize score between 0 and 1
-  // We don't expect 100% match of all AI-generated responsibilities, so we scale it
-  const finalScore = Math.min(1, matchCount / Math.max(1, totalWeight * 0.7));
-  
-  return finalScore;
 }
 
 function calculateSkillsScore(requiredSkills: string[], candidate: any): number {
@@ -754,31 +477,9 @@ function calculateSkillsScore(requiredSkills: string[], candidate: any): number 
   let matches = 0
   for (const requiredSkill of requiredSkills) {
     const required = requiredSkill.toLowerCase()
-    
-    // Semantic skill matching with synonyms and related concepts
-    const skillSynonyms: { [key: string]: string[] } = {
-      'sap': ['sap', 'erp', 'enterprise resource planning', 'sap software'],
-      'inventory management': ['inventory', 'stock management', 'inventory control', 'stock control', 'inventory tracking'],
-      'lifo': ['lifo', 'inventory method', 'inventory management'],
-      'fefo': ['fefo', 'fifo', 'inventory method', 'inventory management'],
-      'warehouse management': ['warehouse', 'godown', 'store management', 'warehouse operations'],
-      'organizational skills': ['organization', 'organizational', 'planning', 'coordination'],
-      'leadership': ['leadership', 'leader', 'team management', 'people management', 'supervisory'],
-      'fleet management': ['fleet', 'vehicle management', 'transportation management', 'fleet operations'],
-      'gps tracking': ['gps', 'vehicle tracking', 'fleet tracking', 'gps monitoring'],
-      'route optimization': ['route planning', 'route optimization', 'logistics planning', 'delivery planning']
+    if (allCandidateSkills.some(skill => skill.includes(required) || required.includes(skill))) {
+      matches++
     }
-    
-    // Check for direct match or synonym match
-    const hasMatch = allCandidateSkills.some(skill => {
-      if (skill.includes(required) || required.includes(skill)) return true
-      
-      // Check synonyms
-      const synonyms = skillSynonyms[required] || []
-      return synonyms.some(synonym => skill.includes(synonym) || synonym.includes(skill))
-    })
-    
-    if (hasMatch) matches++
   }
   
   return matches / requiredSkills.length

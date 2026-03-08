@@ -12,6 +12,17 @@ async function getAuthUserFromRequest(request: NextRequest) {
   return { token, user: data.user }
 }
 
+async function isInternalUser(user: any) {
+  const authUserId = String(user.id)
+  const email = String(user.email || "").trim().toLowerCase()
+  let query = supabaseAdmin.from("internal_users").select("auth_user_id").eq("auth_user_id", authUserId)
+  if (email) {
+    query = query.or(`auth_user_id.eq.${authUserId},email.eq.${email}`)
+  }
+  const { data } = await query.maybeSingle()
+  return Boolean(data)
+}
+
 async function ensureCandidateForUser(user: any) {
   const authUserId = String(user.id)
   const email = String(user.email || "").trim().toLowerCase()
@@ -72,6 +83,7 @@ export async function GET(request: NextRequest) {
   try {
     const { user } = await getAuthUserFromRequest(request)
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    if (await isInternalUser(user)) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     const candidate = await ensureCandidateForUser(user)
     return NextResponse.json(candidate)
   } catch (e: any) {
@@ -83,6 +95,7 @@ export async function PUT(request: NextRequest) {
   try {
     const { user } = await getAuthUserFromRequest(request)
     if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    if (await isInternalUser(user)) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     const candidate = await ensureCandidateForUser(user)
     const body = await request.json().catch(() => ({}))
 
@@ -101,6 +114,17 @@ export async function PUT(request: NextRequest) {
       .select("id,name,email,phone,desired_role,preferred_location,open_job_types,preferred_roles,file_url,file_name,updated_at")
       .single()
     if (updated.error) throw updated.error
+
+    supabaseAdmin
+      .from("analytics_events")
+      .insert({
+        actor_auth_user_id: String(user.id),
+        event_name: "board.profile.updated",
+        entity_type: "candidates",
+        entity_id: candidate.id,
+        metadata: { candidate_id: candidate.id },
+      })
+      .then(() => {})
     return NextResponse.json(updated.data)
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "Internal Server Error" }, { status: 500 })

@@ -144,6 +144,17 @@ export async function POST(request: NextRequest) {
       .select("id,name,email,phone,desired_role,preferred_location,open_job_types,preferred_roles,file_url,file_name,updated_at")
       .single()
     if (updated.error) throw updated.error
+
+    supabaseAdmin
+      .from("analytics_events")
+      .insert({
+        actor_auth_user_id: String(user.id),
+        event_name: "board.resume.uploaded",
+        entity_type: "candidates",
+        entity_id: candidate.id,
+        metadata: { candidate_id: candidate.id, file_type: rawFile.type, file_size: rawFile.size },
+      })
+      .then(() => {})
     return NextResponse.json({ candidate: updated.data })
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "Internal Server Error" }, { status: 500 })

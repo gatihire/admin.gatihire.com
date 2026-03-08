@@ -1,157 +1,527 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { supabase, supabaseAdmin } from "@/lib/supabase"
-import { generateEmbedding, searchCandidates, extractKeywordsFromSentence, extractSearchKeywordsWithAI } from "@/lib/ai-utils"
+import { generateEmbedding, extractKeywordsFromSentence, extractSearchKeywordsWithAI, generateWebsearchQueryFromJDWithAI } from "@/lib/ai-utils"
 import { SupabaseCandidateService } from "@/lib/supabase-candidates"
 import { logger } from "@/lib/logger"
-import { parseSearchRequirement, intelligentCandidateSearch } from "@/lib/intelligent-search"
-import { generateCandidateSummary } from "@/lib/ai-summary"
+import { parseSearchRequirement, intelligentCandidateSearch, type SearchRequirement, type RoleScope } from "@/lib/intelligent-search"
+import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 
 // JD-based search function for job description analysis
-async function jdBasedSearch(jobDescription: string, candidates: any[]): Promise<any[]> {
-  console.log("=== JD-Based Search (Skill-Only, Logistics Domain) ===")
+const jdRequirementsCache = new Map<string, { at: number; req: any }>()
+const JD_REQUIREMENTS_TTL_MS = 10 * 60_000
+const jdKeywordCache = new Map<string, { at: number; terms: string[] }>()
+const JD_KEYWORDS_TTL_MS = 10 * 60_000
+const jdWebsearchCache = new Map<string, { at: number; query: string }>()
+const jdEmbeddingCache = new Map<string, { at: number; emb: number[] }>()
+const JD_EMBEDDING_TTL_MS = 10 * 60_000
+
+const smartRequirementsCache = new Map<string, { at: number; req: any }>()
+const SMART_REQUIREMENTS_TTL_MS = 10 * 60_000
+const smartKeywordCache = new Map<string, { at: number; terms: string[] }>()
+const SMART_KEYWORDS_TTL_MS = 10 * 60_000
+const smartWebsearchCache = new Map<string, { at: number; query: string }>()
+const SMART_WEBSEARCH_TTL_MS = 10 * 60_000
+const smartEmbeddingCache = new Map<string, { at: number; emb: number[] }>()
+const SMART_EMBEDDING_TTL_MS = 10 * 60_000
+
+function hashKey(input: string) {
+  return Buffer.from(input, 'utf8').toString('base64').slice(0, 200)
+}
+
+function parseYears(text: string) {
+  const t = String(text || '')
+  const m = t.match(/(\d{1,2})(?:\+)?\s*(?:years?|yrs?)/i)
+  if (!m) return 0
+  const v = Number(m[1])
+  return Number.isFinite(v) ? v : 0
+}
+
+function normalizeRoleText(value: string) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+function extractCurrentRoleText(candidate: any) {
+  if (candidate?.currentRole) return String(candidate.currentRole)
+  const exps = Array.isArray(candidate?.workExperience) ? candidate.workExperience : []
+  const present = exps.find((exp: any) => /present|current|till date/i.test(String(exp?.duration || "")))
+  if (present?.role) return String(present.role)
+  if (exps[0]?.role) return String(exps[0].role)
+  return ""
+}
+
+function expandRoleVariants(role: string) {
+  const t = String(role || "").trim()
+  if (!t) return []
+  const parts = t.split(/\s+/).filter(Boolean)
+  if (!parts.length) return [t]
+
+  const first = parts[0]
+  const lower = first.toLowerCase()
+  const out = new Set<string>()
+  out.add(t)
+
+  if (lower.length > 3) {
+    if (lower.endsWith("s") && !lower.endsWith("ss")) {
+      const singular = first.slice(0, -1)
+      out.add([singular, ...parts.slice(1)].join(" "))
+    } else if (!lower.endsWith("s")) {
+      out.add([first + "s", ...parts.slice(1)].join(" "))
+    }
+  }
+
+  return Array.from(out)
+}
+
+function normalizeTerms(list: string[]) {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const raw of list) {
+    const v = String(raw || '').trim()
+    if (!v) continue
+    const key = v.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(v)
+  }
+  return out
+}
+
+function parseListParam(value: string | null): string[] {
+  if (!value) return []
+  return value
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean)
+}
+
+function getCandidateRoleText(candidate: any, roleScope: RoleScope) {
+  const parts: string[] = []
+  const currentRole = extractCurrentRoleText(candidate)
+  if (currentRole) parts.push(currentRole)
+  if (roleScope === "current_past") {
+    if (candidate?.desiredRole) parts.push(String(candidate.desiredRole))
+    if (Array.isArray(candidate?.jobTitles)) parts.push(...candidate.jobTitles.map((t: any) => String(t)))
+    if (Array.isArray(candidate?.workExperience)) {
+      parts.push(...candidate.workExperience.map((exp: any) => exp?.role).filter(Boolean).map((t: any) => String(t)))
+    }
+  }
+  return parts.join(" ").toLowerCase()
+}
+
+function applySidebarFilters(results: any[], filters: any) {
+  return results.filter((candidate: any) => {
+    if (filters.mustHaveKeywords?.length) {
+      const candidateText = [
+        candidate.name || "",
+        candidate.currentRole || "",
+        candidate.location || "",
+        candidate.summary || "",
+        candidate.currentCompany || "",
+        ...(candidate.technicalSkills || []),
+        ...(candidate.softSkills || []),
+        ...(candidate.jobTitles || []),
+        candidate.resumeText || "",
+      ]
+        .join(" ")
+        .toLowerCase()
+      const hasAllKeywords = filters.mustHaveKeywords.every((keyword: string) =>
+        candidateText.includes(keyword.toLowerCase()),
+      )
+      if (!hasAllKeywords) return false
+    }
+
+    if (filters.excludeKeywords?.length) {
+      const candidateText = [
+        candidate.name || "",
+        candidate.currentRole || "",
+        candidate.location || "",
+        candidate.summary || "",
+        candidate.currentCompany || "",
+        ...(candidate.technicalSkills || []),
+        ...(candidate.softSkills || []),
+        ...(candidate.jobTitles || []),
+        candidate.resumeText || "",
+      ]
+        .join(" ")
+        .toLowerCase()
+      const hasExcludedKeyword = filters.excludeKeywords.some((keyword: string) =>
+        candidateText.includes(keyword.toLowerCase()),
+      )
+      if (hasExcludedKeyword) return false
+    }
+
+    if (filters.hideInactive && candidate.status === "inactive") return false
+
+    if (filters.showOnlyAvailable) {
+      const noticePeriod = candidate.noticePeriod || ""
+      const isAvailable =
+        noticePeriod.toLowerCase().includes("immediate") ||
+        noticePeriod.toLowerCase().includes("0") ||
+        noticePeriod === "" ||
+        noticePeriod.toLowerCase().includes("ready")
+      if (!isAvailable) return false
+    }
+
+    if (filters.currentCity?.length) {
+      const candidateLocation = (candidate.location || "").toLowerCase()
+      const matchesCity = filters.currentCity.some((city: string) =>
+        candidateLocation.includes(city.toLowerCase()),
+      )
+      if (!matchesCity) return false
+    }
+
+    if (filters.experience?.min || filters.experience?.max) {
+      const experienceYears = parseYears(candidate.totalExperience)
+      const minExp = filters.experience.min ? Number(filters.experience.min) : 0
+      const maxExp = filters.experience.max ? Number(filters.experience.max) : Infinity
+      if (experienceYears < minExp || experienceYears > maxExp) return false
+    }
+
+    if (filters.salaryRange?.min || filters.salaryRange?.max) {
+      const currentSalary = candidate.currentSalary || ""
+      const expectedSalary = candidate.expectedSalary || ""
+      const salaryStr = currentSalary || expectedSalary
+      if (salaryStr) {
+        const salaryMatch = salaryStr.match(/(\d+(?:\.\d+)?)/)
+        if (salaryMatch) {
+          const salaryValue = parseFloat(salaryMatch[1])
+          const minSalary = filters.salaryRange.min ? Number(filters.salaryRange.min) : 0
+          const maxSalary = filters.salaryRange.max ? Number(filters.salaryRange.max) : Infinity
+          if (salaryValue < minSalary || salaryValue > maxSalary) return false
+        }
+      }
+    }
+
+    if (filters.education?.length) {
+      const candidateEducation = [
+        candidate.degree || "",
+        candidate.highestQualification || "",
+        candidate.education || "",
+      ]
+        .join(" ")
+        .toLowerCase()
+      const matchesEducation = filters.education.some((edu: string) => {
+        const eduLower = edu.toLowerCase()
+        return (
+          candidateEducation.includes(eduLower) ||
+          (eduLower.includes("graduate") &&
+            (candidateEducation.includes("bachelor") || candidateEducation.includes("master"))) ||
+          (eduLower.includes("post graduate") && candidateEducation.includes("master"))
+        )
+      })
+      if (!matchesEducation) return false
+    }
+
+    if (filters.gender?.length) {
+      const candidateGender = (candidate.gender || "").toLowerCase()
+      const matchesGender = filters.gender.some((g: string) => candidateGender.includes(g.toLowerCase()))
+      if (!matchesGender) return false
+    }
+
+    if (filters.languages?.length) {
+      const candidateLanguages = (candidate.languagesKnown || []).map((l: string) => l.toLowerCase())
+      const matchesLanguage = filters.languages.some((lang: string) =>
+        candidateLanguages.some((cl: string) => cl.includes(lang.toLowerCase())),
+      )
+      if (!matchesLanguage) return false
+    }
+
+    return true
+  })
+}
+
+function toWebsearchOrQuery(terms: string[], maxTerms = 18) {
+  return terms
+    .slice(0, maxTerms)
+    .map((t) => {
+      const v = String(t || "").trim()
+      if (!v) return ""
+      return v.includes(" ") ? `"${v}"` : v
+    })
+    .filter(Boolean)
+    .join(" OR ")
+}
+
+function sanitizeWebsearchQuery(q: string) {
+  return String(q || "")
+    .replace(/[()]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+async function jdBasedSearch(jobDescription: string, extractedKeywords: string[] = [], roleScope: RoleScope): Promise<any[]> {
+  console.log("=== JD-Based Search (Intelligent Extraction) ===")
 
   try {
     const jdText = (jobDescription || '').toLowerCase();
     
-    // Use ONLY the provided logistics skill list for JD search
+    const cacheKey = hashKey(jobDescription.trim())
+    const now = Date.now()
+
+    const cachedReq = jdRequirementsCache.get(cacheKey)
+    const requirementsPromise = cachedReq && now - cachedReq.at < JD_REQUIREMENTS_TTL_MS
+      ? Promise.resolve(cachedReq.req as SearchRequirement)
+      : parseSearchRequirement(jobDescription).catch(() => null).then((req) => {
+          jdRequirementsCache.set(cacheKey, { at: now, req })
+          return req as SearchRequirement | null
+        })
+
+    const cachedKw = jdKeywordCache.get(cacheKey)
+    const keywordPromise = cachedKw && now - cachedKw.at < JD_KEYWORDS_TTL_MS
+      ? Promise.resolve(cachedKw.terms)
+      : extractSearchKeywordsWithAI(jobDescription.slice(0, 7000))
+          .catch(() => [])
+          .then((terms) => {
+            jdKeywordCache.set(cacheKey, { at: now, terms })
+            return terms
+          })
+
+    const cachedWeb = jdWebsearchCache.get(cacheKey)
+    const websearchPromise = cachedWeb && now - cachedWeb.at < JD_KEYWORDS_TTL_MS
+      ? Promise.resolve(cachedWeb.query)
+      : generateWebsearchQueryFromJDWithAI(jobDescription)
+          .catch(() => "")
+          .then((query) => {
+            jdWebsearchCache.set(cacheKey, { at: now, query: String(query || "") })
+            return String(query || "")
+          })
+
+    const cachedEmb = jdEmbeddingCache.get(cacheKey)
+    const embeddingPromise = cachedEmb && now - cachedEmb.at < JD_EMBEDDING_TTL_MS
+      ? Promise.resolve(cachedEmb.emb)
+      : generateEmbedding(jobDescription.slice(0, 7000))
+          .catch(() => [])
+          .then((emb) => {
+            jdEmbeddingCache.set(cacheKey, { at: now, emb })
+            return emb
+          })
+
+    const [parsedReq, aiTerms, websearchFromAI, embedding] = await Promise.all([
+      requirementsPromise,
+      keywordPromise,
+      websearchPromise,
+      embeddingPromise,
+    ])
+
+    // 2. Extract Location and Role for heavy weighting
+    const targetLocation = parsedReq?.location?.toLowerCase() || "";
+    const targetRole = parsedReq?.role?.toLowerCase() || "";
+    const minYears = Math.max(parseYears(jobDescription), Number(parsedReq?.experience?.min || 0) || 0)
+
+    console.log(`Target: Role="${targetRole}", Location="${targetLocation}", Exp>=${minYears}`);
+
+    // 3. Match skills appearing in the JD text
     const LOGISTICS_SKILLS = [
-      'gps tracking',
-      'fleet management',
-      'route optimization',
-      'supply chain management',
-      'inventory management',
-      'logistics planning',
-      'vehicle tracking',
-      'warehouse management',
-      'transportation management',
-      'driver management',
-      'fuel management',
-      'maintenance scheduling',
-      'compliance',
-      'safety regulations',
-      'dot regulations',
-      'international fuel tax agreement',
-      'communication',
-      'problem solving',
-      'leadership',
-      'team management',
-      'data analysis',
+      'gps tracking', 'fleet management', 'route optimization', 'supply chain management',
+      'inventory management', 'logistics planning', 'vehicle tracking', 'warehouse management',
+      'transportation management', 'driver management', 'fuel management', 'maintenance scheduling',
+      'compliance', 'safety regulations', 'dot regulations', 'international fuel tax agreement',
+      'communication', 'problem solving', 'leadership', 'team management', 'data analysis',
     ];
     
-    // Match skills appearing in the JD text (strict intersection)
     const matchedSkills = LOGISTICS_SKILLS.filter(skill => jdText.includes(skill.toLowerCase()));
-    console.log('JD matched skills:', matchedSkills);
-    
     const skillsForSearch = matchedSkills.length > 0 ? matchedSkills : LOGISTICS_SKILLS;
-    console.log('Using Supabase skill-based search with skills:', skillsForSearch);
-    
-    // Primary: Supabase skill-based search
-    try {
-      const supabaseResults = await SupabaseCandidateService.searchCandidatesBySkills(skillsForSearch);
-      
-      if (supabaseResults && supabaseResults.length > 0) {
-        // Score candidates by matched skill count and distribution across fields
-        const scored = supabaseResults.map(candidate => {
-          const text = [
-            (candidate.currentRole || ''),
-            (candidate.summary || ''),
-            (candidate.resumeText || ''),
-            (candidate.currentCompany || ''),
-            ...(candidate.technicalSkills || []),
-            ...(candidate.softSkills || []),
-          ].join(' ').toLowerCase();
-          
-          const candidateSkills = new Set((candidate.technicalSkills || []).map((s: string) => s.toLowerCase()));
-          let hits = 0;
-          skillsForSearch.forEach(skill => {
-            const s = skill.toLowerCase();
-            if (candidateSkills.has(s) || text.includes(s)) hits += 1;
-          });
-          
-          // Relevance based on ratio of matched skills and slight text boost
-          const base = hits / skillsForSearch.length; // 0..1
-          const boost = Math.min(0.15, hits * 0.02);
-          const relevanceScore = Math.max(0, Math.min(1, base + boost));
-          const matchPercentage = Math.round(base * 100);
-          
-          return {
-            ...candidate,
-            relevanceScore,
-            matchPercentage,
-            matchingKeywords: matchedSkills.length > 0 ? matchedSkills : skillsForSearch,
-          };
-        });
-        
-        // Sort by relevance and return
-        return scored.sort((a, b) => (b.relevanceScore || 0) - (a.relevanceScore || 0));
-      }
-    } catch (error) {
-      console.error('Supabase skill search failed, falling back to local/AI search:', error);
+
+    const mustPhrases = normalizeTerms([
+      ...expandRoleVariants(targetRole),
+      targetLocation,
+      ...aiTerms,
+      ...skillsForSearch,
+      ...(parsedReq?.skills || []),
+      'DOT', 'FMCSA', 'fleet drivers', 'preventive maintenance',
+      'fuel management', 'vehicle tracking', 'driver management', 'compliance',
+    ]).filter(Boolean).slice(0, 50)
+
+    const websearchQuery = sanitizeWebsearchQuery(websearchFromAI) || toWebsearchOrQuery(mustPhrases, 20)
+    const roleTerms = normalizeTerms(expandRoleVariants(targetRole))
+    const roleQuery = roleTerms.length ? toWebsearchOrQuery(roleTerms, 8) : ""
+
+    const [vectorResults, textResults, roleTextResults, currentRoleResults] = await Promise.all([
+      embedding.length ? SupabaseCandidateService.searchCandidatesByEmbedding(embedding, 0.22, 350) : Promise.resolve([]),
+      SupabaseCandidateService.searchCandidatesByText(websearchQuery, 800, false),
+      roleQuery ? SupabaseCandidateService.searchCandidatesByText(roleQuery, 800, false) : Promise.resolve([]),
+      roleScope === "current" && roleTerms.length ? SupabaseCandidateService.searchCandidatesByCurrentRole(roleTerms, 800) : Promise.resolve([]),
+    ]);
+
+    const mergedById = new Map<string, any>()
+    for (const c of textResults || []) { if (c?.id) mergedById.set(String(c.id), c); }
+    for (const c of vectorResults || []) {
+      if (!c?.id) continue
+      const id = String(c.id)
+      const existing = mergedById.get(id)
+      mergedById.set(id, existing ? { ...existing, ...c } : c)
     }
-    
-    // Fallback: local weighted search using skill phrases as query
-    const fallbackQuery = skillsForSearch.join(' ');
-    const aiResults = await searchCandidates(fallbackQuery, candidates);
-    return aiResults.map(c => ({
-      ...c,
-      matchingKeywords: matchedSkills.length > 0 ? matchedSkills : skillsForSearch,
-    }));
+    for (const c of roleTextResults || []) {
+      if (!c?.id) continue
+      const id = String(c.id)
+      const existing = mergedById.get(id)
+      mergedById.set(id, existing ? { ...existing, ...c } : c)
+    }
+    for (const c of currentRoleResults || []) {
+      if (!c?.id) continue
+      const id = String(c.id)
+      const existing = mergedById.get(id)
+      mergedById.set(id, existing ? { ...existing, ...c } : c)
+    }
+
+    const merged = Array.from(mergedById.values())
+    if (merged.length) {
+      const scored = merged.map((candidate) => {
+        const candText = [
+          getCandidateRoleText(candidate, roleScope),
+          (candidate.summary || ""),
+          (candidate.resumeText || ""),
+          (candidate.currentCompany || ""),
+          ...(candidate.technicalSkills || []),
+          ...(candidate.softSkills || []),
+        ].join(" ").toLowerCase()
+
+        // --- LOCATION SCORE (High Weight) ---
+        let locationScore = 0;
+        if (targetLocation) {
+          const candLoc = (candidate.location || "").toLowerCase();
+          if (candLoc.includes(targetLocation) || targetLocation.includes(candLoc)) {
+            locationScore = 1.0;
+          } else {
+            // Check major city variations (synonyms)
+            const variations: Record<string, string[]> = {
+              'delhi': ['delhi', 'ncr', 'gurgaon', 'gurugram', 'noida', 'faridabad'],
+              'mumbai': ['mumbai', 'bombay', 'navi mumbai', 'thane'],
+              'bangalore': ['bangalore', 'bengaluru'],
+              'gurgaon': ['gurgaon', 'gurugram', 'haryana'],
+              'pune': ['pune', 'poona']
+            };
+            for (const [key, vars] of Object.entries(variations)) {
+              if (targetLocation.includes(key) && vars.some(v => candLoc.includes(v))) {
+                locationScore = 0.9;
+                break;
+              }
+            }
+          }
+        }
+
+        // --- ROLE SCORE (High Weight) ---
+        let roleScore = 0;
+        if (targetRole) {
+          const roleText = getCandidateRoleText(candidate, roleScope)
+          const roleTextNorm = normalizeRoleText(roleText)
+          const targetRoleNorm = normalizeRoleText(targetRole)
+          if (roleTextNorm && targetRoleNorm && roleTextNorm.includes(targetRoleNorm)) {
+            roleScore = 1.0;
+          } else {
+            const roleMatch = calculateRoleMatch(targetRole, candidate, roleScope);
+            roleScore = roleMatch;
+          }
+        }
+
+        // --- SKILLS SCORE ---
+        const candidateSkills = new Set((candidate.technicalSkills || []).map((s: string) => s.toLowerCase()))
+        let skillHits = 0
+        for (const skill of skillsForSearch) {
+          if (candidateSkills.has(skill.toLowerCase()) || candText.includes(skill.toLowerCase())) skillHits += 1
+        }
+        const skillBase = skillHits / skillsForSearch.length
+
+        // --- EXPERIENCE SCORE ---
+        const yrs = parseYears(candidate.totalExperience)
+        const expScore = minYears ? (yrs >= minYears ? 1.0 : yrs > 0 ? (yrs / minYears) : 0) : 0.5
+
+        // --- VECTOR SIMILARITY ---
+        const sim = Number((candidate as any)?.vectorSimilarity || 0)
+
+        // --- FINAL RELEVANCE FORMULA ---
+        // Weights: Role(30%), Location(30%), Skills(20%), Experience(10%), Vector Similarity(10%)
+        const relevanceScore = (roleScore * 0.30) + (locationScore * 0.30) + (skillBase * 0.20) + (expScore * 0.10) + (sim * 0.10);
+        const matchPercentage = Math.round(relevanceScore * 100)
+
+        const matchingCriteria = [];
+        if (roleScore > 0.5) matchingCriteria.push("Role Match");
+        if (locationScore > 0.5) matchingCriteria.push("Location Match");
+        if (skillHits > 0) matchingCriteria.push(`${skillHits} Skills`);
+        if (expScore >= 1.0) matchingCriteria.push("Experience Match");
+
+        return {
+          ...candidate,
+          relevanceScore,
+          matchPercentage,
+          matchingKeywords: matchedSkills.length > 0 ? matchedSkills : skillsForSearch,
+          matchingCriteria,
+          roleScore
+        }
+      })
+
+      return scored
+        .filter((c) => (c?.relevanceScore || 0) >= 0.2 && (roleScope !== "current" || !targetRole || (c?.roleScore || 0) >= 0.2))
+        .sort((a, b) => (b.relevanceScore || 0) - (a.relevanceScore || 0))
+        .slice(0, 250)
+    }
+
+    return []
   } catch (error) {
     console.error('JD analysis failed:', error);
-    // Final fallback: return empty array rather than noisy matches
     return [];
   }
 }
 
-// Helper function to process pagination and add AI summaries
-async function processResultsWithSummary(
-  results: any[],
-  page: number,
-  perPage: number,
-  paginate: boolean,
-  requirements: any,
-  includeSummary: boolean
-) {
-    let items = results;
-    let total = results.length;
-    let currentPage = page;
+// Helper for JD search scoring (copied/adapted from intelligent-search for context)
+function calculateRoleMatch(requiredRole: string, candidate: any, roleScope: RoleScope): number {
+  const candRole = getCandidateRoleText(candidate, roleScope);
+  const required = requiredRole.toLowerCase();
+  if (!candRole) return 0;
+  
+  const candNorm = normalizeRoleText(candRole)
+  const reqNorm = normalizeRoleText(required)
+  if (candNorm && reqNorm) {
+    if (candNorm.includes(reqNorm) || reqNorm.includes(candNorm)) return 1
+  }
 
-    if (paginate) {
-        const totalPages = Math.max(1, Math.ceil(total / perPage))
-        currentPage = Math.min(page, totalPages)
-        const startIdx = (currentPage - 1) * perPage
-        items = results.slice(startIdx, startIdx + perPage)
-    }
+  const roleSynonyms: Record<string, string[]> = {
+    'fleet manager': ['fleet management', 'transportation manager', 'logistics manager', 'operations manager', 'fleet operations manager'],
+    'truck driver': ['driver', 'heavy vehicle driver', 'commercial driver', 'truck operator'],
+    'logistics coordinator': ['logistics executive', 'supply chain coordinator', 'logistics specialist'],
+    'operations manager': ['operations executive', 'operations head', 'operations supervisor', 'fleet manager'],
+    'accounts manager': ['accountant', 'finance manager', 'finance executive', 'accounts executive']
+  };
 
-    if (includeSummary && items.length > 0) {
-      const summaryPromises = items.map(async (candidate) => {
-        const summary = await generateCandidateSummary(candidate, requirements)
-        return {
-          ...candidate,
-          matchSummary: summary
-        }
-      })
-      items = await Promise.all(summaryPromises)
+  let best = 0
+  for (const [key, synonyms] of Object.entries(roleSynonyms)) {
+    if (required.includes(key)) {
+      if (synonyms.some(s => candRole.includes(s))) best = Math.max(best, 0.85);
     }
+  }
 
-    if (paginate) {
-        return { items, total, page: currentPage, perPage };
+  if (candNorm && reqNorm) {
+    const reqTokens = reqNorm.split(" ").filter((t) => t.length > 2)
+    const candTokens = new Set(candNorm.split(" ").filter((t) => t.length > 2))
+    if (reqTokens.length > 0) {
+      const hits = reqTokens.filter((t) => candTokens.has(t)).length
+      const score = hits / reqTokens.length
+      if (score >= 0.7) best = Math.max(best, 0.8)
+      else if (score >= 0.5) best = Math.max(best, 0.6)
+      else if (score >= 0.34) best = Math.max(best, 0.4)
     }
-    return items;
+  }
+
+  return best;
 }
 
-// Simple in-memory cache to reduce repeated full-sheet reads during rapid searches
-let candidatesCache: any[] | null = null
-let candidatesCacheAt = 0
-const CANDIDATES_CACHE_MS = 5_000 
 
 export async function GET(request: NextRequest) {
-  // Authorization: require login cookie or valid admin token
-  const authCookie = request.cookies.get("auth")?.value
   const authHeader = request.headers.get("authorization")
   const hasAdminToken = authHeader === `Bearer ${process.env.ADMIN_TOKEN}`
-  if (authCookie !== "true" && !hasAdminToken) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  const ctx = hasAdminToken ? null : await getInternalAuthContext(request)
+  if (!hasAdminToken) {
+    if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    const canSearch =
+      hasPermission(ctx, "candidates.search") ||
+      hasPermission(ctx, "candidates.search-only") ||
+      hasPermission(ctx, "candidates.view") ||
+      hasPermission(ctx, "candidates.edit")
+    if (!canSearch) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
   }
 
   try {
@@ -160,9 +530,11 @@ export async function GET(request: NextRequest) {
     const query        = searchParams.get('keywords') ?? searchParams.get('query') ?? ''
     const jobDescription = searchParams.get('jobDescription') ?? searchParams.get('jd') ?? ''
     const paginate     = searchParams.get('paginate') === 'true'
-    const page         = Number(searchParams.get('page') ?? '1')
-    const perPage      = Number(searchParams.get('perPage') ?? '25')
-    const includeSummary = searchParams.get('includeSummary') === 'true' || searchParams.get('includeSummary') === '1'
+    const pageRaw      = Number(searchParams.get('page') ?? '1')
+    const perPageRaw   = Number(searchParams.get('perPage') ?? '20')
+    const page         = Math.max(1, Number.isFinite(pageRaw) ? pageRaw : 1)
+    const perPage      = Math.min(100, Math.max(1, Number.isFinite(perPageRaw) ? perPageRaw : 20))
+    const roleScope: RoleScope = searchParams.get("roleScope") === "current" ? "current" : "current_past"
 
     // Build filters object from individual keys
     const filters: any = {}
@@ -174,265 +546,485 @@ export async function GET(request: NextRequest) {
     console.log("=== Enhanced Search API ===")
     console.log("Search Type:", searchType)
     console.log("Query:", query)
+    console.log("Job Description:", jobDescription ? "Provided" : "Not provided")
+    const sidebarFilters = {
+      hideInactive: searchParams.get("hideInactive") === "true",
+      showOnlyAvailable: searchParams.get("showOnlyAvailable") === "true",
+      mustHaveKeywords: parseListParam(searchParams.get("mustHaveKeywords")),
+      excludeKeywords: parseListParam(searchParams.get("excludeKeywords")),
+      currentCity: parseListParam(searchParams.get("currentCity")),
+      experience: {
+        min: searchParams.get("expMin") || "",
+        max: searchParams.get("expMax") || "",
+      },
+      salaryRange: {
+        min: searchParams.get("salaryMin") || "",
+        max: searchParams.get("salaryMax") || "",
+      },
+      education: parseListParam(searchParams.get("educationFilters")),
+      gender: parseListParam(searchParams.get("genderFilters")),
+      languages: parseListParam(searchParams.get("languageFilters")),
+    }
+    const hasSidebarFilters = Boolean(
+      sidebarFilters.hideInactive ||
+        sidebarFilters.showOnlyAvailable ||
+        sidebarFilters.mustHaveKeywords.length ||
+        sidebarFilters.excludeKeywords.length ||
+        sidebarFilters.currentCity.length ||
+        sidebarFilters.experience.min ||
+        sidebarFilters.experience.max ||
+        sidebarFilters.salaryRange.min ||
+        sidebarFilters.salaryRange.max ||
+        sidebarFilters.education.length ||
+        sidebarFilters.gender.length ||
+        sidebarFilters.languages.length,
+    )
+
+    console.log("Filters:", filters)
     logger.info(`Search request: type=${searchType} query="${query}" jd=${!!jobDescription} filters=${JSON.stringify(filters)}`)
 
-    // Determine initial candidate pool
-    let allCandidates: any[] = []
-    
-    // Build search text from query or JD - prioritize getting good candidate pool
-    const searchText = (searchType === 'jd' && jobDescription) 
-      ? jobDescription.trim() 
-      : (query && query.trim().length > 0 ? query.trim() : '')
-    
-    // If we have search text (query or JD), prioritize DB Full Text Search
-    if (searchText && searchText.length > 0) {
-      try {
-        console.log(`Using DB Full Text Search for: "${searchText.substring(0, 100)}..."`);
-        // 1. Try strict search first - for JD, use first part; for query use full
-        const searchQuery = searchType === 'jd' ? searchText.substring(0, 500) : searchText;
-        allCandidates = await SupabaseCandidateService.searchCandidatesByText(searchQuery, 500);
-        console.log(`Strict DB Search returned ${allCandidates.length} candidates`);
-
-        // 2. If strict search yields few results, try AI-enhanced keyword search
-        if (allCandidates.length < 50) {
-           console.log("Strict search yielded few results, using AI to extract optimal keywords...");
-           try {
-             const aiKeywords = await extractSearchKeywordsWithAI(searchText);
-             const formattedQuery = aiKeywords.map(k => k.includes(' ') ? `"${k}"` : k).join(' ');
-             
-             if (formattedQuery.length > 0 && formattedQuery !== searchQuery) {
-               console.log(`AI Refined Search Query: ${formattedQuery}`);
-               const aiResults = await SupabaseCandidateService.searchCandidatesByText(formattedQuery, 500);
-               
-               const existingIds = new Set(allCandidates.map(c => c.id));
-               aiResults.forEach(c => {
-                 if (c.id && !existingIds.has(c.id)) {
-                   allCandidates.push(c);
-                   existingIds.add(c.id);
-                 }
-               });
-             }
-           } catch (aiError) {
-             console.error("AI search refinement failed:", aiError);
-           }
-         }
-      } catch (error) {
-        console.error("DB Text Search failed, falling back to cache:", error);
-      }
-
-      // 3. Vector Search (Semantic Search) - Currently disabled as method doesn't exist
-      // TODO: Re-enable when searchCandidatesByEmbedding is implemented in SupabaseCandidateService
-      // try {
-      //   console.log(`Generating embedding for vector search: "${query}"`);
-      //   const embedding = await generateEmbedding(query);
-      //   
-      //   if (embedding && embedding.length > 0) {
-      //     console.log("Executing vector search...");
-      //     const vectorResults = await SupabaseCandidateService.searchCandidatesByEmbedding(embedding, 0.6, 50); 
-      //     
-      //     const existingIds = new Set(allCandidates.map(c => c.id));
-      //     vectorResults.forEach(c => {
-      //       if (c.id && !existingIds.has(c.id)) {
-      //         (c as any).source = 'vector';
-      //         allCandidates.push(c);
-      //         existingIds.add(c.id);
-      //       }
-      //     });
-      //   }
-      // } catch (vectorError) {
-      //   console.error("Vector search failed:", vectorError);
-      // }
-    }
-
-    // If we have a Job Description, use it for vector search as well - Currently disabled as method doesn't exist
-    // TODO: Re-enable when searchCandidatesByEmbedding is implemented in SupabaseCandidateService
-    // if (jobDescription && jobDescription.trim().length > 0) {
-    //   try {
-    //     console.log(`Generating embedding for JD search...`);
-    //     const embedding = await generateEmbedding(jobDescription.slice(0, 8000));
-    //     
-    //     if (embedding && embedding.length > 0) {
-    //       console.log("Executing vector search for JD...");
-    //       const vectorResults = await SupabaseCandidateService.searchCandidatesByEmbedding(embedding, 0.5, 50); 
-    //       
-    //       const existingIds = new Set(allCandidates.map(c => c.id));
-    //       vectorResults.forEach(c => {
-    //         if (c.id && !existingIds.has(c.id)) {
-    //           (c as any).source = 'vector-jd';
-    //           allCandidates.push(c);
-    //           existingIds.add(c.id);
-    //         }
-    //       });
-    //     }
-    //   } catch (vectorError) {
-    //     console.error("JD vector search failed:", vectorError);
-    //   }
-    // }
-
-    // Fallback to cache/fetch-all if DB search returned too few results
-    if (allCandidates.length < 50) {
-      console.log(`Candidate pool small (${allCandidates.length}), fetching full list for AI filtering...`);
-      const now = Date.now()
-      if (!candidatesCache || now - candidatesCacheAt > CANDIDATES_CACHE_MS) {
-        try {
-          const fresh = await SupabaseCandidateService.getAllCandidates()
-          candidatesCache = fresh
-          candidatesCacheAt = now
-        } catch (error) {
-          console.error("Error fetching candidates from Supabase:", error)
-          candidatesCache = []
-          candidatesCacheAt = now
-        }
-      }
-      
-      const cache = candidatesCache || []
-      const existingIds = new Set(allCandidates.map(c => c.id));
-      cache.forEach(c => {
-        if (c.id && !existingIds.has(c.id)) {
-          allCandidates.push(c);
-          existingIds.add(c.id);
-        }
-      });
-    }
-
-    // Transform data to ensure consistency
-    const transformedCandidates = allCandidates.map((candidate) => ({
-      ...candidate,
-      _id: candidate.id,
-      technicalSkills: Array.isArray(candidate.technicalSkills) ? candidate.technicalSkills : [],
-      softSkills: Array.isArray(candidate.softSkills) ? candidate.softSkills : [],
-      tags: Array.isArray(candidate.tags) ? candidate.tags : [],
-      certifications: Array.isArray(candidate.certifications) ? candidate.certifications : [],
-      languagesKnown: Array.isArray(candidate.languagesKnown) ? candidate.languagesKnown : [],
-      // Ensure fields for display
-      currentRole: candidate.currentRole || candidate.current_role || "",
-      totalExperience: candidate.totalExperience || candidate.total_experience || "",
-      location: candidate.location || "",
-      resumeText: candidate.resumeText || candidate.resume_text || "",
-      fileUrl: candidate.fileUrl || candidate.file_url || "",
-      fileName: candidate.fileName || candidate.file_name || "",
-    }))
-
     let results: any[] = []
-    let activeRequirements: any = {}
+    let roleFilterTerm = ""
 
     switch (searchType) {
       case "smart":
-        const smartSearchText = query.trim() || jobDescription.trim()
-        console.log("🧠 Processing TruckinzyAI semantic search query:", smartSearchText)
-        activeRequirements = await parseSearchRequirement(smartSearchText)
-        results = await intelligentCandidateSearch(activeRequirements, transformedCandidates)
+        // Enhanced TruckinzyAI search with deep requirement understanding
+        logger.info(`TruckinzyAI search validation: query="${query}" jobDescription="${jobDescription}"`)
+        if (!query.trim() && !jobDescription.trim()) {
+          return NextResponse.json({ error: "Invalid search parameters", details: "Missing keywords or job description" }, { status: 400 })
+        }
+        
+        console.log("🧠 Processing TruckinzyAI search query:", query)
+        
+        const nl = query.trim() ? query : jobDescription
+        const smartKey = hashKey(nl.trim())
+        const now = Date.now()
+
+        const cachedReq = smartRequirementsCache.get(smartKey)
+        const requirementsPromise = cachedReq && now - cachedReq.at < SMART_REQUIREMENTS_TTL_MS
+          ? Promise.resolve(cachedReq.req as SearchRequirement)
+          : parseSearchRequirement(nl).catch(() => null).then((req) => {
+              smartRequirementsCache.set(smartKey, { at: now, req })
+              return req as SearchRequirement | null
+            })
+
+        const cachedKw = smartKeywordCache.get(smartKey)
+        const keywordPromise = cachedKw && now - cachedKw.at < SMART_KEYWORDS_TTL_MS
+          ? Promise.resolve(cachedKw.terms)
+          : extractSearchKeywordsWithAI(nl)
+              .catch(() => [])
+              .then((terms) => {
+                smartKeywordCache.set(smartKey, { at: now, terms })
+                return terms
+              })
+
+        const cachedWeb = smartWebsearchCache.get(smartKey)
+        const websearchPromise = cachedWeb && now - cachedWeb.at < SMART_WEBSEARCH_TTL_MS
+          ? Promise.resolve(cachedWeb.query)
+          : generateWebsearchQueryFromJDWithAI(nl)
+              .catch(() => "")
+              .then((query) => {
+                smartWebsearchCache.set(smartKey, { at: now, query: String(query || "") })
+                return String(query || "")
+              })
+
+        const cachedEmb = smartEmbeddingCache.get(smartKey)
+        const embeddingPromise = cachedEmb && now - cachedEmb.at < SMART_EMBEDDING_TTL_MS
+          ? Promise.resolve(cachedEmb.emb)
+          : generateEmbedding(nl.slice(0, 7000))
+              .catch(() => [])
+              .then((emb) => {
+                smartEmbeddingCache.set(smartKey, { at: now, emb })
+                return emb
+              })
+
+        const [parsedRequirements, keywordTerms, websearchFromAI, embedding] = await Promise.all([
+          requirementsPromise,
+          keywordPromise,
+          websearchPromise,
+          embeddingPromise,
+        ])
+
+        console.log("📋 Parsed requirements:", JSON.stringify(parsedRequirements, null, 2))
+        roleFilterTerm = parsedRequirements?.role || ""
+
+        const roleVariants = parsedRequirements?.role ? expandRoleVariants(parsedRequirements.role) : []
+        const websearchFallback = toWebsearchOrQuery(normalizeTerms([...roleVariants, ...keywordTerms]), 20)
+        const websearchQuery = sanitizeWebsearchQuery(websearchFromAI) || websearchFallback || nl
+        const roleTerms = normalizeTerms(roleVariants)
+        const roleQuery = roleTerms.length ? toWebsearchOrQuery(roleTerms, 8) : ""
+
+        const [textPool, vectorPool, roleTextPool, currentRolePool] = await Promise.all([
+          SupabaseCandidateService.searchCandidatesByText(websearchQuery, 700, false),
+          embedding.length ? SupabaseCandidateService.searchCandidatesByEmbedding(embedding, 0.22, 250) : Promise.resolve([]),
+          roleQuery ? SupabaseCandidateService.searchCandidatesByText(roleQuery, 800, false) : Promise.resolve([]),
+          roleScope === "current" && roleTerms.length ? SupabaseCandidateService.searchCandidatesByCurrentRole(roleTerms, 800) : Promise.resolve([]),
+        ])
+
+        const mergedById = new Map<string, any>()
+        for (const c of textPool || []) {
+          if (!c?.id) continue
+          mergedById.set(String(c.id), c)
+        }
+        for (const c of vectorPool || []) {
+          if (!c?.id) continue
+          const id = String(c.id)
+          const existing = mergedById.get(id)
+          mergedById.set(id, existing ? { ...existing, ...c } : c)
+        }
+        for (const c of roleTextPool || []) {
+          if (!c?.id) continue
+          const id = String(c.id)
+          const existing = mergedById.get(id)
+          mergedById.set(id, existing ? { ...existing, ...c } : c)
+        }
+        for (const c of currentRolePool || []) {
+          if (!c?.id) continue
+          const id = String(c.id)
+          const existing = mergedById.get(id)
+          mergedById.set(id, existing ? { ...existing, ...c } : c)
+        }
+
+        const pool = Array.from(mergedById.values())
+        const transformedCandidates = pool.map((candidate) => ({
+          ...candidate,
+          _id: candidate.id,
+          technicalSkills: Array.isArray(candidate.technicalSkills) ? candidate.technicalSkills : [],
+          softSkills: Array.isArray(candidate.softSkills) ? candidate.softSkills : [],
+          tags: Array.isArray(candidate.tags) ? candidate.tags : [],
+          certifications: Array.isArray(candidate.certifications) ? candidate.certifications : [],
+          languagesKnown: Array.isArray(candidate.languagesKnown) ? candidate.languagesKnown : [],
+        }))
+
+        const parsedRequirementsSafe = parsedRequirements || {}
+        results = await intelligentCandidateSearch(parsedRequirementsSafe, transformedCandidates, { roleScope })
+        
+        // Add explanation of why candidates were matched
+        results = results.map(candidate => ({
+          ...candidate,
+          searchExplanation: `Matched based on: ${candidate.matchingCriteria?.join(', ') || 'profile analysis'}`,
+          aiUnderstanding: parsedRequirementsSafe
+        }))
+        
+        console.log(`🎯 Found ${results.length} relevant candidates with intelligent matching`)
         break
 
       case "jd":
+        // JD-based search - SEPARATE from manual search
         if (!jobDescription || jobDescription.trim().length === 0) {
-           return NextResponse.json({ error: "Job description is required" }, { status: 400 })
+          return NextResponse.json({ error: "Job description is required" }, { status: 400 })
         }
-        console.log("🧠 Processing Job Description with intelligent parsing:", jobDescription.substring(0, 100))
-        activeRequirements = await parseSearchRequirement(jobDescription)
-        // Merge any explicit filters from params
-        if (filters.location) activeRequirements.location = filters.location
-        if (filters.education) activeRequirements.education = filters.education
-        if (filters.minExperience || filters.maxExperience) {
-          activeRequirements.experience = {
-            ...(activeRequirements.experience || {}),
-            min: filters.minExperience || activeRequirements.experience?.min,
-            max: filters.maxExperience || activeRequirements.experience?.max
-          }
-        }
-        console.log("✅ Parsed JD requirements:", activeRequirements)
-        results = await intelligentCandidateSearch(activeRequirements, transformedCandidates)
+        
+        // Extract keywords from job description for better matching
+        const extractedJDKeywords = extractKeywordsFromSentence(jobDescription);
+        console.log("Extracted keywords from JD:", extractedJDKeywords);
+        
+        // Use jdBasedSearch with the original job description
+        results = await jdBasedSearch(jobDescription, extractedJDKeywords, roleScope)
+        
+        // Add extracted keywords to the results
+        results = results.map(candidate => ({
+          ...candidate,
+          extractedKeywords: extractedJDKeywords
+        }))
         break
 
       case "manual":
-        // For manual search, intelligently parse the keywords query (comma-separated or natural language)
-        // then merge with explicit filters for best results
-        const manualQuery = query ? query.trim() : ''
-        let parsedRequirements: any = {}
-        
-        if (manualQuery) {
-          console.log("🧠 Processing manual search query with intelligent parsing:", manualQuery)
-          // Try intelligent parsing - works for both comma-separated and natural language
-          parsedRequirements = await parseSearchRequirement(manualQuery)
-          console.log("✅ Parsed manual query requirements:", parsedRequirements)
+        // Enhanced manual search with intelligent filtering
+        logger.info(`Enhanced manual search validation: query="${query}" jobDescription="${jobDescription}" filters=${JSON.stringify(filters)}`)
+        if (!query.trim() && !jobDescription.trim()) {
+          return NextResponse.json({ error: "Invalid search parameters", details: "Provide keywords or job description" }, { status: 400 })
         }
         
-        // Merge parsed requirements with explicit filters (explicit filters take precedence)
-        activeRequirements = {
-          ...parsedRequirements,
-          // Explicit filters override parsed ones
-          location: filters.location || parsedRequirements.location,
-          education: filters.education || parsedRequirements.education,
-          experience: (filters.minExperience || filters.maxExperience) ? {
-            min: filters.minExperience || parsedRequirements.experience?.min,
-            max: filters.maxExperience || parsedRequirements.experience?.max
-          } : parsedRequirements.experience,
-          // If no skills parsed but we have query, use query as skills fallback
-          skills: parsedRequirements.skills?.length > 0 
-            ? parsedRequirements.skills 
-            : (manualQuery ? manualQuery.split(',').map(k => k.trim()).filter(k => k) : [])
+        // If job description is provided, treat it as a natural language query
+        if (jobDescription.trim()) {
+          console.log("Using job description for intelligent search")
+          const requirements = await parseSearchRequirement(jobDescription)
+          const pool = await SupabaseCandidateService.searchCandidatesByText(jobDescription, 800, false)
+          const transformedCandidates = pool.map((candidate) => ({
+            ...candidate,
+            _id: candidate.id,
+            technicalSkills: Array.isArray(candidate.technicalSkills) ? candidate.technicalSkills : [],
+            softSkills: Array.isArray(candidate.softSkills) ? candidate.softSkills : [],
+            tags: Array.isArray(candidate.tags) ? candidate.tags : [],
+            certifications: Array.isArray(candidate.certifications) ? candidate.certifications : [],
+            languagesKnown: Array.isArray(candidate.languagesKnown) ? candidate.languagesKnown : [],
+          }))
+          results = await intelligentCandidateSearch(requirements, transformedCandidates, { roleScope })
+          roleFilterTerm = requirements?.role || ""
+        } else {
+          // Check if query contains natural language (has spaces and meaningful words)
+          const hasNaturalLanguage = query.trim().includes(' ') && query.trim().length > 5
+          
+          if (hasNaturalLanguage) {
+            console.log("Detected natural language in manual search, using intelligent parsing")
+            const requirements = await parseSearchRequirement(query)
+            const pool = await SupabaseCandidateService.searchCandidatesByText(query, 800, false)
+            const transformedCandidates = pool.map((candidate) => ({
+              ...candidate,
+              _id: candidate.id,
+              technicalSkills: Array.isArray(candidate.technicalSkills) ? candidate.technicalSkills : [],
+              softSkills: Array.isArray(candidate.softSkills) ? candidate.softSkills : [],
+              tags: Array.isArray(candidate.tags) ? candidate.tags : [],
+              certifications: Array.isArray(candidate.certifications) ? candidate.certifications : [],
+              languagesKnown: Array.isArray(candidate.languagesKnown) ? candidate.languagesKnown : [],
+            }))
+            results = await intelligentCandidateSearch(requirements, transformedCandidates, { roleScope })
+            roleFilterTerm = requirements?.role || ""
+          } else {
+            console.log("Using simple keyword search for short query")
+            results = await SupabaseCandidateService.searchCandidatesByText(query, 800, false)
+            roleFilterTerm = query.trim()
+          }
         }
-        
-        console.log("✅ Final manual search requirements:", activeRequirements)
-        results = await intelligentCandidateSearch(activeRequirements, transformedCandidates)
         break
 
       default:
         return NextResponse.json({ error: "Invalid search type" }, { status: 400 })
     }
 
-    // Filter out irrelevant results - only keep candidates with meaningful relevance scores
-    // STRICT FILTERING: Increased threshold to ensure only highly relevant candidates are shown
-    const MIN_RELEVANCE_THRESHOLD = 0.50 // 50% minimum match to be shown (increased from 35%)
-    const filteredResults = results.filter((candidate: any) => {
-      const relevanceScore = candidate.relevanceScore || 0
-      // Additional check: if role is specified, ensure role match is meaningful
-      if (activeRequirements.role && candidate.scoreBreakdown?.Role) {
-        const roleMatch = candidate.scoreBreakdown.Role.percentage / 100
-        // Role must have at least 30% match if role is specified
-        if (roleMatch < 0.30) {
-          console.log(`❌ Filtering out ${candidate.name}: Role match too low (${Math.round(roleMatch * 100)}%)`)
-          return false
-        }
-      }
-      return relevanceScore >= MIN_RELEVANCE_THRESHOLD
-    })
-    
-    console.log(`Filtered ${results.length} results to ${filteredResults.length} relevant candidates (threshold: ${MIN_RELEVANCE_THRESHOLD}, strict role matching enabled)`)
-
-    // Process pagination and generate summaries
-    const responseData = await processResultsWithSummary(filteredResults, page, perPage, paginate, activeRequirements, includeSummary);
-
-    // Log the search if HR user is logged in
-    const hrUserCookie = request.cookies.get("hr_user")?.value
-    if (hrUserCookie) {
-      try {
-        const hrUser = JSON.parse(hrUserCookie)
-        if (hrUser && hrUser.id) {
-           const resultsCount = paginate ? (responseData as any).total : (responseData as any[]).length;
-           
-           // Fire and forget logging
-           supabaseAdmin.from('search_logs').insert({
-              hr_user_id: hrUser.id,
-              search_query: query || (searchType === 'jd' ? 'JD Analysis' : 'Manual Search'),
-              filters: activeRequirements,
-              results_count: resultsCount
-           }).then(({ error }) => {
-              if (error) console.error("Error logging search:", error)
-           })
-        }
-      } catch (e) {
-        console.error("Error parsing hr_user cookie for logging:", e)
-      }
+    if (roleScope === "current" && roleFilterTerm.trim()) {
+      const roleQuery = roleFilterTerm.trim()
+      results = results.filter((candidate) => calculateRoleMatch(roleQuery, candidate, roleScope) >= 0.2)
     }
 
-    return NextResponse.json(responseData);
+    const enforceRoleMatch =
+      roleFilterTerm.trim() &&
+      (sidebarFilters.currentCity.length > 0 ||
+        sidebarFilters.mustHaveKeywords.length > 0 ||
+        sidebarFilters.experience.min ||
+        sidebarFilters.experience.max)
 
+    if (enforceRoleMatch) {
+      const roleQuery = roleFilterTerm.trim()
+      results = results.filter((candidate) => calculateRoleMatch(roleQuery, candidate, roleScope) >= 0.2)
+    }
+
+    if (hasSidebarFilters) {
+      results = applySidebarFilters(results, sidebarFilters)
+    }
+
+    console.log("Search results:", results.length)
+
+    // Optional server-side pagination (already parsed from query above)
+
+    if (paginate) {
+      const total = results.length
+      const totalPages = Math.max(1, Math.ceil(total / perPage))
+      const currentPage = Math.min(page, totalPages)
+      const startIdx = (currentPage - 1) * perPage
+      const items = results.slice(startIdx, startIdx + perPage)
+      return NextResponse.json({ items, total, page: currentPage, perPage })
+    }
+
+    return NextResponse.json(results)
   } catch (error) {
     console.error("Search error:", error)
     return NextResponse.json(
       { error: "Search failed", details: error instanceof Error ? error.message : "Unknown error" },
       { status: 500 },
     )
+  }
+}
+
+async function extractRequirementsFromJD(jobDescription: string): Promise<string> {
+  // Only extract requirements list without external API calls
+  try {
+    const text = (jobDescription || '').toLowerCase();
+    
+    const requirements: string[] = [];
+    
+    // Extract common logistics requirements heuristically
+    const patterns = [
+      { keyword: 'gps', match: 'GPS tracking proficiency' },
+      { keyword: 'fleet', match: 'Fleet operations management' },
+      { keyword: 'route', match: 'Route planning and optimization' },
+      { keyword: 'supply chain', match: 'Supply chain coordination' },
+      { keyword: 'inventory', match: 'Inventory control and tracking' },
+      { keyword: 'warehouse', match: 'Warehouse management systems' },
+      { keyword: 'transportation', match: 'Transportation and dispatch' },
+      { keyword: 'driver', match: 'Driver scheduling and oversight' },
+      { keyword: 'fuel', match: 'Fuel usage monitoring' },
+      { keyword: 'maintenance', match: 'Maintenance scheduling' },
+      { keyword: 'compliance', match: 'Compliance with DOT and safety' },
+      { keyword: 'communication', match: 'Strong communication skills' },
+      { keyword: 'leadership', match: 'Team leadership and coordination' },
+      { keyword: 'analysis', match: 'Data analysis skills' },
+    ];
+    
+    patterns.forEach(({ keyword, match }) => {
+      if (text.includes(keyword)) requirements.push(match);
+    });
+
+    if (requirements.length === 0) {
+      requirements.push(
+        'Basic logistics operations understanding',
+        'Ability to learn trucking platform tools',
+        'Attention to detail and compliance awareness',
+      );
+    }
+
+    return requirements.join(', ');
+  } catch (error) {
+    console.error('JD requirements extraction failed:', error);
+    return '';
+  }
+}
+
+async function simpleKeywordSearch(query: string, candidates: any[]): Promise<any[]> {
+  try {
+    console.log("=== Simple Keyword Search ===")
+    console.log("Query:", query)
+    
+    const searchTerm = query.toLowerCase().trim()
+    
+    const results = candidates
+      .filter(candidate => {
+        const searchableText = [
+          candidate.name || '',
+          candidate.currentRole || '',
+          candidate.summary || '',
+          candidate.resumeText || '',
+          candidate.location || '',
+          ...(candidate.technicalSkills || []),
+          ...(candidate.softSkills || []),
+          ...(candidate.tags || [])
+        ].join(' ').toLowerCase()
+        
+        return searchableText.includes(searchTerm)
+      })
+      .map(candidate => ({
+        ...candidate,
+        relevanceScore: 0.5,
+        matchPercentage: 50,
+        matchingKeywords: [query],
+        searchType: 'simple-keyword'
+      }))
+      .sort((a, b) => {
+        // Sort by upload date (newest first)
+        const dateA = new Date(a.uploadedAt || 0).getTime()
+        const dateB = new Date(b.uploadedAt || 0).getTime()
+        return dateB - dateA
+      })
+    
+    console.log(`Simple keyword search found ${results.length} candidates`)
+    return results
+  } catch (error) {
+    console.error('Simple keyword search failed:', error)
+    return []
+  }
+}
+
+async function enhancedManualSearch(filters: any, candidates: any[]): Promise<any[]> {
+  try {
+    console.log("=== Enhanced Manual Search ===")
+    console.log("Filters:", filters)
+
+    const keywords = (filters.keywords || filters.query || '').toLowerCase().split(' ').filter((k: string) => k.length > 2);
+    const location = (filters.location || '').toLowerCase();
+    const minExp = parseFloat(filters.minExperience || '0');
+    const maxExp = parseFloat(filters.maxExperience || '100');
+    const education = (filters.education || '').toLowerCase();
+
+    // Use intelligent parsing if keywords contain natural language
+    const hasNaturalLanguage = keywords.some((k: string) => 
+      k.includes('experience') || k.includes('years') || k.includes('manager') || k.includes('driver')
+    );
+
+    if (hasNaturalLanguage && keywords.length > 2) {
+      console.log("Detected natural language query, using intelligent parsing")
+      const query = filters.keywords || filters.query || ''
+      const requirements = await parseSearchRequirement(query)
+      return await intelligentCandidateSearch(requirements, candidates)
+    }
+
+    // Traditional keyword-based search with improved relevance scoring
+    const results = candidates.map((c: any) => {
+      const textBlob = [
+        (c.currentRole || ''),
+        (c.summary || ''),
+        (c.resumeText || ''),
+        (c.currentCompany || ''),
+        ...(Array.isArray(c.technicalSkills) ? c.technicalSkills : []),
+        ...(Array.isArray(c.softSkills) ? c.softSkills : []),
+      ].join(' ').toLowerCase();
+
+      // Calculate keyword relevance score
+      let keywordScore = 0;
+      let matchedKeywords: string[] = [];
+      
+      if (keywords.length > 0) {
+        const keywordMatches = keywords.filter((k: string) => textBlob.includes(k));
+        matchedKeywords = keywordMatches;
+        keywordScore = keywordMatches.length / keywords.length;
+      }
+
+      // Location matching
+      let locationScore = 0;
+      if (location) {
+        const candidateLocation = (c.location || '').toLowerCase();
+        if (candidateLocation.includes(location)) {
+          locationScore = 1;
+        } else if (location.includes(candidateLocation)) {
+          locationScore = 0.8;
+        }
+      }
+
+      // Experience matching
+      let experienceScore = 0;
+      let candidateYears = 0;
+      const expText = (c.totalExperience || '').toLowerCase();
+      const expMatch = expText.match(/([0-9]+(?:\.[0-9]+)?)\s*year/);
+      if (expMatch) {
+        candidateYears = parseFloat(expMatch[1]);
+        if ((!filters.minExperience && !filters.maxExperience) || 
+            (candidateYears >= minExp && candidateYears <= maxExp)) {
+          experienceScore = 1;
+        }
+      }
+
+      // Education matching
+      let educationScore = 0;
+      if (education) {
+        const candidateEducation = ((c.highestQualification || '') + ' ' + (c.degree || '')).toLowerCase();
+        if (candidateEducation.includes(education)) {
+          educationScore = 1;
+        }
+      }
+
+      // Calculate overall relevance score
+      const totalScore = (keywordScore * 0.5) + (locationScore * 0.2) + (experienceScore * 0.2) + (educationScore * 0.1);
+
+      return {
+        ...c,
+        relevanceScore: Math.min(0.95, totalScore),
+        matchPercentage: Math.round(totalScore * 100),
+        matchingKeywords: matchedKeywords,
+        searchCriteria: {
+          keywords: matchedKeywords,
+          location: locationScore > 0 ? c.location : null,
+          experience: experienceScore > 0 ? c.totalExperience : null,
+          education: educationScore > 0 ? c.highestQualification : null
+        }
+      };
+    });
+
+    // Filter out candidates with very low relevance and sort by relevance
+    const filteredResults = results
+      .filter((c: any) => c.relevanceScore >= 0.3) // Minimum 30% relevance
+      .sort((a: any, b: any) => {
+        if (b.relevanceScore !== a.relevanceScore) {
+          return b.relevanceScore - a.relevanceScore;
+        }
+        const dateA = new Date(a.uploadedAt || 0).getTime();
+        const dateB = new Date(b.uploadedAt || 0).getTime();
+        return dateB - dateA;
+      });
+
+    console.log(`Enhanced manual search found ${filteredResults.length} relevant candidates`);
+    return filteredResults;
+  } catch (error) {
+    console.error('Enhanced manual search failed:', error);
+    return [];
   }
 }

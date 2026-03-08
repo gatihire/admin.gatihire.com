@@ -2,6 +2,7 @@ import Link from "next/link"
 import { notFound } from "next/navigation"
 import { supabaseAdmin } from "@/lib/supabase"
 import { normalizeExternalUrl } from "@/lib/utils"
+import { requireAnyInternalPermission } from "@/lib/server-internal-permissions"
 
 export const runtime = "nodejs"
 export const revalidate = 0
@@ -13,6 +14,7 @@ function clamp(text: string, max = 520) {
 }
 
 export default async function ClientDetailPage(props: { params: Promise<{ id: string }> }) {
+  await requireAnyInternalPermission(["jobs.view", "jobs.edit", "jobs.post"])
   const { id } = await props.params
 
   const { data: client } = await supabaseAdmin
