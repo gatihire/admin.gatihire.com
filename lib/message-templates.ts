@@ -89,14 +89,20 @@ export const DEFAULT_TEMPLATES: Record<TemplateKey, MessageTemplate> = {
     channel: "whatsapp",
     subject: null,
     body: DEFAULT_INVITE_WHATSAPP_BODY,
-    metadata: { paramOrder: DEFAULT_PARAM_ORDER }
+    metadata: { 
+      campaignName: "Talent_Invite",
+      paramOrder: DEFAULT_PARAM_ORDER 
+    }
   },
   outreach_whatsapp: {
     templateKey: "outreach_whatsapp",
     channel: "whatsapp",
     subject: null,
     body: DEFAULT_OUTREACH_WHATSAPP_BODY,
-    metadata: { paramOrder: DEFAULT_OUTREACH_PARAM_ORDER }
+    metadata: { 
+      campaignName: "Talent_Outreach",
+      paramOrder: DEFAULT_OUTREACH_PARAM_ORDER 
+    }
   }
 }
 
