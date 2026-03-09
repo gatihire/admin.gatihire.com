@@ -18,6 +18,13 @@ interface Job {
   id: string
   title: string
   status: string
+  client_id?: string | null
+  client_name?: string | null
+}
+
+interface Client {
+  id: string
+  name: string
 }
 
 interface AssignJobDialogProps {
@@ -29,8 +36,11 @@ interface AssignJobDialogProps {
 
 export function AssignJobDialog({ candidateId, open, onOpenChange, candidateName }: AssignJobDialogProps) {
   const [jobs, setJobs] = useState<Job[]>([])
+  const [clients, setClients] = useState<Client[]>([])
   const [loading, setLoading] = useState(false)
+  const [fetchingClients, setFetchingClients] = useState(false)
   const [fetchingJobs, setFetchingJobs] = useState(false)
+  const [selectedClient, setSelectedClient] = useState<string>("")
   const [selectedJob, setSelectedJob] = useState<string>("")
   const [notes, setNotes] = useState("")
   const [action, setAction] = useState<"assign" | "invite" | "both">("assign")
@@ -39,14 +49,43 @@ export function AssignJobDialog({ candidateId, open, onOpenChange, candidateName
 
   useEffect(() => {
     if (open) {
-      fetchJobs()
+      setSelectedClient("")
+      setSelectedJob("")
+      setJobs([])
+      fetchClients()
     }
   }, [open])
 
-  const fetchJobs = async () => {
+  useEffect(() => {
+    if (!open) return
+    if (!selectedClient) return
+    setSelectedJob("")
+    fetchJobs(selectedClient)
+  }, [open, selectedClient])
+
+  const fetchClients = async () => {
+    setFetchingClients(true)
+    try {
+      const res = await fetch("/api/clients")
+      if (res.ok) {
+        const data = (await res.json().catch(() => [])) as any[]
+        const normalized = (Array.isArray(data) ? data : [])
+          .map((c) => ({ id: String(c.id), name: String(c.name || "").trim() }))
+          .filter((c) => c.id && c.name)
+          .sort((a, b) => a.name.localeCompare(b.name))
+        setClients(normalized)
+      }
+    } catch (error) {
+      console.error("Failed to fetch clients", error)
+    } finally {
+      setFetchingClients(false)
+    }
+  }
+
+  const fetchJobs = async (clientId: string) => {
     setFetchingJobs(true)
     try {
-      const res = await fetch("/api/jobs?status=open")
+      const res = await fetch(`/api/jobs?status=open&clientId=${encodeURIComponent(clientId)}`)
       if (res.ok) {
         const data = await res.json()
         setJobs(data)
@@ -86,13 +125,21 @@ export function AssignJobDialog({ candidateId, open, onOpenChange, candidateName
         const inv = await fetch("/api/job-invites", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jobId: selectedJob, candidateId, resend: true, sendWhatsapp: true })
+          body: JSON.stringify({ jobId: selectedJob, candidateId, resend: true, sendWhatsapp: true, sendEmail: true })
         })
         const data = await inv.json().catch(() => null)
         if (!inv.ok) throw new Error(data?.error || "Failed to create invite")
+
+        const parts: string[] = []
+        if (data?.emailSent) parts.push("Email sent")
+        else if (data?.emailError) parts.push(`Email failed: ${data.emailError}`)
+        if (data?.whatsappSent) parts.push("WhatsApp sent")
+        else if (data?.whatsappError) parts.push(`WhatsApp failed: ${data.whatsappError}`)
+        const description = parts.length ? parts.join(" • ") : "Invite created."
+
         toast({
           title: shouldAssign ? "Saved" : "Invite created",
-          description: data?.emailSent ? "Invite email sent." : "Invite link ready."
+          description
         })
       } else {
         toast({ title: "Saved", description: "Candidate assigned successfully." })
@@ -125,10 +172,33 @@ export function AssignJobDialog({ candidateId, open, onOpenChange, candidateName
         </DialogHeader>
         <div className="grid gap-4 py-4">
           <div className="grid gap-2">
-            <Label htmlFor="job">Select Job</Label>
-            <Select value={selectedJob} onValueChange={setSelectedJob} disabled={fetchingJobs}>
+            <Label htmlFor="company">Select Company</Label>
+            <Select value={selectedClient} onValueChange={setSelectedClient} disabled={fetchingClients}>
               <SelectTrigger>
-                <SelectValue placeholder={fetchingJobs ? "Loading jobs..." : "Select a job"} />
+                <SelectValue placeholder={fetchingClients ? "Loading companies..." : "Select a company"} />
+              </SelectTrigger>
+              <SelectContent>
+                {clients.map((c) => (
+                  <SelectItem key={c.id} value={c.id}>
+                    {c.name}
+                  </SelectItem>
+                ))}
+                {clients.length === 0 && !fetchingClients && (
+                  <SelectItem value="none" disabled>
+                    No companies found
+                  </SelectItem>
+                )}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor="job">Select Job</Label>
+            <Select value={selectedJob} onValueChange={setSelectedJob} disabled={fetchingJobs || !selectedClient}>
+              <SelectTrigger>
+                <SelectValue
+                  placeholder={!selectedClient ? "Select a company first" : fetchingJobs ? "Loading jobs..." : "Select a job"}
+                />
               </SelectTrigger>
               <SelectContent>
                 {jobs.map((job) => (
@@ -136,7 +206,7 @@ export function AssignJobDialog({ candidateId, open, onOpenChange, candidateName
                     {job.title}
                   </SelectItem>
                 ))}
-                {jobs.length === 0 && !fetchingJobs && (
+                {jobs.length === 0 && !fetchingJobs && selectedClient && (
                   <SelectItem value="none" disabled>No open jobs found</SelectItem>
                 )}
               </SelectContent>

@@ -28,17 +28,87 @@ export async function GET(request: NextRequest) {
   const jobId = url.searchParams.get("jobId")
   if (!jobId) return NextResponse.json({ error: "Missing jobId" }, { status: 400 })
 
-  const { data, error } = await supabaseAdmin
+  const page = parseInt(url.searchParams.get("page") || "1")
+  const limit = parseInt(url.searchParams.get("limit") || "10")
+  const offset = (page - 1) * limit
+
+  // Filters
+  const statusFilter = url.searchParams.get("status")
+  const activityFilter = url.searchParams.get("activity")
+  const profileFilter = url.searchParams.get("profile")
+
+  let query = supabaseAdmin
     .from("job_invites")
-    .select("id, job_id, candidate_id, email, token, status, sent_at, opened_at, responded_at, applied_at, rejected_at, created_at")
+    .select("id", { count: "exact", head: true })
+    .eq("job_id", jobId)
+
+  // Apply filters to count query
+  if (statusFilter && statusFilter !== "all") {
+    query = query.eq("status", statusFilter)
+  }
+  if (profileFilter === "linked") {
+    query = query.not("candidate_id", "is", null)
+  } else if (profileFilter === "not_linked") {
+    query = query.is("candidate_id", null)
+  }
+  if (activityFilter === "opened") {
+    query = query.not("opened_at", "is", null)
+  } else if (activityFilter === "not_opened") {
+    query = query.is("opened_at", null)
+  } else if (activityFilter === "applied") {
+    query = query.not("applied_at", "is", null)
+  } else if (activityFilter === "not_applied") {
+    query = query.is("applied_at", null)
+  }
+
+  const { count, error: countError } = await query
+
+  if (countError) {
+    return NextResponse.json({ error: countError.message }, { status: 500 })
+  }
+
+  // Data query
+  let dataQuery = supabaseAdmin
+    .from("job_invites")
+    .select("id, job_id, candidate_id, email, token, status, sent_at, opened_at, responded_at, applied_at, rejected_at, created_at, metadata")
     .eq("job_id", jobId)
     .order("created_at", { ascending: false })
+    .range(offset, offset + limit - 1)
+
+  // Apply filters to data query
+  if (statusFilter && statusFilter !== "all") {
+    dataQuery = dataQuery.eq("status", statusFilter)
+  }
+  if (profileFilter === "linked") {
+    dataQuery = dataQuery.not("candidate_id", "is", null)
+  } else if (profileFilter === "not_linked") {
+    dataQuery = dataQuery.is("candidate_id", null)
+  }
+  if (activityFilter === "opened") {
+    dataQuery = dataQuery.not("opened_at", "is", null)
+  } else if (activityFilter === "not_opened") {
+    dataQuery = dataQuery.is("opened_at", null)
+  } else if (activityFilter === "applied") {
+    dataQuery = dataQuery.not("applied_at", "is", null)
+  } else if (activityFilter === "not_applied") {
+    dataQuery = dataQuery.is("applied_at", null)
+  }
+
+  const { data, error } = await dataQuery
 
   if (error) {
     console.error("Failed to load invites:", error)
     return NextResponse.json({ error: error.message || "Failed to load invites" }, { status: 500 })
   }
-  return NextResponse.json({ invites: data || [] })
+  return NextResponse.json({ 
+    invites: data || [],
+    pagination: {
+      page,
+      limit,
+      total: count || 0,
+      totalPages: Math.ceil((count || 0) / limit)
+    }
+  })
 }
 
 export async function POST(request: NextRequest) {

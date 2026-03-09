@@ -144,7 +144,7 @@ export function getBoardAppBaseUrl() {
       || process.env.BOARD_APP_BASE_URL
       || ""
   ).trim()
-  const base = raw.length ? raw : "http://localhost:3001"
+  const base = raw.length ? raw : "https://talent.gatihire.com"
   return base.replace(/\/$/, "")
 }
 

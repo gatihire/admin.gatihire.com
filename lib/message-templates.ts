@@ -140,12 +140,22 @@ export function mergeTemplates(rows: Array<any>) {
     const key = row?.template_key as TemplateKey
     if (!key || !merged[key]) continue
     const base = merged[key]
+    
+    // Merge metadata intelligently
+    let metadata = row?.metadata && typeof row.metadata === "object" ? row.metadata : base.metadata
+    if (base.metadata?.campaignName && !metadata?.campaignName) {
+      metadata = { ...metadata, campaignName: base.metadata.campaignName }
+    }
+    if (base.metadata?.paramOrder && !metadata?.paramOrder) {
+      metadata = { ...metadata, paramOrder: base.metadata.paramOrder }
+    }
+
     merged[key] = {
       templateKey: key,
       channel: row?.channel || base.channel,
       subject: typeof row?.subject === "string" ? row.subject : base.subject,
       body: typeof row?.body === "string" && row.body.trim() ? row.body : base.body,
-      metadata: row?.metadata && typeof row.metadata === "object" ? row.metadata : base.metadata
+      metadata
     }
   }
 

@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { supabase } from "@/lib/supabase"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -84,6 +84,25 @@ export function ApplyFlowDialog({ job, open, onOpenChange, onCandidateUpdated }:
   const isExternal = useMemo(() => String(job?.apply_type || "in_platform") === "external", [job])
   const externalUrl = useMemo(() => String(job?.external_apply_url || "").trim(), [job])
 
+  const unlockScroll = useCallback(() => {
+    if (typeof document === "undefined") return
+    const body = document.body
+    const html = document.documentElement
+    body.style.overflow = ""
+    body.style.paddingRight = ""
+    body.style.pointerEvents = ""
+    body.removeAttribute("data-scroll-locked")
+    html.style.overflow = ""
+    html.style.paddingRight = ""
+    html.removeAttribute("data-scroll-locked")
+  }, [])
+
+  const scheduleUnlockScroll = useCallback(() => {
+    const delays = [0, 50, 200, 500]
+    const timers = delays.map((ms) => window.setTimeout(unlockScroll, ms))
+    return () => timers.forEach((t) => window.clearTimeout(t))
+  }, [unlockScroll])
+
   useEffect(() => {
     let unsub: any = null
     ;(async () => {
@@ -111,12 +130,7 @@ export function ApplyFlowDialog({ job, open, onOpenChange, onCandidateUpdated }:
       setDone(false)
       setLoading(false)
       applyStartedTracked.current = false
-      // Fix for scroll restoration when modal closes
-      setTimeout(() => {
-        document.body.style.overflow = ''
-        document.body.style.paddingRight = ''
-      }, 50)
-      return
+      return scheduleUnlockScroll()
     }
 
     if (job?.id) {
@@ -150,7 +164,13 @@ export function ApplyFlowDialog({ job, open, onOpenChange, onCandidateUpdated }:
         if (c && onCandidateUpdated) onCandidateUpdated(c)
       })
       .finally(() => setLoading(false))
-  }, [open, isAuthed, sessionReady, onCandidateUpdated, job, isExternal])
+  }, [open, isAuthed, sessionReady, onCandidateUpdated, job, isExternal, scheduleUnlockScroll])
+
+  useEffect(() => {
+    return () => {
+      unlockScroll()
+    }
+  }, [unlockScroll])
 
   const startGoogle = async () => {
     if (!job) return
@@ -249,22 +269,8 @@ export function ApplyFlowDialog({ job, open, onOpenChange, onCandidateUpdated }:
   if (!job) return null
 
   const handleOpenChange = (newOpen: boolean) => {
-    try {
-      onOpenChange(newOpen)
-      // Ensure scroll restoration when closing
-      if (!newOpen) {
-        setTimeout(() => {
-          document.body.style.overflow = ''
-          document.body.style.paddingRight = ''
-        }, 50)
-      }
-    } catch (error) {
-      console.error('Error in modal close:', error)
-      // Fallback: force scroll restoration
-      document.body.style.overflow = ''
-      document.body.style.paddingRight = ''
-      onOpenChange(newOpen)
-    }
+    onOpenChange(newOpen)
+    if (!newOpen) scheduleUnlockScroll()
   }
 
   return (
