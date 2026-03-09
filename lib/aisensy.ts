@@ -36,12 +36,42 @@ export class AisensyService {
     }
   }
 
+  private normalizePhoneNumber(phone: string): string {
+    if (!phone) return ""
+    // Remove all non-digit characters
+    let cleaned = phone.replace(/\D/g, "")
+    
+    // If it starts with 0, remove it
+    if (cleaned.startsWith("0")) {
+      cleaned = cleaned.substring(1)
+    }
+
+    // If length is 10, assume India and add 91
+    if (cleaned.length === 10) {
+      return `91${cleaned}`
+    }
+
+    // If length is 12 and starts with 91, it's likely already correct
+    if (cleaned.length === 12 && cleaned.startsWith("91")) {
+      return cleaned
+    }
+
+    // If it's another length, just return digits (best effort)
+    return cleaned
+  }
+
   async sendWhatsAppMessage(
     message: WhatsAppMessage,
     overrides?: WhatsAppTemplateOverrides
   ): Promise<{ success: boolean; messageId?: string; error?: string }> {
     if (!this.config.apiKey || !this.config.campaignName) {
       return { success: false, error: "Aisensy configuration incomplete" }
+    }
+
+    const destination = this.normalizePhoneNumber(message.phoneNumber)
+    if (!destination) {
+      logger.error("Invalid phone number for WhatsApp", { original: message.phoneNumber })
+      return { success: false, error: "Invalid phone number" }
     }
 
     try {
@@ -53,10 +83,11 @@ export class AisensyService {
         message.companyName,
         message.uniqueLink
       ]
+      
       const payload = {
         apiKey: this.config.apiKey,
         campaignName,
-        destination: message.phoneNumber,
+        destination,
         userName: message.candidateName,
         source,
         templateParams,
@@ -66,6 +97,8 @@ export class AisensyService {
         },
         tags: ["job_recruitment", "external_candidate"]
       }
+
+      logger.info(`Sending WhatsApp to ${destination} (Template: ${campaignName})`, { params: templateParams })
 
       const response = await fetch(this.baseUrl, {
         method: "POST",
@@ -78,10 +111,14 @@ export class AisensyService {
       const result = await response.json()
 
       if (response.ok && result.success) {
-        logger.info(`WhatsApp message sent successfully to ${message.phoneNumber}`, { messageId: result.messageId })
+        logger.info(`WhatsApp message sent successfully to ${destination}`, { messageId: result.messageId })
         return { success: true, messageId: result.messageId }
       } else {
-        logger.error(`Failed to send WhatsApp message`, { phoneNumber: message.phoneNumber, error: result.message })
+        logger.error(`Failed to send WhatsApp message`, { 
+          destination, 
+          error: result.message, 
+          response: result 
+        })
         return { success: false, error: result.message || "Unknown error" }
       }
     } catch (error: any) {

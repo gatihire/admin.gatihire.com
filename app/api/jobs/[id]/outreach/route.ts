@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabase, supabaseAdmin } from "@/lib/supabase"
-import { externalMatchmakingService } from "@/lib/external-matchmaking"
+import { jdBasedSearch } from "@/lib/search-service"
 import { aisensyService } from "@/lib/aisensy"
 import { logger } from "@/lib/logger"
 import { sendOutreachEmail } from "@/lib/mailer"
@@ -133,12 +133,21 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
               matchedSkills: [],
               explanation: "",
             }))
-        : await externalMatchmakingService.findSimilarCandidates(
-            id,
-            job.title,
-            job.description || "",
-            (job as any).requirements || []
-          )
+        : await (async () => {
+            const results = await jdBasedSearch(job.description || "", [], "current_past")
+            return results.map(c => ({
+              candidate: {
+                id: c.id,
+                name: c.name,
+                email: c.email,
+                phone: c.phone,
+                current_role: c.currentRole || c.current_role,
+              },
+              score: c.relevanceScore || 0,
+              matchedSkills: c.matchingKeywords || [],
+              explanation: c.searchExplanation || "",
+            }))
+          })()
 
       if (matches.length === 0) {
         return NextResponse.json({ 
@@ -212,6 +221,11 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
               templateParams
             }
           )
+
+          logger.info(`WhatsApp attempt for ${candidate.phone}: success=${whatsappResult.success} error=${whatsappResult.error}`, { 
+             candidateId: candidate.id, 
+             phone: candidate.phone 
+          })
 
           if (whatsappResult.success) {
             messagesSent++
