@@ -111,6 +111,11 @@ export function ApplyFlowDialog({ job, open, onOpenChange, onCandidateUpdated }:
       setDone(false)
       setLoading(false)
       applyStartedTracked.current = false
+      // Fix for scroll restoration when modal closes
+      setTimeout(() => {
+        document.body.style.overflow = ''
+        document.body.style.paddingRight = ''
+      }, 50)
       return
     }
 
@@ -243,8 +248,27 @@ export function ApplyFlowDialog({ job, open, onOpenChange, onCandidateUpdated }:
 
   if (!job) return null
 
+  const handleOpenChange = (newOpen: boolean) => {
+    try {
+      onOpenChange(newOpen)
+      // Ensure scroll restoration when closing
+      if (!newOpen) {
+        setTimeout(() => {
+          document.body.style.overflow = ''
+          document.body.style.paddingRight = ''
+        }, 50)
+      }
+    } catch (error) {
+      console.error('Error in modal close:', error)
+      // Fallback: force scroll restoration
+      document.body.style.overflow = ''
+      document.body.style.paddingRight = ''
+      onOpenChange(newOpen)
+    }
+  }
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="w-[95vw] sm:max-w-[520px]">
         <DialogHeader>
           <DialogTitle className="leading-tight">
