@@ -30,6 +30,14 @@ function hashKey(input: string) {
 }
 
 function expandRoleVariants(role: string) {
+  const roleSynonyms: Record<string, string[]> = {
+    'fleet manager': ['fleet management', 'transportation manager', 'logistics manager', 'operations manager', 'fleet operations manager', 'transport manager', 'fleet supervisor'],
+    'truck driver': ['driver', 'heavy vehicle driver', 'commercial driver', 'truck operator', 'hgv driver', 'trailer driver', 'vehicle driver'],
+    'logistics coordinator': ['logistics executive', 'supply chain coordinator', 'logistics specialist', 'transport coordinator', 'dispatch executive'],
+    'operations manager': ['operations executive', 'operations head', 'operations supervisor', 'fleet manager', 'branch manager'],
+    'accounts manager': ['accountant', 'finance manager', 'finance executive', 'accounts executive', 'billing executive']
+  };
+
   const t = String(role || "").trim()
   if (!t) return []
   const parts = t.split(/\s+/).filter(Boolean)
@@ -39,6 +47,14 @@ function expandRoleVariants(role: string) {
   const lower = first.toLowerCase()
   const out = new Set<string>()
   out.add(t)
+
+  // Add domain-specific synonyms
+  const lowerRole = t.toLowerCase()
+  for (const [key, synonyms] of Object.entries(roleSynonyms)) {
+    if (lowerRole.includes(key) || key.includes(lowerRole)) {
+      synonyms.forEach(s => out.add(s))
+    }
+  }
 
   if (lower.length > 3) {
     if (lower.endsWith("s") && !lower.endsWith("ss")) {
