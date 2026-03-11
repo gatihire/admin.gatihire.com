@@ -2,7 +2,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai"
 import { SupabaseCandidateService } from "./supabase-candidates"
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "")
-const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash"
+const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite-preview"
 const DEFAULT_GEMINI_EMBEDDING_MODEL = process.env.GEMINI_EMBEDDING_MODEL || "gemini-embedding-001"
 const EMBEDDING_DIM = Number(process.env.EMBEDDING_DIM || 768)
 

@@ -202,9 +202,48 @@ export async function POST(request: NextRequest) {
       let parsedData
       let parsingError: string | null = null
       
+      // Prefer external worker (Fly.io) if configured, with graceful fallback
+      const workerUrl = process.env.RESUME_WORKER_URL
+      const workerSecret = process.env.RESUME_WORKER_SECRET
+      if (workerUrl) {
+        try {
+          console.log(`Attempting worker-first parsing via ${workerUrl} ...`)
+          const form = new FormData()
+          form.append("resume", file, file.name)
+          if (uploadLogId) form.append("upload_log_id", uploadLogId)
+          const res = await fetch(workerUrl, {
+            method: "POST",
+            headers: {
+              ...(workerSecret ? { "X-Worker-Secret": workerSecret } : {}),
+            } as any,
+            body: form as any,
+          })
+          if (res.ok) {
+            const payload: any = await res.json()
+            if (payload && (payload.parsed || payload.parsedData || payload.data)) {
+              parsedData = payload.parsed || payload.parsedData || payload.data
+              console.log("✅ Worker returned parsed data successfully")
+            } else if (payload && payload.name && (payload.resumeText || payload.currentRole || payload.location)) {
+              parsedData = payload
+              console.log("✅ Worker returned candidate-shaped data")
+            } else {
+              console.warn("Worker did not return parsed data shape, falling back to local parser")
+            }
+          } else {
+            console.warn(`Worker parsing failed: ${res.status} ${res.statusText}`)
+          }
+        } catch (e: any) {
+          console.warn(`Worker parsing exception: ${String(e?.message || e)}`)
+        }
+      }
+      
       try {
-        parsedData = await parseResume(file)
-        console.log("✅ Resume parsing successful")
+        if (!parsedData) {
+          parsedData = await parseResume(file)
+          console.log("✅ Resume parsing successful (local)")
+        } else {
+          console.log("Skipping local parse — using worker result")
+        }
         console.log("Parsed data:", JSON.stringify(parsedData, null, 2))
       } catch (parseError) {
         const code = (parseError as any)?.code

@@ -87,12 +87,13 @@ export async function parseResume(file: any): Promise<ComprehensiveCandidateData
     console.log(`=== Starting Resume Parsing for ${file.name} ===`)
 
     const extractedText = await extractTextFromFile(file)
-
-    const assessment = await assessResumeDocument(extractedText)
+    const assessment = await assessResumeDocumentFromFile(file, extractedText)
     if (!assessment.isResume) {
+      const docType = String(assessment.docType || "unknown")
+      const shouldTreatAsUnreadable = docType === "unreadable" || docType === "pdf_binary_or_corrupt"
       const err: any = new Error(assessment.reason)
-      err.code = "NOT_RESUME"
       err.assessment = assessment
+      err.code = shouldTreatAsUnreadable ? "UNREADABLE" : "NOT_RESUME"
       throw err
     }
 
@@ -148,6 +149,62 @@ export async function parseResume(file: any): Promise<ComprehensiveCandidateData
     const msg = error instanceof Error ? error.message : String(error)
     console.error(`❌ Resume parsing completely failed: ${msg}`)
     throw error
+  }
+}
+
+async function assessResumeDocumentFromFile(
+  file: File,
+  extractedText: string,
+): Promise<{ isResume: boolean; reason: string; confidence: number; docType: string }> {
+  const basic = await assessResumeDocument(extractedText)
+  if (basic.isResume) return basic
+
+  const docType = String(basic.docType || "unknown")
+  const isUnreadable = docType === "unreadable" || docType === "pdf_binary_or_corrupt"
+  if (!genAI || !isUnreadable) return basic
+
+  const fileType = String(file.type || "").toLowerCase()
+  const fileName = String(file.name || "").toLowerCase()
+  const isPdf = fileType === "application/pdf" || fileName.endsWith(".pdf")
+  if (!isPdf) return basic
+
+  try {
+    const modelName = process.env.GEMINI_CLASSIFIER_MODEL || process.env.GEMINI_MODEL || "gemini-3.1-flash-lite-preview"
+    const model = genAI.getGenerativeModel({ model: modelName })
+    const arrayBuffer = await file.arrayBuffer()
+    const pdfBase64 = Buffer.from(arrayBuffer).toString("base64")
+
+    const prompt = `Classify the attached document.
+
+Return ONLY valid JSON with keys:
+- is_resume (boolean)
+- document_type (string, e.g. resume, invoice, receipt, bank_statement, offer_letter, unknown)
+- confidence (number 0-1)
+- reason (string, short)`
+
+    const result: any = await runGeminiCall(
+      () =>
+        model.generateContent([
+          prompt,
+          {
+            inlineData: {
+              data: pdfBase64,
+              mimeType: "application/pdf",
+            },
+          },
+        ]),
+      { minSpacingMs: 1200, maxAttempts: 4 },
+    )
+    const content = result.response.text()
+    const match = content.match(/\{[\s\S]*\}/)
+    const parsed = match ? JSON.parse(match[0]) : null
+    const isResume = Boolean(parsed?.is_resume)
+    const outDocType = String(parsed?.document_type || "unknown")
+    const conf = Math.max(0, Math.min(1, Number(parsed?.confidence ?? 0.5)))
+    const reason = String(parsed?.reason || (isResume ? "Looks like a resume." : "Does not look like a resume."))
+    return { isResume, docType: outDocType, confidence: conf, reason }
+  } catch (e) {
+    return basic
   }
 }
 
@@ -243,7 +300,7 @@ async function assessResumeDocument(text: string): Promise<{ isResume: boolean; 
     }
   }
 
-  const modelName = process.env.GEMINI_CLASSIFIER_MODEL || process.env.GEMINI_MODEL || "gemini-2.0-flash"
+  const modelName = process.env.GEMINI_CLASSIFIER_MODEL || process.env.GEMINI_MODEL || "gemini-3.1-flash-lite-preview"
   const model = genAI.getGenerativeModel({ model: modelName })
   const limited = t.slice(0, 6000)
   const prompt = `Classify the following document text.
@@ -407,7 +464,21 @@ async function parseResumeWithGemini(file: File, preExtractedText?: string): Pro
     
   try {
     console.log("🔄 Starting Gemini parsing...")
-    const text = typeof preExtractedText === "string" ? preExtractedText : await extractTextFromFile(file)
+    let text = typeof preExtractedText === "string" ? preExtractedText : await extractTextFromFile(file)
+    const fileType = String(file.type || "").toLowerCase()
+    const fileName = String(file.name || "").toLowerCase()
+    const isPdf = fileType === "application/pdf" || fileName.endsWith(".pdf")
+    if (isPdf && text.trim().length < 200) {
+      try {
+        const arrayBuffer = await file.arrayBuffer()
+        const ocrText = await extractPDFTextWithGemini(arrayBuffer)
+        const improved = sanitizeExtractedText(ocrText)
+        if (improved && improved.length > text.length) {
+          text = improved
+        }
+      } catch {
+      }
+    }
     console.log(`📄 Extracted text length: ${text.length} characters`)
     console.log(`📄 First 200 characters: ${text.substring(0, 200)}...`)
 
@@ -498,6 +569,7 @@ Return ONLY the JSON object:`
     // Try different Gemini models with fallback (prioritize gemini-3.1-flash-lite which is available)
     const models = [process.env.GEMINI_MODEL || "gemini-3.1-flash-lite-preview", "gemini-2.5-flash"]
     let lastError = null
+    const shouldAttachFile = isPdf && limitedText.trim().length < 200
 
     for (const modelName of models) {
       try {
@@ -506,8 +578,20 @@ Return ONLY the JSON object:`
         const model = genAI.getGenerativeModel({ 
           model: modelName
         })
+
+        const requestParts: any[] = [{ text: prompt }]
+        if (shouldAttachFile) {
+          const arrayBuffer = await file.arrayBuffer()
+          const pdfBase64 = Buffer.from(arrayBuffer).toString("base64")
+          requestParts.push({
+            inlineData: {
+              data: pdfBase64,
+              mimeType: "application/pdf",
+            },
+          })
+        }
         
-        const result: any = await runGeminiCall(() => model.generateContent(prompt), {
+        const result: any = await runGeminiCall(() => model.generateContent(requestParts), {
           minSpacingMs: 900,
           maxAttempts: 5,
         })
@@ -2409,7 +2493,7 @@ async function extractPDFTextWithGemini(arrayBuffer: ArrayBuffer): Promise<strin
   if (!genAI) {
     throw new Error("Gemini API not configured")
   }
-  const modelName = process.env.GEMINI_OCR_MODEL || process.env.GEMINI_MODEL || "gemini-2.0-flash"
+  const modelName = process.env.GEMINI_OCR_MODEL || process.env.GEMINI_MODEL || "gemini-3.1-flash-lite-preview"
   const model = genAI.getGenerativeModel({ model: modelName })
   const pdfBase64 = Buffer.from(arrayBuffer).toString("base64")
 
