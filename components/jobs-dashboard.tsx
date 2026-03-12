@@ -175,6 +175,15 @@ export function JobsDashboard() {
 
   const clientsById = useMemo(() => new Map(clients.map((c) => [c.id, c])), [clients])
   const totalPages = Math.max(1, Math.ceil(total / perPage))
+  const visibleJobs = useMemo(() => {
+    const list = Array.isArray(jobs) ? jobs.slice() : []
+    // Keep "inactive" jobs at the bottom (stable-ish ordering within status)
+    return list.sort((a, b) => {
+      const aInactive = a.status === "inactive" ? 1 : 0
+      const bInactive = b.status === "inactive" ? 1 : 0
+      return aInactive - bInactive
+    })
+  }, [jobs])
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -388,7 +397,7 @@ export function JobsDashboard() {
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {jobs.map((job) => {
+          {visibleJobs.map((job) => {
             const clientName = (job.client_id && clientsById.get(job.client_id)?.name) || job.client_name || ""
             const clientLogo = job.client_id ? (clientsById.get(job.client_id)?.logo_url || null) : null
             const pending = pendingCounts[job.id] || 0
@@ -448,6 +457,19 @@ export function JobsDashboard() {
                           }}
                         >
                           Change status
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          className="text-red-600 focus:text-red-600"
+                          onClick={async () => {
+                            const ok = confirm("Delete this job? This cannot be undone.")
+                            if (!ok) return
+                            await fetch(`/api/jobs/${job.id}`, { method: "DELETE" })
+                            invalidateSessionCache("internal:jobs:", { prefix: true })
+                            invalidateSessionCache(jobCountsCacheKey)
+                            fetchJobs({ force: true })
+                          }}
+                        >
+                          Delete
                         </DropdownMenuItem>
                         {!job.is_external_link && (
                           <DropdownMenuItem

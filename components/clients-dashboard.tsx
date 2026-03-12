@@ -213,6 +213,7 @@ export function ClientsDashboard() {
     try {
       const res = await fetch("/api/clients/generate-about", {
         method: "POST",
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ website: form.website })
       })
@@ -236,14 +237,6 @@ export function ClientsDashboard() {
       toast({ title: "Website required", description: "Website is required.", variant: "destructive" })
       return
     }
-    if (!form.primary_contact_name.trim()) {
-      toast({ title: "Contact required", description: "Primary contact name is required.", variant: "destructive" })
-      return
-    }
-    if (!form.primary_contact_email.trim()) {
-      toast({ title: "Contact required", description: "Primary contact email is required.", variant: "destructive" })
-      return
-    }
     setSaving(true)
     try {
       const payload = {
@@ -258,8 +251,8 @@ export function ClientsDashboard() {
 
       const enriched = {
         ...payload,
-        primary_contact_name: form.primary_contact_name.trim(),
-        primary_contact_email: form.primary_contact_email.trim(),
+        primary_contact_name: form.primary_contact_name.trim() || null,
+        primary_contact_email: form.primary_contact_email.trim() || null,
         primary_contact_phone: form.primary_contact_phone || null,
         additional_contacts: form.additional_contacts
       }
@@ -447,7 +440,7 @@ export function ClientsDashboard() {
                 </div>
               </CardHeader>
               <CardContent className="space-y-3">
-                <div className="text-sm text-muted-foreground line-clamp-3">{c.about || "No about added yet."}</div>
+                <div className="text-sm text-muted-foreground max-h-24 overflow-auto pr-1">{c.about || "No about added yet."}</div>
                 <div className="flex flex-wrap items-center gap-2">
                   {c.location ? <Badge variant="outline">{c.location}</Badge> : null}
                   {c.company_type ? <Badge variant="secondary">{c.company_type}</Badge> : null}
@@ -575,11 +568,11 @@ export function ClientsDashboard() {
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div className="space-y-2">
-                <Label>Primary contact name *</Label>
+                <Label>Primary contact name</Label>
                 <Input value={form.primary_contact_name} onChange={(e) => setForm({ ...form, primary_contact_name: e.target.value })} />
               </div>
               <div className="space-y-2">
-                <Label>Primary contact email *</Label>
+                <Label>Primary contact email</Label>
                 <Input value={form.primary_contact_email} onChange={(e) => setForm({ ...form, primary_contact_email: e.target.value })} type="email" />
               </div>
               <div className="space-y-2">

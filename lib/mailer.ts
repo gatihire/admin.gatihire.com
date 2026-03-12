@@ -102,7 +102,7 @@ async function sendEmail(input: SendEmailInput) {
 export async function sendInviteEmail(input: SendInviteEmailInput) {
   const candidateLine = input.candidateName ? `Hi ${escapeHtml(input.candidateName)},` : "Hi,"
 
-  const html = input.html || `
+  const defaultHtml = `
   <div style="font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;line-height:1.5;color:#111827">
     <p style="margin:0 0 16px">${candidateLine}</p>
     <p style="margin:0 0 16px">You’ve been invited to apply for <strong>${escapeHtml(input.jobTitle)}</strong> at Truckinzy.</p>
@@ -116,6 +116,20 @@ export async function sendInviteEmail(input: SendInviteEmailInput) {
   </div>
   `.trim()
 
+  let html = (input.html || "").trim()
+  if (!html) {
+    html = defaultHtml
+  } else if (!html.includes(input.inviteLink)) {
+    // Ensure there is always at least a plain-text link fallback, even if the template omitted it.
+    html = `
+      ${html}
+      <div style="margin-top:16px;color:#6b7280;font-size:13px">
+        <p style="margin:0 0 4px;">If the button doesn’t work, copy and paste this link:</p>
+        <p style="margin:0;color:#374151;word-break:break-all">${escapeHtml(input.inviteLink)}</p>
+      </div>
+    `.trim()
+  }
+
   return sendEmail({ to: input.to, from: input.from, subject: input.subject, html })
 }
 
@@ -124,7 +138,7 @@ export async function sendOutreachEmail(input: SendOutreachEmailInput) {
   const skills = Array.isArray(input.matchedSkills) ? input.matchedSkills.filter(Boolean).slice(0, 6) : []
   const score = typeof input.matchScorePercent === "number" ? input.matchScorePercent : null
 
-  const html = input.html || `
+  const defaultHtml = `
   <div style="font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;line-height:1.5;color:#111827">
     <p style="margin:0 0 16px">${candidateLine}</p>
     <p style="margin:0 0 12px">We found a role that matches your profile: <strong>${escapeHtml(input.jobTitle)}</strong>.</p>
@@ -139,6 +153,19 @@ export async function sendOutreachEmail(input: SendOutreachEmailInput) {
     <p style="margin:0;color:#374151;font-size:13px;word-break:break-all">${escapeHtml(input.applyLink)}</p>
   </div>
   `.trim()
+
+  let html = (input.html || "").trim()
+  if (!html) {
+    html = defaultHtml
+  } else if (!html.includes(input.applyLink)) {
+    html = `
+      ${html}
+      <div style="margin-top:16px;color:#6b7280;font-size:13px">
+        <p style="margin:0 0 4px;">If the button doesn’t work, copy and paste this link:</p>
+        <p style="margin:0;color:#374151;word-break:break-all">${escapeHtml(input.applyLink)}</p>
+      </div>
+    `.trim()
+  }
 
   return sendEmail({ to: input.to, from: input.from, subject: input.subject, html })
 }

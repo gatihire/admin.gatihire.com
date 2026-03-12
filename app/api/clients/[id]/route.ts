@@ -55,16 +55,24 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
     patch.website = patch.website.trim()
   }
   if ("primary_contact_name" in patch) {
-    if (typeof patch.primary_contact_name !== "string" || !patch.primary_contact_name.trim()) {
-      return NextResponse.json({ error: "Primary contact name is required" }, { status: 400 })
+    if (patch.primary_contact_name === null) {
+      // allow clearing
+    } else if (typeof patch.primary_contact_name !== "string") {
+      return NextResponse.json({ error: "Primary contact name must be a string" }, { status: 400 })
+    } else {
+      const trimmed = patch.primary_contact_name.trim()
+      patch.primary_contact_name = trimmed.length ? trimmed : null
     }
-    patch.primary_contact_name = patch.primary_contact_name.trim()
   }
   if ("primary_contact_email" in patch) {
-    if (typeof patch.primary_contact_email !== "string" || !patch.primary_contact_email.trim()) {
-      return NextResponse.json({ error: "Primary contact email is required" }, { status: 400 })
+    if (patch.primary_contact_email === null) {
+      // allow clearing
+    } else if (typeof patch.primary_contact_email !== "string") {
+      return NextResponse.json({ error: "Primary contact email must be a string" }, { status: 400 })
+    } else {
+      const trimmed = patch.primary_contact_email.trim()
+      patch.primary_contact_email = trimmed.length ? trimmed : null
     }
-    patch.primary_contact_email = patch.primary_contact_email.trim()
   }
   if ("additional_contacts" in patch) {
     patch.additional_contacts = Array.isArray(patch.additional_contacts) ? patch.additional_contacts : []

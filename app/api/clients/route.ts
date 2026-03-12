@@ -46,12 +46,6 @@ export async function POST(request: NextRequest) {
   if (!body?.website || typeof body.website !== "string" || !body.website.trim()) {
     return NextResponse.json({ error: "Website is required" }, { status: 400 })
   }
-  if (!body?.primary_contact_name || typeof body.primary_contact_name !== "string" || !body.primary_contact_name.trim()) {
-    return NextResponse.json({ error: "Primary contact name is required" }, { status: 400 })
-  }
-  if (!body?.primary_contact_email || typeof body.primary_contact_email !== "string" || !body.primary_contact_email.trim()) {
-    return NextResponse.json({ error: "Primary contact email is required" }, { status: 400 })
-  }
 
   const desiredSlug = body.slug && typeof body.slug === "string" ? slugify(body.slug) : slugify(body.name)
   const baseSlug = desiredSlug || `client-${randomSuffix(6)}`
@@ -69,8 +63,8 @@ export async function POST(request: NextRequest) {
     company_subtype: typeof body.company_subtype === "string" ? body.company_subtype : null,
     location: typeof body.location === "string" ? body.location : null,
     logo_url: typeof body.logo_url === "string" ? body.logo_url : null,
-    primary_contact_name: body.primary_contact_name.trim(),
-    primary_contact_email: body.primary_contact_email.trim(),
+    primary_contact_name: typeof body.primary_contact_name === "string" ? body.primary_contact_name.trim() : null,
+    primary_contact_email: typeof body.primary_contact_email === "string" ? body.primary_contact_email.trim() : null,
     primary_contact_phone: typeof body.primary_contact_phone === "string" ? body.primary_contact_phone : null,
     additional_contacts: Array.isArray(body.additional_contacts) ? body.additional_contacts : [],
     created_at: nowIso(),

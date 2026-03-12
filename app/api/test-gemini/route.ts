@@ -1,14 +1,10 @@
 import { NextRequest, NextResponse } from "next/server"
 import { GoogleGenerativeAI } from "@google/generative-ai"
+import { getInternalAuthContext } from "@/lib/internal-auth"
 
 export async function GET(request: NextRequest) {
-  // Authorization: require login cookie or valid admin token
-  const authCookie = request.cookies.get("auth")?.value
-  const authHeader = request.headers.get("authorization")
-  const hasAdminToken = authHeader === `Bearer ${process.env.ADMIN_TOKEN}`
-  if (authCookie !== "true" && !hasAdminToken) {
-    return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
-  }
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
 
   try {
     console.log("=== Testing Gemini API ===")
@@ -26,7 +22,13 @@ export async function GET(request: NextRequest) {
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
     
     // Test different models
-    const models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+    const models = [
+      process.env.GEMINI_MODEL || "gemini-2.5-flash",
+      "gemini-2.5-flash",
+      "gemini-2.0-flash",
+      "gemini-1.5-flash",
+      "gemini-1.5-pro"
+    ]
     const results = []
     
     for (const modelName of models) {

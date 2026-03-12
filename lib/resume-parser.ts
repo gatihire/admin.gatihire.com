@@ -169,7 +169,7 @@ async function assessResumeDocumentFromFile(
   if (!isPdf) return basic
 
   try {
-    const modelName = process.env.GEMINI_CLASSIFIER_MODEL || process.env.GEMINI_MODEL || "gemini-3.1-flash-lite-preview"
+    const modelName = process.env.GEMINI_CLASSIFIER_MODEL || process.env.GEMINI_MODEL || "gemini-2.5-flash"
     const model = genAI.getGenerativeModel({ model: modelName })
     const arrayBuffer = await file.arrayBuffer()
     const pdfBase64 = Buffer.from(arrayBuffer).toString("base64")
@@ -300,7 +300,7 @@ async function assessResumeDocument(text: string): Promise<{ isResume: boolean; 
     }
   }
 
-  const modelName = process.env.GEMINI_CLASSIFIER_MODEL || process.env.GEMINI_MODEL || "gemini-3.1-flash-lite-preview"
+  const modelName = process.env.GEMINI_CLASSIFIER_MODEL || process.env.GEMINI_MODEL || "gemini-2.5-flash"
   const model = genAI.getGenerativeModel({ model: modelName })
   const limited = t.slice(0, 6000)
   const prompt = `Classify the following document text.

@@ -218,8 +218,14 @@ export async function POST(request: NextRequest) {
         const parsedRequirements = await parseSearchRequirement(baseText)
         // This uses local scoring, very fast
         const ranked = await intelligentCandidateSearch(parsedRequirements, candidates)
+
+        const maxInitialMatches = Number(process.env.INITIAL_MATCH_LIMIT || 300)
+        const minInitialScore = Number(process.env.INITIAL_MATCH_MIN_SCORE || 0.25)
+        const filteredRanked = (Array.isArray(ranked) ? ranked : [])
+          .filter((c: any) => (c.relevanceScore || 0) >= minInitialScore)
+          .slice(0, maxInitialMatches)
         
-        const matches = ranked.map((c: any) => ({
+        const matches = filteredRanked.map((c: any) => ({
             job_id: jobId,
             candidate_id: c.id,
             relevance_score: c.relevanceScore || 0,
@@ -237,7 +243,7 @@ export async function POST(request: NextRequest) {
              if (matchError) {
                  console.warn("Failed to store initial matches:", matchError)
              } else {
-                 console.log(`Stored ${matches.length} initial matches for job ${jobId}`)
+                 console.log(`Stored ${matches.length} initial matches for job ${jobId} (from ${ranked?.length || 0} scored candidates)`)
              }
         }
     } catch (matchErr) {

@@ -145,7 +145,8 @@ export function getBoardAppBaseUrl() {
       || ""
   ).trim()
   const base = raw.length ? raw : "https://talent.gatihire.com"
-  return base.replace(/\/$/, "")
+  const normalized = /^https?:\/\//i.test(base) ? base : `https://${base.replace(/^\/\//, "")}`
+  return normalized.replace(/\/$/, "")
 }
 
 export function getBoardJobApplyUrl(jobId: string) {
