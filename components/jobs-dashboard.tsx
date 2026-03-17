@@ -179,9 +179,11 @@ export function JobsDashboard() {
     const list = Array.isArray(jobs) ? jobs.slice() : []
     // Keep "inactive" jobs at the bottom (stable-ish ordering within status)
     return list.sort((a, b) => {
-      const aInactive = a.status === "inactive" ? 1 : 0
-      const bInactive = b.status === "inactive" ? 1 : 0
-      return aInactive - bInactive
+      const aRank = (a as any).urgency_tag === "urgently_hiring" ? 0 : a.status === "open" ? 1 : 2
+      const bRank = (b as any).urgency_tag === "urgently_hiring" ? 0 : b.status === "open" ? 1 : 2
+      if (aRank !== bRank) return aRank - bRank
+      // sort by date otherwise
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
     })
   }, [jobs])
 

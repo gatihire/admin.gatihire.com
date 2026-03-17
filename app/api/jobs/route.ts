@@ -24,7 +24,8 @@ export async function GET(request: NextRequest) {
     const q = (searchParams.get("search") || "").trim()
 
     let query = supabaseAdmin.from("jobs").select("*", { count: paginate ? "exact" : undefined as any })
-    query = query.order("created_at", { ascending: false })
+    // Prefer explicit prioritization if available, then newest first.
+    query = query.order("priority_rank", { ascending: true, nullsFirst: true }).order("created_at", { ascending: false })
 
     if (status && status !== "all") {
       query = query.eq("status", status)
