@@ -233,17 +233,13 @@ export function ClientsDashboard() {
       toast({ title: "Name required", description: "Client name is required.", variant: "destructive" })
       return
     }
-    if (!form.website.trim()) {
-      toast({ title: "Website required", description: "Website is required.", variant: "destructive" })
-      return
-    }
     setSaving(true)
     try {
       const payload = {
         name: form.name.trim(),
         slug: form.slug ? slugify(form.slug) : slugify(form.name),
         about: form.about || null,
-        website: form.website.trim(),
+        website: form.website?.trim() || "",
         company_type: form.company_type || null,
         company_subtype: form.company_subtype || null,
         location: form.location || null
@@ -562,7 +558,7 @@ export function ClientsDashboard() {
             </div>
 
             <div className="space-y-2">
-              <Label>Website</Label>
+              <Label>Website (Optional)</Label>
               <Input value={form.website} onChange={(e) => setForm({ ...form, website: e.target.value })} placeholder="https://" />
             </div>
 

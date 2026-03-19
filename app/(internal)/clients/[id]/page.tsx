@@ -71,14 +71,18 @@ export default async function ClientDetailPage(props: { params: Promise<{ id: st
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div className="rounded-xl border bg-white p-4 dark:bg-zinc-900 dark:border-zinc-800">
               <div className="text-xs font-medium text-muted-foreground">Website</div>
-              <a
-                href={normalizeExternalUrl(client.website)}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="mt-1 inline-block text-sm font-medium text-blue-600 hover:underline"
-              >
-                {client.website}
-              </a>
+              {client.website ? (
+                <a
+                  href={normalizeExternalUrl(client.website)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-1 inline-block text-sm font-medium text-blue-600 hover:underline"
+                >
+                  {client.website}
+                </a>
+              ) : (
+                <div className="mt-1 text-sm text-muted-foreground">—</div>
+              )}
               <div className="mt-2 text-sm">{client.company_type || "—"}</div>
               <div className="text-sm text-muted-foreground">{client.location || "—"}</div>
             </div>

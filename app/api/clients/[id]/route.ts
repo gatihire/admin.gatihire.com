@@ -49,10 +49,7 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
   if (typeof patch.slug === "string") patch.slug = slugify(patch.slug)
 
   if ("website" in patch) {
-    if (typeof patch.website !== "string" || !patch.website.trim()) {
-      return NextResponse.json({ error: "Website is required" }, { status: 400 })
-    }
-    patch.website = patch.website.trim()
+    patch.website = typeof patch.website === "string" ? patch.website.trim() : ""
   }
   if ("primary_contact_name" in patch) {
     if (patch.primary_contact_name === null) {

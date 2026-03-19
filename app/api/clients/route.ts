@@ -43,9 +43,6 @@ export async function POST(request: NextRequest) {
 
   const body = (await request.json().catch(() => null)) as any
   if (!body?.name || typeof body.name !== "string") return NextResponse.json({ error: "Name is required" }, { status: 400 })
-  if (!body?.website || typeof body.website !== "string" || !body.website.trim()) {
-    return NextResponse.json({ error: "Website is required" }, { status: 400 })
-  }
 
   const desiredSlug = body.slug && typeof body.slug === "string" ? slugify(body.slug) : slugify(body.name)
   const baseSlug = desiredSlug || `client-${randomSuffix(6)}`
@@ -58,7 +55,7 @@ export async function POST(request: NextRequest) {
     slug,
     name: body.name.trim(),
     about: typeof body.about === "string" ? body.about : null,
-    website: body.website.trim(),
+    website: typeof body.website === "string" ? body.website.trim() : "",
     company_type: typeof body.company_type === "string" ? body.company_type : null,
     company_subtype: typeof body.company_subtype === "string" ? body.company_subtype : null,
     location: typeof body.location === "string" ? body.location : null,
