@@ -8,7 +8,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Checkbox } from "@/components/ui/checkbox"
-import { RefreshCw, User, CheckCircle, MapPin, Briefcase, Eye, Loader2, Sparkles, Send } from "lucide-react"
+import { RefreshCw, User, CheckCircle, MapPin, Briefcase, Eye, Loader2, Sparkles, Send, RotateCw } from "lucide-react"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import { cachedFetchJson, invalidateSessionCache } from "@/lib/utils"
@@ -722,7 +722,19 @@ export default function MatchesClient({ jobId }: { jobId: string }) {
 
                         {aiByCandidateId[m.candidate_id]?.summary && aiByCandidateId[m.candidate_id]?.visible ? (
                           <div className="mt-3 rounded-lg border bg-purple-50/40 p-3">
-                            <div className="text-xs font-semibold text-purple-700 mb-1">AI Analysis</div>
+                            <div className="flex items-center justify-between mb-1">
+                              <div className="text-xs font-semibold text-purple-700">AI Analysis</div>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-6 px-2 text-xs text-purple-600 hover:text-purple-700 hover:bg-purple-100"
+                                onClick={() => toggleAi(m.candidate_id, true)}
+                                disabled={!!aiLoadingByCandidateId[m.candidate_id]}
+                              >
+                                {aiLoadingByCandidateId[m.candidate_id] ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <RotateCw className="h-3 w-3 mr-1" />}
+                                Re-analyze
+                              </Button>
+                            </div>
                             <div className="text-sm text-gray-700 whitespace-pre-wrap">
                               {aiByCandidateId[m.candidate_id].expanded
                                 ? aiByCandidateId[m.candidate_id].summary

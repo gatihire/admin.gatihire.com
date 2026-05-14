@@ -4,9 +4,9 @@ import { CandidateProvider } from '@/contexts/candidate-context'
 import { CookieConsentWrapper } from '@/components/cookie-consent-wrapper'
 
 export const metadata: Metadata = {
-  title: 'Truckinzy Data',
+  title: 'GatiHire | Admin',
   description: 'Made with ❤️ by Bipul ',
-  generator: 'Truckinzy',
+  generator: 'GatiHire',
 }
 
 export default function RootLayout({

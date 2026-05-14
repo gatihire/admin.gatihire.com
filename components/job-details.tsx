@@ -2007,7 +2007,7 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
                             onClick={() => handleNoteEdit(app)}
                         >
                             {app.notes ? (
-                                <p className="whitespace-pre-wrap">{app.notes}</p>
+                                <p className="whitespace-pre-wrap">{app.notes.replace(/attribution:\{.*?\}/g, '').trim() || <span className="text-gray-400 italic">No notes</span>}</p>
                             ) : (
                                 <p className="text-gray-400 italic">Click to add notes...</p>
                             )}
@@ -2017,7 +2017,19 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
 
                 {candidateAiById[app.candidate_id]?.summary && candidateAiById[app.candidate_id]?.visible ? (
                   <div className="rounded-lg border bg-purple-50/40 p-3">
-                    <div className="text-xs font-semibold text-purple-700 mb-1">AI Analysis</div>
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="text-xs font-semibold text-purple-700">AI Analysis</div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 px-2 text-xs text-purple-600 hover:text-purple-700 hover:bg-purple-100"
+                        onClick={() => toggleCandidateAi(app.candidate_id, true)}
+                        disabled={!!candidateAiLoadingById[app.candidate_id]}
+                      >
+                        {candidateAiLoadingById[app.candidate_id] ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <RotateCw className="h-3 w-3 mr-1" />}
+                        Re-analyze
+                      </Button>
+                    </div>
                     <div className="text-sm text-gray-700 whitespace-pre-wrap">
                       {candidateAiById[app.candidate_id].expanded
                         ? candidateAiById[app.candidate_id].summary

@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
-const LOGO_URL = "https://i.postimg.cc/D0W2Z5sY/log0-def.png";
+const LOGO_URL = "https://i.postimg.cc/qMqv04M9/output-onlinepngtools.png";
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");

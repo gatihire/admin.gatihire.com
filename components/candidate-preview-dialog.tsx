@@ -434,14 +434,14 @@ export function CandidatePreviewDialog({
     return experience?.toString() || "Not specified"
   }
 
-  const generateAnalysis = async () => {
+  const generateAnalysis = async (force: boolean = false) => {
     if (!jobId || !candidateId) return
     setIsAnalyzing(true)
     try {
       const res = await fetch("/api/matches/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobId, candidateId })
+        body: JSON.stringify({ jobId, candidateId, force })
       })
       const data = await res.json()
       if (data.error) throw new Error(data.error)
@@ -1401,7 +1401,7 @@ export function CandidatePreviewDialog({
                                     {aiAnalysis}
                                 </div>
                                 <div className="mt-6 flex justify-end">
-                                     <Button variant="outline" size="sm" onClick={generateAnalysis} disabled={isAnalyzing}>
+                                     <Button variant="outline" size="sm" onClick={() => generateAnalysis(true)} disabled={isAnalyzing}>
                                         <BrainCircuit className="mr-2 h-4 w-4" />
                                         Regenerate
                                     </Button>

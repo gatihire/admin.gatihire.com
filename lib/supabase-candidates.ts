@@ -1182,6 +1182,10 @@ export class SupabaseCandidateService {
       }
       
       // Update the candidate with new parsed data
+      // PREVENT OVERWRITING ORIGINAL FILE URL
+      parsedData.fileUrl = fileUrl
+      parsedData.fileName = fileName
+      
       await this.updateCandidate(candidateId, parsedData)
       
       return true
