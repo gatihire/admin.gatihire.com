@@ -110,6 +110,10 @@ interface CandidateData {
   matchingKeywords?: string[]
   matchPercentage?: number
   matchSummary?: string
+  current_salary?: string
+  expected_salary?: string
+  looking_for_work?: boolean
+  is_fresher?: boolean
 }
 
 interface CandidatePreviewDialogProps {
@@ -715,6 +719,42 @@ export function CandidatePreviewDialog({
                     </CardContent>
                   </Card>
                 )}
+
+                {/* Work Preferences & Availability */}
+                <Card className="shadow-sm hover:shadow-md transition-shadow">
+                  <CardHeader>
+                    <CardTitle className="text-lg flex items-center text-orange-700">
+                      <Clock className="h-5 w-5 mr-2" />
+                      Work Preferences & Availability
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                      <div className="p-3 bg-orange-50 rounded-lg">
+                        <p className="text-sm font-medium text-gray-700">Current CTC</p>
+                        <p className="text-gray-800 font-semibold">{safeCandidate.current_salary || "Not specified"}</p>
+                      </div>
+                      <div className="p-3 bg-blue-50 rounded-lg">
+                        <p className="text-sm font-medium text-gray-700">Expected CTC</p>
+                        <p className="text-gray-800 font-semibold">{safeCandidate.expected_salary || "Not specified"}</p>
+                      </div>
+                      <div className="p-3 bg-green-50 rounded-lg flex items-center justify-between">
+                        <div>
+                          <p className="text-sm font-medium text-gray-700">Open to work</p>
+                          <p className="text-gray-800 font-semibold">{safeCandidate.looking_for_work !== false ? "Yes" : "No"}</p>
+                        </div>
+                        <div className={`h-2.5 w-2.5 rounded-full ${safeCandidate.looking_for_work !== false ? 'bg-green-500' : 'bg-gray-300'}`} />
+                      </div>
+                      <div className="p-3 bg-indigo-50 rounded-lg flex items-center justify-between">
+                        <div>
+                          <p className="text-sm font-medium text-gray-700">Is Fresher?</p>
+                          <p className="text-gray-800 font-semibold">{safeCandidate.tags?.includes('fresher:yes') ? "Yes" : "No"}</p>
+                        </div>
+                        <div className={`h-2.5 w-2.5 rounded-full ${safeCandidate.tags?.includes('fresher:yes') ? 'bg-indigo-500' : 'bg-gray-300'}`} />
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
 
                 {/* Social Links */}
                 {safeCandidate.linkedinProfile && (

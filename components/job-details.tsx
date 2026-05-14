@@ -9,7 +9,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useToast } from "@/components/ui/use-toast"
 import { Input } from "@/components/ui/input"
-import { Loader2, ArrowLeft, Calendar, ExternalLink, Eye, Link2, Mail, MessageSquare, RotateCw, Save, User, Pencil, Plus, Sparkles, Send, MessageCircle, CheckCircle, XCircle, Clock, ExternalLinkIcon, ChevronDown, ChevronUp } from "lucide-react"
+import { Loader2, ArrowLeft, Calendar, ExternalLink, Eye, Link2, Mail, MessageSquare, RotateCw, Save, User, Pencil, Plus, Sparkles, Send, MessageCircle, CheckCircle, XCircle, Clock, ExternalLinkIcon, ChevronDown, ChevronUp, Phone, MapPin } from "lucide-react"
 import { format, formatDistanceToNow } from "date-fns"
 import { Textarea } from "@/components/ui/textarea"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
@@ -1915,6 +1915,54 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
                           </div>
                           <div className="text-sm text-gray-500">
                             {app.candidates?.current_role || "No role specified"}
+                          </div>
+                          
+                          <div className="flex items-center gap-4 mt-1 text-xs text-gray-400">
+                            {app.candidates?.email && (
+                              <div className="flex items-center gap-1">
+                                <Mail className="h-3 w-3" />
+                                {app.candidates.email}
+                              </div>
+                            )}
+                            {app.candidates?.phone && (
+                              <div className="flex items-center gap-1">
+                                <Phone className="h-3 w-3" />
+                                {app.candidates.phone}
+                              </div>
+                            )}
+                            {app.candidates?.location && (
+                              <div className="flex items-center gap-1">
+                                <MapPin className="h-3 w-3" />
+                                {app.candidates.location}
+                              </div>
+                            )}
+                          </div>
+                          
+                          <div className="flex flex-wrap gap-2 mt-2">
+                            {app.candidates?.current_salary && (
+                              <div className="flex flex-col">
+                                <span className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Current CTC</span>
+                                <span className="text-sm font-medium text-gray-700">{app.candidates.current_salary}</span>
+                              </div>
+                            )}
+                            {app.candidates?.expected_salary && (
+                              <div className="flex flex-col ml-4">
+                                <span className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Expected CTC</span>
+                                <span className="text-sm font-medium text-gray-700">{app.candidates.expected_salary}</span>
+                              </div>
+                            )}
+                            <div className="flex gap-2 ml-auto items-center">
+                              {app.candidates?.looking_for_work !== false && (
+                                <Badge variant="secondary" className="bg-green-50 text-green-700 border-green-100 text-[10px] h-5">
+                                  Open to work
+                                </Badge>
+                              )}
+                              {app.candidates?.tags?.includes('fresher:yes') && (
+                                <Badge variant="secondary" className="bg-blue-50 text-blue-700 border-blue-100 text-[10px] h-5">
+                                  Fresher
+                                </Badge>
+                              )}
+                            </div>
                           </div>
                         </div>
                       </div>
