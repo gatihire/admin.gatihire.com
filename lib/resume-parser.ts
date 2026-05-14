@@ -2602,10 +2602,28 @@ async function extractDocxText(arrayBuffer: ArrayBuffer): Promise<string> {
       console.log("Extracted text length:", result.value.length)
       console.log("First 200 characters:", result.value.substring(0, 200))
       return sanitizeExtractedText(result.value)
-    } else {
-      console.warn("⚠️ Mammoth extraction returned empty or invalid result")
-      throw new Error("No text content found in DOCX file")
+    } 
+
+    // Approach 4: Try convertToHtml and strip tags as a fallback
+    try {
+      console.log("🔄 Attempt 4: Fallback via convertToHtml...")
+      const htmlResult = await mammoth.convertToHtml({ arrayBuffer })
+      if (htmlResult && htmlResult.value) {
+        const stripped = htmlResult.value
+          .replace(/<[^>]+>/g, " ")
+          .replace(/\s+/g, " ")
+          .trim()
+        if (stripped.length > 50) {
+          console.log("✅ Fallback via convertToHtml successful")
+          return sanitizeExtractedText(stripped)
+        }
+      }
+    } catch (e) {
+      console.log("❌ Fallback via convertToHtml failed")
     }
+
+    console.warn("⚠️ Mammoth extraction returned empty or invalid result")
+    throw new Error("No text content found in DOCX file")
     
   } catch (error) {
     console.error("❌ All mammoth.js approaches failed:", error)
@@ -2625,12 +2643,20 @@ async function extractDocxText(arrayBuffer: ArrayBuffer): Promise<string> {
       for (const path of xmlFiles) {
         if (zip.file(path)) {
           const xmlContent = await zip.file(path)!.async("string")
-          // Extract all text nodes from w:t tags
-          const matches = xmlContent.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/gi) || []
-          const textNodes = matches
-            .map((m) => m.replace(/<w:t[^>]*>/i, "").replace(/<\/w:t>/i, ""))
-            .join(" ")
-          combined += " " + textNodes
+          // Extract all text nodes from w:t tags with better paragraph handling
+          const paragraphs = xmlContent.split("</w:p>")
+          for (const p of paragraphs) {
+            const matches = p.match(/<w:t[^>]*>([\s\S]*?)<\/w:t>/gi) || []
+            const textNodes = matches
+              .map((m) => {
+                const content = m.replace(/<w:t[^>]*>/i, "").replace(/<\/w:t>/i, "")
+                return decodeXmlEntities(content)
+              })
+              .join("")
+            if (textNodes.trim()) {
+              combined += textNodes + "\n"
+            }
+          }
         }
       }
       const cleaned = sanitizeExtractedText(combined)
@@ -2650,6 +2676,18 @@ async function extractDocxText(arrayBuffer: ArrayBuffer): Promise<string> {
       throw new Error(`DOCX processing completely failed. Details: ${JSON.stringify(details)}`)
     }
   }
+}
+
+function decodeXmlEntities(text: string): string {
+  if (!text) return ""
+  return text
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(parseInt(dec, 10)))
+    .replace(/&#x([a-fA-F0-9]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
 }
 
 function sanitizeExtractedText(input: string): string {
