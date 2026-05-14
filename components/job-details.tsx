@@ -1963,7 +1963,7 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
                     </div>
                     <div className="flex items-center gap-1 justify-end">
                         <Calendar className="h-3.5 w-3.5" />
-                        Applied: {format(new Date(app.applied_at), "MMM d, yyyy")}
+                        Applied: {format(new Date(app.applied_at), "MMM d, yyyy, h:mm a")}
                     </div>
                 </div>
 
