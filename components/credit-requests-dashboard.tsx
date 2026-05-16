@@ -8,6 +8,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Building2, Mail, Phone, Users, Briefcase, Calendar, CheckCircle2, XCircle, Clock, Edit } from "lucide-react"
+import { cachedFetchJson } from "@/lib/utils"
 
 type ClientInfo = {
   id: string
@@ -61,11 +62,23 @@ export function CreditRequestsDashboard() {
   const [reviewAmount, setReviewAmount] = useState<number>(0)
   const [adminNote, setAdminNote] = useState("")
 
-  const fetchRequests = useCallback(async () => {
+  const fetchRequests = useCallback(async (opts?: { force?: boolean }) => {
     setLoading(true)
     try {
-      const res = await fetch(`/api/clients/credit-requests?status=${statusFilter}`, { credentials: "include" })
-      const data = await res.json()
+      const url = `/api/clients/credit-requests?status=${statusFilter}`
+      const data = await cachedFetchJson<{ requests: CreditRequest[] }>(
+        `internal:credit-requests:${url}`,
+        url,
+        undefined,
+        {
+          ttlMs: 5 * 60_000,
+          force: Boolean(opts?.force),
+          swr: true,
+          onData: (freshData) => {
+            setRequests(freshData.requests || [])
+          }
+        }
+      )
       setRequests(data.requests || [])
     } catch {
       console.error("Failed to load requests")
@@ -161,7 +174,7 @@ export function CreditRequestsDashboard() {
                 {s}
               </Button>
             ))}
-            <Button variant="ghost" onClick={fetchRequests} className="ml-auto">↻ Refresh</Button>
+            <Button variant="ghost" onClick={() => fetchRequests({ force: true })} className="ml-auto">↻ Refresh</Button>
           </div>
 
           {/* List */}

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { cachedFetchJson } from "@/lib/utils"
 
 type MeResponse = {
   user: { id: string; email: string | null }
@@ -124,24 +125,22 @@ export function SuperAdminDashboard() {
   }, [selectedUser])
   const primaryRoleForUser = roleNamesForUser[0] ?? ""
 
-  const loadBase = useCallback(async () => {
+  const loadBase = useCallback(async (opts?: { force?: boolean }) => {
     setLoading(true)
     setError("")
     try {
-      const meRes = await fetch("/api/super-admin/me")
-      const meJson = await meRes.json()
-      if (!meRes.ok) throw new Error(meJson?.error || "Failed to load session")
+      const meJson = await cachedFetchJson<any>("internal:super-admin:me", "/api/super-admin/me", undefined, { ttlMs: 5 * 60_000, force: Boolean(opts?.force), swr: true, onData: setMe })
       setMe(meJson)
 
       const reqs: Array<Promise<any>> = []
       if (meJson?.permissions?.includes("roles.manage")) {
-        reqs.push(fetch("/api/super-admin/roles").then(r => r.json()))
-        reqs.push(fetch("/api/super-admin/permissions").then(r => r.json()))
+        reqs.push(cachedFetchJson("internal:super-admin:roles", "/api/super-admin/roles", undefined, { ttlMs: 5 * 60_000, force: Boolean(opts?.force), swr: true }))
+        reqs.push(cachedFetchJson("internal:super-admin:permissions", "/api/super-admin/permissions", undefined, { ttlMs: 5 * 60_000, force: Boolean(opts?.force), swr: true }))
       } else {
         reqs.push(Promise.resolve({ roles: [] }))
         reqs.push(Promise.resolve({ permissions: [] }))
       }
-      if (meJson?.permissions?.includes("users.manage")) reqs.push(fetch("/api/super-admin/users").then(r => r.json()))
+      if (meJson?.permissions?.includes("users.manage")) reqs.push(cachedFetchJson("internal:super-admin:users", "/api/super-admin/users", undefined, { ttlMs: 5 * 60_000, force: Boolean(opts?.force), swr: true }))
       else reqs.push(Promise.resolve({ users: [] }))
 
       const [rolesJson, permissionsJson, usersJson] = await Promise.all(reqs)
@@ -155,34 +154,38 @@ export function SuperAdminDashboard() {
     }
   }, [])
 
-  const loadOverview = useCallback(async () => {
+  const loadOverview = useCallback(async (opts?: { force?: boolean }) => {
     if (!canViewAnalytics) return
     const qs = new URLSearchParams({
       from: new Date(fromDate).toISOString(),
       to: new Date(toDate).toISOString(),
       ...(userFilter !== "all" ? { userId: userFilter } : {}),
     })
-    const res = await fetch(`/api/super-admin/overview?${qs.toString()}`)
-    const json = await res.json()
-    if (!res.ok) throw new Error(json?.error || "Failed to load overview")
-    setOverview(json)
+    const url = `/api/super-admin/overview?${qs.toString()}`
+    try {
+      const json = await cachedFetchJson<any>(`internal:super-admin:overview:${qs.toString()}`, url, undefined, { ttlMs: 5 * 60_000, force: Boolean(opts?.force), swr: true, onData: setOverview })
+      setOverview(json)
+    } catch (e: any) {
+      throw new Error(e?.message || "Failed to load overview")
+    }
   }, [canViewAnalytics, fromDate, toDate, userFilter])
 
-  const loadUserDetails = useCallback(async (userId: string) => {
+  const loadUserDetails = useCallback(async (userId: string, opts?: { force?: boolean }) => {
     if (!userId) return
     const qs = new URLSearchParams({
       from: new Date(fromDate).toISOString(),
       to: new Date(toDate).toISOString(),
     })
-    const [statsRes, actRes, permRes] = await Promise.all([
-      fetch(`/api/super-admin/users/${userId}/stats?${qs.toString()}`),
-      fetch(`/api/super-admin/users/${userId}/activity?limit=50`),
-      fetch(`/api/super-admin/users/${userId}/permissions`),
+    const force = Boolean(opts?.force)
+    const [statsJson, actJson, permJson] = await Promise.all([
+      cachedFetchJson<any>(`internal:super-admin:users:${userId}:stats:${qs.toString()}`, `/api/super-admin/users/${userId}/stats?${qs.toString()}`, undefined, { ttlMs: 5 * 60_000, force, swr: true, onData: setSelectedUserStats }),
+      cachedFetchJson<any>(`internal:super-admin:users:${userId}:activity`, `/api/super-admin/users/${userId}/activity?limit=50`, undefined, { ttlMs: 5 * 60_000, force, swr: true, onData: setSelectedUserActivity }),
+      cachedFetchJson<any>(`internal:super-admin:users:${userId}:permissions`, `/api/super-admin/users/${userId}/permissions`, undefined, { ttlMs: 5 * 60_000, force, swr: true, onData: (data) => {
+        setSelectedUserPermissions(data)
+        setUserPermissionDraft(new Set(Array.isArray(data?.overridePermissionKeys) ? data.overridePermissionKeys : []))
+      } }),
     ])
-    const [statsJson, actJson, permJson] = await Promise.all([statsRes.json(), actRes.json(), permRes.json()])
-    if (!statsRes.ok) throw new Error(statsJson?.error || "Failed to load user stats")
-    if (!actRes.ok) throw new Error(actJson?.error || "Failed to load user activity")
-    if (!permRes.ok) throw new Error(permJson?.error || "Failed to load user permissions")
+    
     setSelectedUserStats(statsJson)
     setSelectedUserActivity(actJson)
     setSelectedUserPermissions(permJson)

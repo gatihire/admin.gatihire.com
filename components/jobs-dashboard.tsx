@@ -1,7 +1,7 @@
 "use client"
 
-import { useMemo, useState, useEffect } from "react"
-import { useRouter } from "next/navigation"
+import { useMemo, useState, useEffect, useCallback } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -11,10 +11,8 @@ import { formatDistanceToNow } from "date-fns"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { cachedFetchJson, getBoardJobApplyUrl, getSessionCached, invalidateSessionCache, peekSessionCache } from "@/lib/utils"
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Pagination, PaginationContent, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious } from "@/components/ui/pagination"
-import { SuggestionInput } from "@/components/ui/suggestion-input"
-import { INTERNAL_SEARCH_SUGGESTIONS } from "@/lib/search-suggestions"
+import { Input } from "@/components/ui/input"
 
 interface Job {
   id: string
@@ -59,14 +57,18 @@ interface Job {
 }
 
 export function JobsDashboard() {
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  
   const [jobs, setJobs] = useState<Job[]>([])
   const [loading, setLoading] = useState(true)
-  const [searchQuery, setSearchQuery] = useState("")
+  const [searchQuery, setSearchQuery] = useState(() => searchParams.get("search") || "")
   const [clients, setClients] = useState<{ id: string; name: string; slug: string; logo_url?: string | null }[]>([])
-  const [statusFilter, setStatusFilter] = useState<string>("all")
-  const [clientFilter, setClientFilter] = useState<string>("all")
-  const [sourceFilter, setSourceFilter] = useState<string>("all")
-  const [page, setPage] = useState<number>(1)
+  const [statusFilter, setStatusFilter] = useState<string>(() => searchParams.get("status") || "all")
+  const [clientFilter, setClientFilter] = useState<string>(() => searchParams.get("clientId") || "all")
+  const [sourceFilter, setSourceFilter] = useState<string>(() => searchParams.get("source") || "all")
+  const [sortFilter, setSortFilter] = useState<string>(() => searchParams.get("sort") || "newest")
+  const [page, setPage] = useState<number>(() => Number(searchParams.get("page")) || 1)
   const perPage = 50
   const [total, setTotal] = useState<number>(0)
   const [createOpen, setCreateOpen] = useState(false)
@@ -75,9 +77,27 @@ export function JobsDashboard() {
   const [appCounts, setAppCounts] = useState<Record<string, number>>({})
   const [pendingCounts, setPendingCounts] = useState<Record<string, number>>({})
   const [dbMatchCounts, setDbMatchCounts] = useState<Record<string, number>>({})
-  const router = useRouter()
+  
   const jobsCacheKey = "internal:jobs:/api/jobs"
   const jobCountsCacheKey = "internal:jobs:counts"
+
+  // Sync state to URL
+  const updateUrl = useCallback(() => {
+    const params = new URLSearchParams()
+    if (searchQuery) params.set("search", searchQuery)
+    if (statusFilter !== "all") params.set("status", statusFilter)
+    if (clientFilter !== "all") params.set("clientId", clientFilter)
+    if (sourceFilter !== "all") params.set("source", sourceFilter)
+    if (sortFilter !== "newest") params.set("sort", sortFilter)
+    if (page > 1) params.set("page", String(page))
+    
+    const qs = params.toString()
+    router.replace(`/jobs${qs ? `?${qs}` : ""}`, { scroll: false })
+  }, [router, searchQuery, statusFilter, clientFilter, sourceFilter, sortFilter, page])
+
+  useEffect(() => {
+    updateUrl()
+  }, [updateUrl])
 
   useEffect(() => {
     fetchClients()
@@ -123,7 +143,7 @@ export function JobsDashboard() {
         )
         return out
       },
-      { ttlMs: 60_000, force: Boolean(opts?.force) },
+      { ttlMs: 60_000, force: Boolean(opts?.force), swr: true, onData: applyCounts as any },
     )
     applyCounts(payload as { appCounts: Record<string, number>; pendingCounts: Record<string, number>; dbMatchCounts: Record<string, number> })
   }
@@ -134,6 +154,7 @@ export function JobsDashboard() {
     const url = `/api/jobs?paginate=true&page=${targetPage}&perPage=${perPage}&status=${encodeURIComponent(statusFilter)}&source=${encodeURIComponent(sourceFilter)}&clientId=${encodeURIComponent(clientFilter)}&search=${encodeURIComponent(searchQuery)}`
     const cacheKey = `${jobsCacheKey}:${url}`
 
+    // Show cached data instantly if not forcing a hard refresh
     const cachedPage = !force ? peekSessionCache<{ items: Job[]; total: number }>(cacheKey) : null
     const cachedCounts = !force
       ? peekSessionCache<{ appCounts: Record<string, number>; pendingCounts: Record<string, number>; dbMatchCounts: Record<string, number> }>(jobCountsCacheKey)
@@ -150,13 +171,22 @@ export function JobsDashboard() {
     if (cachedCounts) applyCounts(cachedCounts)
 
     try {
+      // Use SWR to always get real-time fresh data in the background
       const data = await cachedFetchJson<{ items: Job[]; total: number; page: number; perPage: number }>(cacheKey, url, undefined, {
         ttlMs: 60_000,
         force,
+        swr: true,
+        onData: (freshData) => {
+          const freshItems = Array.isArray((freshData as any)?.items) ? (freshData as any).items : []
+          setJobs(freshItems)
+          setTotal(typeof (freshData as any)?.total === "number" ? (freshData as any).total : freshItems.length)
+        }
       })
       const items = Array.isArray((data as any)?.items) ? (data as any).items : []
       setJobs(items)
       setTotal(typeof (data as any)?.total === "number" ? (data as any).total : items.length)
+      
+      // Also fetch counts with SWR
       await fetchJobCounts(items, { force })
     } catch (error) {
       console.error("Failed to fetch jobs", error)
@@ -177,19 +207,24 @@ export function JobsDashboard() {
   const totalPages = Math.max(1, Math.ceil(total / perPage))
   const visibleJobs = useMemo(() => {
     const list = Array.isArray(jobs) ? jobs.slice() : []
-    // Keep "inactive" jobs at the bottom (stable-ish ordering within status)
     return list.sort((a, b) => {
-      const aRank = (a as any).urgency_tag === "urgently_hiring" ? 0 : a.status === "open" ? 1 : 2
-      const bRank = (b as any).urgency_tag === "urgently_hiring" ? 0 : b.status === "open" ? 1 : 2
-      if (aRank !== bRank) return aRank - bRank
-      // sort by date otherwise
-      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      if (sortFilter === "newest") {
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      } else if (sortFilter === "oldest") {
+        return new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+      } else if (sortFilter === "urgency") {
+        const aRank = (a as any).urgency_tag === "urgently_hiring" ? 0 : a.status === "open" ? 1 : 2
+        const bRank = (b as any).urgency_tag === "urgently_hiring" ? 0 : b.status === "open" ? 1 : 2
+        if (aRank !== bRank) return aRank - bRank
+        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+      }
+      return 0
     })
-  }, [jobs])
+  }, [jobs, sortFilter])
 
   useEffect(() => {
     const t = setTimeout(() => {
-      fetchJobs({ force: true })
+      fetchJobs({ force: false })
     }, 250)
     return () => clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -270,16 +305,15 @@ export function JobsDashboard() {
       <Card className="border-zinc-200">
         <CardContent className="pt-4 space-y-4">
           <div className="grid grid-cols-1 gap-3 md:grid-cols-12">
-            <div className="md:col-span-4">
+            <div className="md:col-span-3">
               <div className="text-xs text-zinc-500 mb-1">Search</div>
               <div className="relative">
-                <SuggestionInput
+                <Input
                   value={searchQuery}
-                  onValueChange={(v) => {
-                    setSearchQuery(v)
+                  onChange={(e) => {
+                    setSearchQuery(e.target.value)
                     setPage(1)
                   }}
-                  suggestions={INTERNAL_SEARCH_SUGGESTIONS}
                   placeholder="Search jobs..."
                 />
               </div>
@@ -305,21 +339,43 @@ export function JobsDashboard() {
               </Select>
             </div>
 
-            <div className="md:col-span-3">
+            <div className="md:col-span-2">
               <div className="text-xs text-zinc-500 mb-1">Source</div>
-              <Tabs
+              <Select
                 value={sourceFilter}
                 onValueChange={(v) => {
                   setSourceFilter(v)
                   setPage(1)
                 }}
               >
-                <TabsList className="w-full justify-start">
-                  <TabsTrigger value="all" className="flex-1">All</TabsTrigger>
-                  <TabsTrigger value="truckinzy" className="flex-1">Truckinzy Side</TabsTrigger>
-                  <TabsTrigger value="employee" className="flex-1">Employee Side</TabsTrigger>
-                </TabsList>
-              </Tabs>
+                <SelectTrigger>
+                  <SelectValue placeholder="Source" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All</SelectItem>
+                  <SelectItem value="truckinzy">Truckinzy Side</SelectItem>
+                  <SelectItem value="employee">Employee Side</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="md:col-span-2">
+              <div className="text-xs text-zinc-500 mb-1">Sort By</div>
+              <Select
+                value={sortFilter}
+                onValueChange={(v) => {
+                  setSortFilter(v)
+                }}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Sort By" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="newest">Newest First</SelectItem>
+                  <SelectItem value="oldest">Oldest First</SelectItem>
+                  <SelectItem value="urgency">Urgency / Status</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
 
             <div className="md:col-span-2">
@@ -408,11 +464,16 @@ export function JobsDashboard() {
               <Card key={job.id} className="cursor-pointer border-zinc-200 hover:border-zinc-300 hover:shadow-sm transition flex flex-col" onClick={() => router.push(`/jobs/${job.id}`)}>
                 <CardHeader className="pb-3">
                   <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <Badge className={job.status === "open" ? "bg-green-600" : "bg-zinc-600"}>{job.status}</Badge>
+                      {pending > 0 && (
+                        <Badge className="bg-orange-500 hover:bg-orange-600 border-transparent text-white">
+                          {pending} New App{pending > 1 ? "s" : ""}
+                        </Badge>
+                      )}
                       <span className="text-xs text-muted-foreground flex items-center gap-1">
                         <Clock className="h-3 w-3" />
-                        Posted {formatDistanceToNow(new Date(job.created_at), { addSuffix: true })}
+                        {formatDistanceToNow(new Date(job.created_at), { addSuffix: true })}
                       </span>
                     </div>
                     <DropdownMenu>
@@ -524,16 +585,16 @@ export function JobsDashboard() {
                   </div>
                 </CardContent>
 
-                <CardFooter className="pt-0 grid grid-cols-2 gap-2">
+                <CardFooter className="pt-0 grid grid-cols-2 gap-2 mt-auto">
                   <Button
-                    variant="outline"
-                    className="w-full justify-center"
+                    variant={pending > 0 ? "default" : "outline"}
+                    className={pending > 0 ? "w-full justify-center bg-zinc-900 hover:bg-zinc-800 text-white" : "w-full justify-center"}
                     onClick={(e) => {
                       e.stopPropagation()
                       router.push(`/jobs/${job.id}?tab=all`)
                     }}
                   >
-                    Applicants ({appCounts[job.id] || 0}){pending ? ` • ${pending} pending` : ""}
+                    Applicants ({appCounts[job.id] || 0})
                   </Button>
                   <Button
                     variant="outline"
@@ -543,7 +604,7 @@ export function JobsDashboard() {
                       window.open(`/jobs/${job.id}/matches`, "_blank")
                     }}
                   >
-                    DB Matches ({dbMatchCounts[job.id] || 0})
+                    Matches ({dbMatchCounts[job.id] || 0})
                   </Button>
                 </CardFooter>
               </Card>

@@ -72,22 +72,29 @@ export function invalidateSessionCache(keyOrPrefix: string, opts?: { prefix?: bo
 export async function getSessionCached<T>(
   key: string,
   loader: () => Promise<T>,
-  opts?: { ttlMs?: number; force?: boolean },
+  opts?: { ttlMs?: number; force?: boolean; swr?: boolean; onData?: (data: T) => void },
 ): Promise<T> {
   const ttlMs = typeof opts?.ttlMs === "number" && opts.ttlMs > 0 ? opts.ttlMs : 5 * 60_000
   const force = Boolean(opts?.force)
+  const swr = Boolean(opts?.swr)
 
   if (typeof window === "undefined") {
     return loader()
   }
 
-  if (!force) {
-    const cached = peekSessionCache<T>(key)
-    if (cached !== null) return cached
+  const cached = peekSessionCache<T>(key)
+  
+  if (!force && cached !== null) {
+    if (swr && opts?.onData) {
+      // Call onData with cached data immediately, then continue to fetch fresh data in background
+      opts.onData(cached)
+    } else {
+      return cached
+    }
   }
 
   const existing = memorySessionCache.get(key)
-  if (!force && existing?.inflight) return existing.inflight as Promise<T>
+  if (!force && existing?.inflight && !swr) return existing.inflight as Promise<T>
 
   const inflight = (async () => {
     const value = await loader()
@@ -97,6 +104,11 @@ export async function getSessionCached<T>(
     try {
       window.sessionStorage.setItem(buildSessionCacheStorageKey(key), JSON.stringify(entry))
     } catch {}
+    
+    if (swr && opts?.onData) {
+      opts.onData(value)
+    }
+    
     return value
   })()
 
@@ -116,7 +128,7 @@ export async function cachedFetchJson<T>(
   key: string,
   input: RequestInfo | URL,
   init?: RequestInit,
-  opts?: { ttlMs?: number; force?: boolean },
+  opts?: { ttlMs?: number; force?: boolean; swr?: boolean; onData?: (data: T) => void },
 ): Promise<T> {
   return getSessionCached<T>(
     key,

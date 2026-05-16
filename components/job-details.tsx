@@ -9,11 +9,12 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useToast } from "@/components/ui/use-toast"
 import { Input } from "@/components/ui/input"
-import { Loader2, ArrowLeft, Calendar, ExternalLink, Eye, Link2, Mail, MessageSquare, RotateCw, Save, User, Pencil, Plus, Sparkles, Send, MessageCircle, CheckCircle, XCircle, Clock, ExternalLinkIcon, ChevronDown, ChevronUp, Phone, MapPin } from "lucide-react"
+import { Loader2, ArrowLeft, Calendar, ExternalLink, Eye, Link2, Mail, MessageSquare, RotateCw, Save, User, Pencil, Plus, Sparkles, Send, MessageCircle, CheckCircle, XCircle, Clock, ExternalLinkIcon, ChevronDown, ChevronUp, Phone, MapPin, Building2 } from "lucide-react"
 import { format, formatDistanceToNow } from "date-fns"
 import { Textarea } from "@/components/ui/textarea"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { Label } from "@/components/ui/label"
@@ -775,112 +776,242 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-4">
-        <Button variant="ghost" size="icon" onClick={onBack}>
-          <ArrowLeft className="h-5 w-5" />
-        </Button>
-        <div>
-          <h2 className="text-2xl font-bold">{job.title}</h2>
-          <div className="flex gap-2 text-sm text-gray-500">
-            {clientLabel ? (
-              <button className="inline-flex items-center gap-2 text-blue-600 hover:underline" onClick={() => setClientOpen(true)}>
-                {client?.logo_url ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={client.logo_url} alt="Logo" className="h-5 w-5 rounded border bg-white object-cover" />
-                ) : null}
-                {clientLabel}
-              </button>
-            ) : null}
-            {clientLabel ? <span>•</span> : null}
-            <span>{job.industry || ""}</span>
-            <span>•</span>
-            <span>{job.location}</span>
-            <span>•</span>
-            <Badge variant="outline">{String(job.employment_type || "").replace(/_/g, " ")}</Badge>
-            <Badge className={job.status === 'open' ? 'bg-green-500' : 'bg-gray-500'}>
-              {job.status}
-            </Badge>
-            {(job as any).is_external_link && (
-              <Badge variant="outline" className="bg-orange-50 text-orange-700 border-orange-200">
-                External Link
-              </Badge>
-            )}
-            {(job as any).source && (
-              <Badge variant="outline" className="bg-purple-50 text-purple-700 border-purple-200">
-                {(job as any).source === 'truckinzy' ? 'Truckinzy' : 'Employee'} Side
-              </Badge>
-            )}
-            <a 
-                href={publicApplyUrl}
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="ml-2 flex items-center gap-1 text-blue-600 hover:underline"
-            >
-                View Public Page <ExternalLink className="h-3 w-3" />
-            </a>
-            {!job.is_external_link && (
+      <div className="bg-white border rounded-2xl shadow-sm mb-8 overflow-hidden">
+        <div className="p-6 md:p-8">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+            <div className="flex items-start gap-4">
+              <Button 
+                variant="ghost" 
+                size="icon" 
+                onClick={onBack} 
+                className="h-10 w-10 shrink-0 rounded-full border border-zinc-200 bg-white shadow-sm hover:bg-zinc-50 hover:border-zinc-300 transition-all mt-1"
+              >
+                <ArrowLeft className="h-5 w-5 text-zinc-600" />
+              </Button>
+              <div className="space-y-1">
+                <h2 className="text-2xl md:text-3xl font-extrabold text-zinc-900 tracking-tight leading-tight">
+                  {job.title}
+                </h2>
+                <div className="flex flex-wrap items-center gap-y-2 gap-x-4">
+                  {clientLabel && (
+                    <button 
+                      onClick={() => setClientOpen(true)}
+                      className="flex items-center gap-2 text-blue-600 hover:text-blue-700 font-bold transition-all bg-blue-50/50 hover:bg-blue-50 px-3 py-1.5 rounded-lg text-sm border border-blue-100/50 shadow-sm"
+                    >
+                      {client?.logo_url ? (
+                        <img src={client.logo_url} alt="" className="h-4 w-4 rounded-sm object-contain" />
+                      ) : (
+                        <Building2 className="h-4 w-4" />
+                      )}
+                      {clientLabel}
+                    </button>
+                  )}
+                  <div className="flex items-center gap-1.5 text-zinc-500 text-sm font-medium">
+                    <MapPin className="h-4 w-4 text-zinc-400" />
+                    {job.location}
+                  </div>
+                  <div className="flex items-center gap-1.5 text-zinc-500 text-sm font-medium">
+                    <Building2 className="h-4 w-4 text-zinc-400" />
+                    {job.industry || "General"}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3">
               <Button
                 variant="outline"
                 size="sm"
-                className="ml-2"
-                onClick={() => window.open(`/jobs/${job.id}/outreach`, "_blank")}
+                className="h-10 px-4 border-zinc-200 shadow-sm bg-white hover:bg-zinc-50 font-bold text-zinc-700 rounded-xl"
+                onClick={() => {
+                  const url = getBoardJobApplyUrl(job.id)
+                  navigator.clipboard.writeText(url)
+                  toast({ title: "Link Copied", description: "Job application link copied to clipboard" })
+                }}
               >
-                <Send className="mr-2 h-4 w-4" />
-                Outreach Dashboard
+                <Link2 className="mr-2 h-4 w-4 text-zinc-400" />
+                Copy JD Link
               </Button>
+
+              {!job.is_external_link && (
+                <Button
+                  variant="default"
+                  size="sm"
+                  className="h-10 px-4 bg-zinc-900 hover:bg-zinc-800 text-white shadow-md font-bold rounded-xl"
+                  onClick={() => window.open(`/jobs/${job.id}/outreach`, "_blank")}
+                >
+                  <Send className="mr-2 h-4 w-4" />
+                  Outreach Dashboard
+                </Button>
+              )}
+              
+              <a 
+                href={publicApplyUrl}
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="h-10 px-4 flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold transition-all shadow-md shadow-blue-100"
+              >
+                <ExternalLink className="h-4 w-4" />
+                Public Page
+              </a>
+            </div>
+          </div>
+        </div>
+
+        <div className="px-6 py-4 bg-zinc-50/50 border-t border-zinc-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge className={`px-3 py-1 text-[10px] font-black tracking-widest rounded-full ${job.status === 'open' ? 'bg-emerald-500 text-white' : 'bg-zinc-500 text-white'}`}>
+              {job.status.toUpperCase()}
+            </Badge>
+            <Badge variant="outline" className="bg-white text-zinc-600 border-zinc-200 px-3 py-1 text-[10px] font-black tracking-widest rounded-full">
+              {String(job.employment_type || "").replace(/_/g, " ").toUpperCase()}
+            </Badge>
+            {(job as any).is_external_link && (
+              <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200 px-3 py-1 text-[10px] font-black tracking-widest rounded-full">
+                EXTERNAL
+              </Badge>
             )}
+            {(job as any).source && (
+              <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200 px-3 py-1 text-[10px] font-black tracking-widest rounded-full">
+                {(job as any).source.toUpperCase()} SIDE
+              </Badge>
+            )}
+          </div>
+          
+          <div className="text-[11px] text-zinc-400 font-bold flex items-center gap-2 uppercase tracking-tight">
+            <Clock className="h-3.5 w-3.5" />
+            Posted {formatDistanceToNow(new Date(job.created_at), { addSuffix: true })}
           </div>
         </div>
       </div>
 
-      <Dialog open={clientOpen} onOpenChange={setClientOpen}>
-        <DialogContent className="sm:max-w-[640px]">
-          <DialogHeader>
-            <DialogTitle>{client?.name || clientLabel || "Client"}</DialogTitle>
-          </DialogHeader>
-          <div className="grid gap-4">
-            {client?.logo_url ? (
-              <div className="flex items-center gap-3">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={client.logo_url} alt="Logo" className="h-14 w-14 rounded-xl border bg-white object-cover" />
-                <div className="text-sm text-muted-foreground">Company logo</div>
+      <Sheet open={clientOpen} onOpenChange={setClientOpen}>
+        <SheetContent className="sm:max-w-[540px] overflow-y-auto">
+          <SheetHeader className="pb-6 border-b">
+            <SheetTitle className="text-2xl font-bold">{client?.name || clientLabel || "Client Details"}</SheetTitle>
+            <SheetDescription>
+              Full company profile and contact information.
+            </SheetDescription>
+          </SheetHeader>
+          
+          <div className="py-6 space-y-8">
+            {/* Company Header Info */}
+            <div className="flex items-start gap-5">
+              {client?.logo_url ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={client.logo_url} alt="Logo" className="h-20 w-20 rounded-2xl border bg-white object-contain p-2 shadow-sm" />
+              ) : (
+                <div className="h-20 w-20 rounded-2xl border bg-zinc-50 flex items-center justify-center shadow-sm">
+                  <Building2 className="h-10 w-10 text-zinc-400" />
+                </div>
+              )}
+              <div className="space-y-1">
+                <h3 className="text-xl font-semibold text-zinc-900">{client?.name}</h3>
+                {client?.website && (
+                  <a
+                    href={normalizeExternalUrl(client.website)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-sm text-blue-600 hover:underline flex items-center gap-1.5"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                    {client.website.replace(/^https?:\/\//, '')}
+                  </a>
+                )}
+                <div className="flex flex-wrap gap-2 mt-2">
+                  <Badge variant="secondary" className="bg-zinc-100 text-zinc-700 border-none">
+                    {client?.company_type || "Industry Not Specified"}
+                  </Badge>
+                  {client?.location && (
+                    <Badge variant="secondary" className="bg-zinc-100 text-zinc-700 border-none flex items-center gap-1">
+                      <MapPin className="h-3 w-3" />
+                      {client.location}
+                    </Badge>
+                  )}
+                </div>
               </div>
-            ) : null}
-            {client?.website ? (
-              <a
-                href={normalizeExternalUrl(client.website)}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-blue-600 hover:underline"
+            </div>
+
+            {/* Quick Actions */}
+            <div className="grid grid-cols-2 gap-3">
+              <Button 
+                variant="outline" 
+                className="w-full justify-start"
+                onClick={() => {
+                  const url = getBoardJobApplyUrl(job.id)
+                  navigator.clipboard.writeText(url)
+                  toast({ title: "Link Copied", description: "Job application link copied to clipboard" })
+                }}
               >
-                {client.website}
-              </a>
-            ) : null}
-            <div className="grid grid-cols-2 gap-3 text-sm">
-              <div>
-                <div className="text-xs font-medium text-muted-foreground">Company type</div>
-                <div>{client?.company_type || "—"}</div>
-              </div>
-              <div>
-                <div className="text-xs font-medium text-muted-foreground">Location</div>
-                <div>{client?.location || "—"}</div>
+                <Link2 className="mr-2 h-4 w-4" />
+                Apply Link
+              </Button>
+              <Button 
+                variant="outline" 
+                className="w-full justify-start"
+                onClick={() => router.push(`/clients/${client?.id}`)}
+              >
+                <Building2 className="mr-2 h-4 w-4" />
+                Full Profile
+              </Button>
+            </div>
+
+            {/* About Section */}
+            <div className="space-y-3">
+              <h4 className="text-sm font-bold uppercase tracking-wider text-zinc-500">About Company</h4>
+              <div className="text-sm text-zinc-600 leading-relaxed whitespace-pre-wrap bg-zinc-50 p-4 rounded-xl border border-zinc-100">
+                {client?.about || "No company description provided."}
               </div>
             </div>
-            <div>
-              <div className="text-xs font-medium text-muted-foreground">About</div>
-              <div className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">{client?.about || "—"}</div>
-            </div>
-            <div className="rounded-lg border bg-gray-50 p-4">
-              <div className="text-sm font-semibold">Primary contact</div>
-              <div className="mt-2 text-sm text-muted-foreground">
-                <div>{client?.primary_contact_name || "—"}</div>
-                <div>{client?.primary_contact_email || "—"}</div>
-                <div>{client?.primary_contact_phone || "—"}</div>
+
+            {/* Contact Information */}
+            <div className="space-y-4">
+              <h4 className="text-sm font-bold uppercase tracking-wider text-zinc-500">Primary Contact</h4>
+              <div className="grid gap-3">
+                <div className="flex items-center gap-3 p-3 rounded-xl border border-zinc-100 bg-white">
+                  <div className="h-10 w-10 rounded-full bg-blue-50 flex items-center justify-center text-blue-600">
+                    <User className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <div className="text-sm font-medium text-zinc-900">{client?.primary_contact_name || "—"}</div>
+                    <div className="text-xs text-zinc-500">Contact Person</div>
+                  </div>
+                </div>
+                
+                {client?.primary_contact_email && (
+                  <div className="flex items-center gap-3 p-3 rounded-xl border border-zinc-100 bg-white">
+                    <div className="h-10 w-10 rounded-full bg-green-50 flex items-center justify-center text-green-600">
+                      <Mail className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium text-zinc-900">{client.primary_contact_email}</div>
+                      <div className="text-xs text-zinc-500">Email Address</div>
+                    </div>
+                  </div>
+                )}
+
+                {client?.primary_contact_phone && (
+                  <div className="flex items-center gap-3 p-3 rounded-xl border border-zinc-100 bg-white">
+                    <div className="h-10 w-10 rounded-full bg-orange-50 flex items-center justify-center text-orange-600">
+                      <Phone className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-medium text-zinc-900">{client.primary_contact_phone}</div>
+                      <div className="text-xs text-zinc-500">Phone Number</div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </div>
-        </DialogContent>
-      </Dialog>
+          
+          <DialogFooter className="mt-8 pt-6 border-t">
+            <Button variant="ghost" className="w-full" onClick={() => setClientOpen(false)}>
+              Close Details
+            </Button>
+          </DialogFooter>
+        </SheetContent>
+      </Sheet>
 
       <AlertDialog open={!!pendingStageChange} onOpenChange={(open) => {
         if (!open) setPendingStageChange(null)
@@ -911,67 +1042,87 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
       </AlertDialog>
 
       <div className="space-y-4">
-        <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-8 gap-2">
-          <div
-            className={`cursor-pointer rounded-lg border p-3 flex flex-col items-center justify-center transition-all ${
+        <div className="flex flex-wrap items-center gap-2 p-1.5 bg-zinc-100/80 rounded-3xl border border-zinc-200/80 shadow-[0_2px_8px_rgba(0,0,0,0.04)] overflow-x-auto no-scrollbar backdrop-blur-sm">
+          <button
+            className={`px-5 py-3 rounded-2xl text-[12px] font-black tracking-widest uppercase transition-all flex items-center gap-3 group ${
               activeStage === "all" 
-                ? "bg-blue-50 border-blue-500 ring-1 ring-blue-500" 
-                : "bg-white hover:border-blue-200 hover:bg-blue-50/50"
+                ? "bg-white text-zinc-900 shadow-[0_8px_20px_rgba(0,0,0,0.08)] ring-1 ring-zinc-200/50" 
+                : "text-zinc-500 hover:text-zinc-900 hover:bg-white/60"
             }`}
             onClick={() => setActiveStage("all")}
           >
-            <span className={`text-xs font-medium mb-1 ${activeStage === "all" ? "text-blue-700" : "text-gray-500"}`}>
-                All
+            All
+            <span className={`flex items-center justify-center min-w-[28px] h-7 px-2 rounded-xl text-[12px] font-black transition-all ${
+              activeStage === "all" 
+                ? "bg-zinc-900 text-white shadow-lg shadow-zinc-200" 
+                : "bg-zinc-200/80 text-zinc-600 group-hover:bg-zinc-300"
+            }`}>
+              {applications.length}
             </span>
-            <span className={`text-lg font-bold ${activeStage === "all" ? "text-blue-700" : "text-gray-900"}`}>
-                {applications.length}
-            </span>
-          </div>
+          </button>
 
           {STATUS_COLUMNS.map((column) => {
             const count = applications.filter((a) => a.status === column.id).length
             const isActive = activeStage === column.id
-            // Parse color classes to get border/text colors roughly matching the badge style
-            let activeClass = "bg-gray-50 border-gray-500 ring-1 ring-gray-500"
-            let textClass = "text-gray-700"
             
-            if (column.id === 'applied') { activeClass = "bg-blue-50 border-blue-500 ring-1 ring-blue-500"; textClass = "text-blue-700"; }
-            else if (column.id === 'shortlist') { activeClass = "bg-indigo-50 border-indigo-500 ring-1 ring-indigo-500"; textClass = "text-indigo-700"; }
-            else if (column.id === 'screening') { activeClass = "bg-yellow-50 border-yellow-500 ring-1 ring-yellow-500"; textClass = "text-yellow-700"; }
-            else if (column.id === 'interview') { activeClass = "bg-purple-50 border-purple-500 ring-1 ring-purple-500"; textClass = "text-purple-700"; }
-            else if (column.id === 'offer') { activeClass = "bg-green-50 border-green-500 ring-1 ring-green-500"; textClass = "text-green-700"; }
-            else if (column.id === 'hired') { activeClass = "bg-emerald-50 border-emerald-500 ring-1 ring-emerald-500"; textClass = "text-emerald-700"; }
-            else if (column.id === 'rejected') { activeClass = "bg-red-50 border-red-500 ring-1 ring-red-500"; textClass = "text-red-700"; }
+            let colorConfig = {
+                bg: "bg-zinc-900",
+                text: "text-white",
+                shadow: "shadow-zinc-200",
+                light: "bg-zinc-100 text-zinc-600"
+            }
+            
+            if (column.id === 'applied') colorConfig = { bg: "bg-blue-600", text: "text-white", shadow: "shadow-blue-100", light: "bg-blue-50 text-blue-600" };
+            else if (column.id === 'shortlist') colorConfig = { bg: "bg-indigo-600", text: "text-white", shadow: "shadow-indigo-100", light: "bg-indigo-50 text-indigo-600" };
+            else if (column.id === 'screening') colorConfig = { bg: "bg-amber-500", text: "text-white", shadow: "shadow-amber-100", light: "bg-amber-50 text-amber-600" };
+            else if (column.id === 'interview') colorConfig = { bg: "bg-purple-600", text: "text-white", shadow: "shadow-purple-100", light: "bg-purple-50 text-purple-600" };
+            else if (column.id === 'offer') colorConfig = { bg: "bg-green-600", text: "text-white", shadow: "shadow-green-100", light: "bg-green-50 text-green-600" };
+            else if (column.id === 'hired') colorConfig = { bg: "bg-emerald-600", text: "text-white", shadow: "shadow-emerald-100", light: "bg-emerald-50 text-emerald-600" };
+            else if (column.id === 'rejected') colorConfig = { bg: "bg-red-600", text: "text-white", shadow: "shadow-red-100", light: "bg-red-50 text-red-600" };
 
             return (
-              <div
+              <button
                 key={column.id}
-                className={`cursor-pointer rounded-lg border p-3 flex flex-col items-center justify-center transition-all ${
-                  isActive ? activeClass : "bg-white hover:bg-gray-50"
+                className={`px-5 py-3 rounded-2xl text-[12px] font-black tracking-widest uppercase transition-all flex items-center gap-3 group ${
+                  isActive 
+                    ? "bg-white text-zinc-900 shadow-[0_8px_20px_rgba(0,0,0,0.08)] ring-1 ring-zinc-200/50" 
+                    : "text-zinc-500 hover:text-zinc-900 hover:bg-white/60"
                 }`}
                 onClick={() => setActiveStage(column.id)}
               >
-                <span className={`text-xs font-medium mb-1 ${isActive ? textClass : "text-gray-500"}`}>
-                    {column.label}
+                {column.label}
+                <span className={`flex items-center justify-center min-w-[28px] h-7 px-2 rounded-xl text-[12px] font-black transition-all ${
+                  isActive 
+                    ? `${colorConfig.bg} ${colorConfig.text} shadow-lg ${colorConfig.shadow}` 
+                    : count > 0 
+                      ? `${colorConfig.light.split(' ')[0]} ${colorConfig.light.split(' ')[1]} opacity-80 group-hover:opacity-100`
+                      : "bg-zinc-200/80 text-zinc-600 group-hover:bg-zinc-300"
+                }`}>
+                  {count}
                 </span>
-                <span className={`text-lg font-bold ${isActive ? textClass : "text-gray-900"}`}>
-                    {count}
-                </span>
-              </div>
+              </button>
             )
           })}
 
-          <div
-            className={`cursor-pointer rounded-lg border p-3 flex flex-col items-center justify-center transition-all ${
-              activeStage === "invites" ? "bg-blue-50 border-blue-500 ring-1 ring-blue-500" : "bg-white hover:border-blue-200 hover:bg-blue-50/50"
+          <div className="h-6 w-px bg-zinc-300/60 mx-2 hidden md:block" />
+
+          <button
+            className={`px-5 py-3 rounded-2xl text-[12px] font-black tracking-widest uppercase transition-all flex items-center gap-3 group ${
+              activeStage === "invites" 
+                ? "bg-white text-zinc-900 shadow-[0_8px_20px_rgba(0,0,0,0.08)] ring-1 ring-zinc-200/50" 
+                : "text-zinc-500 hover:text-zinc-900 hover:bg-white/60"
             }`}
             onClick={() => setActiveStage("invites")}
           >
-            <span className={`text-xs font-medium mb-1 ${activeStage === "invites" ? "text-blue-700" : "text-gray-500"}`}>Invites</span>
-            <span className={`text-lg font-bold ${activeStage === "invites" ? "text-blue-700" : "text-gray-900"}`}>
+            Invites
+            <span className={`flex items-center justify-center min-w-[28px] h-7 px-2 rounded-xl text-[12px] font-black transition-all ${
+              activeStage === "invites" 
+                ? "bg-blue-600 text-white shadow-lg shadow-blue-100" 
+                : "bg-blue-50 text-blue-600 opacity-80 group-hover:opacity-100"
+            }`}>
               {invitesTotal + (outreachCandidates?.length || 0)}
             </span>
-          </div>
+          </button>
         </div>
 
         <div className="space-y-3">
@@ -979,25 +1130,30 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
             <div className="grid gap-4">
             {/* Outreach Stats Card */}
             {!job.is_external_link && outreachStats && (
-              <Card className="shadow-sm border-blue-100 bg-gradient-to-r from-blue-50 to-indigo-50">
-                <CardContent className="p-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="font-bold text-blue-900 text-lg">📧 Outreach Campaign</div>
-                      <div className="text-sm text-blue-700">Candidate outreach and messaging status</div>
+              <Card className="border border-blue-100 bg-gradient-to-br from-blue-50/50 via-indigo-50/30 to-purple-50/50 shadow-sm rounded-2xl overflow-hidden">
+                <CardContent className="p-6">
+                  <div className="flex flex-col md:flex-row items-center justify-between gap-6">
+                    <div className="flex items-center gap-4">
+                      <div className="h-12 w-12 rounded-2xl bg-blue-600 flex items-center justify-center shadow-lg shadow-blue-200">
+                        <Send className="h-6 w-6 text-white" />
+                      </div>
+                      <div>
+                        <h3 className="font-black text-xl text-blue-900 tracking-tight">Outreach Performance</h3>
+                        <p className="text-sm font-semibold text-blue-700/70">Real-time engagement metrics</p>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-6 text-sm">
-                      <div className="text-center bg-white rounded-lg p-3 shadow-sm">
-                        <div className="font-bold text-blue-900 text-lg">{outreachStats.total_outreached || 0}</div>
-                        <div className="text-blue-600 font-medium">Outreached</div>
+                    <div className="flex items-center gap-4 text-sm w-full md:w-auto">
+                      <div className="flex-1 md:flex-none text-center bg-white/80 backdrop-blur-sm border border-blue-100/50 rounded-2xl p-4 shadow-sm">
+                        <div className="font-black text-blue-600 text-2xl tracking-tighter">{outreachStats.total_outreached || 0}</div>
+                        <div className="text-[10px] font-black uppercase tracking-widest text-zinc-400 mt-1">Outreached</div>
                       </div>
-                      <div className="text-center bg-white rounded-lg p-3 shadow-sm">
-                        <div className="font-bold text-green-700 text-lg">{outreachStats.responded || 0}</div>
-                        <div className="text-green-600 font-medium">Responded</div>
+                      <div className="flex-1 md:flex-none text-center bg-white/80 backdrop-blur-sm border border-green-100/50 rounded-2xl p-4 shadow-sm">
+                        <div className="font-black text-emerald-600 text-2xl tracking-tighter">{outreachStats.responded || 0}</div>
+                        <div className="text-[10px] font-black uppercase tracking-widest text-zinc-400 mt-1">Responded</div>
                       </div>
-                      <div className="text-center bg-white rounded-lg p-3 shadow-sm">
-                        <div className="font-bold text-purple-700 text-lg">{outreachStats.messages_sent || 0}</div>
-                        <div className="text-purple-600 font-medium">Messages</div>
+                      <div className="flex-1 md:flex-none text-center bg-white/80 backdrop-blur-sm border border-purple-100/50 rounded-2xl p-4 shadow-sm">
+                        <div className="font-black text-purple-600 text-2xl tracking-tighter">{outreachStats.messages_sent || 0}</div>
+                        <div className="text-[10px] font-black uppercase tracking-widest text-zinc-400 mt-1">Messages</div>
                       </div>
                     </div>
                   </div>
@@ -1006,96 +1162,83 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
             )}
 
             {/* Create Invite Card */}
-            <Card className="shadow-sm border-gray-200 bg-white">
-              <CardContent className="p-6">
-                <div className="flex flex-col gap-6">
+            <Card className="border border-zinc-200 shadow-sm bg-white rounded-2xl overflow-hidden">
+              <CardContent className="p-6 md:p-8">
+                <div className="flex flex-col gap-8">
                   {/* Header Row */}
-                  <div className="flex items-center gap-3">
-                    <div className="flex items-center justify-center">
-                       <Mail className="h-5 w-5 text-blue-600" />
-                       <Plus className="h-3 w-3 text-blue-600 -ml-1 -mt-2" />
+                  <div className="flex items-center gap-4">
+                    <div className="h-10 w-10 rounded-xl bg-zinc-100 flex items-center justify-center">
+                       <Plus className="h-5 w-5 text-zinc-600" />
                     </div>
-                    <h3 className="text-xl font-bold text-[#1E2A5A]">Invite Candidates to Apply</h3>
+                    <div>
+                      <h3 className="text-xl font-black text-zinc-900 tracking-tight uppercase tracking-widest">Manual Candidate Invitation</h3>
+                      <p className="text-sm font-semibold text-zinc-500">Add candidates to the pipeline manually</p>
+                    </div>
                   </div>
 
                   {/* Input Row */}
-                  <div className="flex flex-col md:flex-row gap-3">
-                    <div className="relative flex-1">
-                      <Mail className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+                  <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+                    <div className="md:col-span-5 relative">
+                      <Mail className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
                       <Input
                         type="email"
-                        inputMode="email"
-                        autoComplete="email"
                         value={inviteEmail}
                         onChange={(e) => setInviteEmail(e.target.value)}
-                        placeholder="Enter candidate email address"
-                        className="pl-9 bg-white border-gray-200"
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            e.preventDefault()
-                            createInvite()
-                          }
-                        }}
+                        placeholder="Candidate Email Address"
+                        className="pl-11 h-12 bg-zinc-50/50 border-zinc-200 rounded-xl focus:ring-2 focus:ring-blue-500 transition-all font-medium"
+                        onKeyDown={(e) => e.key === "Enter" && createInvite()}
                       />
                     </div>
-                    <div className="relative flex-1">
-                      <MessageCircle className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+                    <div className="md:col-span-4 relative">
+                      <Phone className="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
                       <Input
                         type="tel"
-                        inputMode="tel"
                         value={invitePhone}
                         onChange={(e) => setInvitePhone(e.target.value)}
-                        placeholder="WhatsApp number (optional)"
-                        className="pl-9 bg-white border-gray-200"
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            e.preventDefault()
-                            createInvite()
-                          }
-                        }}
+                        placeholder="WhatsApp Number"
+                        className="pl-11 h-12 bg-zinc-50/50 border-zinc-200 rounded-xl focus:ring-2 focus:ring-blue-500 transition-all font-medium"
+                        onKeyDown={(e) => e.key === "Enter" && createInvite()}
                       />
                     </div>
-                    <Button
-                      onClick={createInvite}
-                      disabled={!inviteEmail.trim() || inviteCreating}
-                      className="bg-[#7C77FF] hover:bg-[#6b66ee] text-white min-w-[140px]"
-                    >
-                      {inviteCreating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Send className="mr-2 h-4 w-4" />}
-                      Create Invite
-                    </Button>
+                    <div className="md:col-span-3">
+                      <Button
+                        onClick={createInvite}
+                        disabled={!inviteEmail.trim() || inviteCreating}
+                        className="w-full h-12 bg-blue-600 hover:bg-blue-700 text-white font-black uppercase tracking-widest rounded-xl shadow-lg shadow-blue-100 transition-all active:scale-95"
+                      >
+                        {inviteCreating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Send className="mr-2 h-4 w-4" />}
+                        Send Invite
+                      </Button>
+                    </div>
                   </div>
 
-                  {/* Subtext Row */}
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-blue-50/50 p-3 rounded-lg border border-blue-100/50">
-                    <div className="flex items-center gap-2 text-sm text-gray-600 hidden md:flex">
-                      <div className="h-2 w-2 rounded-full bg-pink-400 shrink-0" />
-                      <span>Flow: Send outreach → Candidate receives message → Applies via unique link</span>
+                  {/* Subtext & Options Row */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6 p-4 bg-zinc-50/80 rounded-xl border border-zinc-100">
+                    <div className="flex items-center gap-3 text-[11px] font-black uppercase tracking-widest text-zinc-500">
+                      <div className="h-2 w-2 rounded-full bg-blue-500 animate-pulse" />
+                      <span>Automatic Outreach Workflow Active</span>
                     </div>
                     
-                    <div className="flex items-center gap-4 w-full md:w-auto justify-end">
-                        <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer font-medium hover:text-blue-600 transition-colors">
+                    <div className="flex items-center gap-6">
+                        <label className="flex items-center gap-3 text-xs font-black uppercase tracking-widest text-zinc-600 cursor-pointer hover:text-blue-600 transition-colors">
                           <input
                             type="checkbox"
                             checked={inviteSendEmail}
                             onChange={(e) => setInviteSendEmail(e.target.checked)}
-                            className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-600"
+                            className="h-4 w-4 rounded border-zinc-300 text-blue-600 focus:ring-blue-500 transition-all"
                           />
-                          <Mail className="h-3.5 w-3.5" />
-                          Send via Email
+                          Email
                         </label>
 
-                        <div className="h-4 w-px bg-gray-300 mx-1" />
-
-                        <label className={`flex items-center gap-2 text-sm cursor-pointer font-medium transition-colors ${!invitePhone.trim() ? "text-gray-400 cursor-not-allowed" : "text-gray-700 hover:text-green-600"}`}>
+                        <label className={`flex items-center gap-3 text-xs font-black uppercase tracking-widest transition-colors ${!invitePhone.trim() ? "text-zinc-300 cursor-not-allowed" : "text-zinc-600 hover:text-emerald-600 cursor-pointer"}`}>
                           <input
                             type="checkbox"
                             checked={inviteSendWhatsapp}
                             onChange={(e) => setInviteSendWhatsapp(e.target.checked)}
                             disabled={!invitePhone.trim()}
-                            className="h-4 w-4 rounded border-gray-300 text-green-600 focus:ring-green-600 disabled:opacity-50"
+                            className="h-4 w-4 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-500 transition-all"
                           />
-                          <MessageCircle className="h-3.5 w-3.5" />
-                          Send via WhatsApp
+                          WhatsApp
                         </label>
                     </div>
                   </div>
@@ -1890,207 +2033,234 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
               {(activeStage === "all" ? applications : applications.filter((a) => a.status === activeStage)).map((app) => (
                 <Card
                   key={app.id}
-                  className={`shadow-sm hover:shadow-md transition-shadow ${app.status === "pending" ? "bg-yellow-50 border-yellow-200" : ""}`}
+                  className={`border border-zinc-200 shadow-sm hover:shadow-md transition-all rounded-2xl overflow-hidden ${app.status === "pending" ? "bg-blue-50/30 border-blue-100" : "bg-white"}`}
                 >
-                  <CardContent className="p-4 space-y-4">
-                    <div className="flex justify-between items-start">
-                      <div className="flex gap-3">
-                        <Avatar className="h-10 w-10 border border-gray-200">
-                          <AvatarFallback className="bg-blue-100 text-blue-700">
-                            {app.candidates?.name?.substring(0, 2).toUpperCase() || "CN"}
-                          </AvatarFallback>
-                        </Avatar>
-                        <div>
-                          <div className="font-medium text-base flex items-center gap-2">
-                            {app.candidates?.name}
-                            {app.match_score !== undefined && app.match_score !== null && (
-                              <Badge variant="outline" className={`text-xs font-normal ${
-                                app.match_score >= 0.8 ? "bg-green-50 text-green-700 border-green-200" :
-                                app.match_score >= 0.6 ? "bg-yellow-50 text-yellow-700 border-yellow-200" :
-                                "bg-gray-50 text-gray-700 border-gray-200"
-                              }`}>
-                                {Math.round(app.match_score * 100)}% Match
-                              </Badge>
-                            )}
-                          </div>
-                          <div className="text-sm text-gray-500">
-                            {app.candidates?.current_role || "No role specified"}
-                          </div>
-                          
-                          <div className="flex items-center gap-4 mt-1 text-xs text-gray-400">
-                            {app.candidates?.email && (
-                              <div className="flex items-center gap-1">
-                                <Mail className="h-3 w-3" />
-                                {app.candidates.email}
-                              </div>
-                            )}
-                            {app.candidates?.phone && (
-                              <div className="flex items-center gap-1">
-                                <Phone className="h-3 w-3" />
-                                {app.candidates.phone}
-                              </div>
-                            )}
-                            {app.candidates?.location && (
-                              <div className="flex items-center gap-1">
-                                <MapPin className="h-3 w-3" />
-                                {app.candidates.location}
-                              </div>
-                            )}
-                          </div>
-                          
-                          <div className="flex flex-wrap gap-2 mt-2">
-                            {app.candidates?.current_salary && (
-                              <div className="flex flex-col">
-                                <span className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Current CTC</span>
-                                <span className="text-sm font-medium text-gray-700">{app.candidates.current_salary}</span>
-                              </div>
-                            )}
-                            {app.candidates?.expected_salary && (
-                              <div className="flex flex-col ml-4">
-                                <span className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">Expected CTC</span>
-                                <span className="text-sm font-medium text-gray-700">{app.candidates.expected_salary}</span>
-                              </div>
-                            )}
-                            <div className="flex gap-2 ml-auto items-center">
-                              {app.candidates?.looking_for_work !== false && (
-                                <Badge variant="secondary" className="bg-green-50 text-green-700 border-green-100 text-[10px] h-5">
-                                  Open to work
-                                </Badge>
-                              )}
-                              {app.candidates?.tags?.includes('fresher:yes') && (
-                                <Badge variant="secondary" className="bg-blue-50 text-blue-700 border-blue-100 text-[10px] h-5">
-                                  Fresher
+                  <CardContent className="p-0">
+                    <div className="p-5 md:p-6">
+                      <div className="flex flex-col md:flex-row justify-between items-start gap-6">
+                        <div className="flex gap-4 flex-1 min-w-0">
+                          <Avatar className="h-14 w-14 border-2 border-zinc-100 shadow-sm shrink-0">
+                            <AvatarFallback className="bg-gradient-to-br from-blue-500 to-indigo-600 text-white font-bold text-lg">
+                              {app.candidates?.name?.substring(0, 2).toUpperCase() || "CN"}
+                            </AvatarFallback>
+                          </Avatar>
+                          <div className="min-w-0 space-y-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h3 className="font-bold text-xl text-zinc-900 truncate">
+                                {app.candidates?.name}
+                              </h3>
+                              {app.match_score !== undefined && app.match_score !== null && (
+                                <Badge variant="outline" className={`text-[10px] font-bold px-2 py-0.5 rounded-full border-none shadow-sm ${
+                                  app.match_score >= 0.8 ? "bg-emerald-100 text-emerald-700" :
+                                  app.match_score >= 0.6 ? "bg-amber-100 text-amber-700" :
+                                  "bg-zinc-100 text-zinc-700"
+                                }`}>
+                                  {Math.round(app.match_score * 100)}% Match
                                 </Badge>
                               )}
                             </div>
+                            <p className="text-sm font-semibold text-zinc-600 flex items-center gap-1.5">
+                              <Building2 className="h-3.5 w-3.5 text-zinc-400" />
+                              {app.candidates?.current_role || "No role specified"}
+                            </p>
+                            
+                            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-2">
+                              {app.candidates?.email && (
+                                <div 
+                                  className="flex items-center gap-1.5 text-xs text-zinc-500 cursor-pointer hover:text-blue-600 transition-colors"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    navigator.clipboard.writeText(app.candidates.email)
+                                    toast({ title: "Email Copied", description: app.candidates.email })
+                                  }}
+                                >
+                                  <Mail className="h-3.5 w-3.5 text-zinc-400" />
+                                  {app.candidates.email}
+                                </div>
+                              )}
+                              {app.candidates?.phone && (
+                                <div 
+                                  className="flex items-center gap-1.5 text-xs text-zinc-500 cursor-pointer hover:text-emerald-600 transition-colors"
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    navigator.clipboard.writeText(app.candidates.phone)
+                                    toast({ title: "Phone Copied", description: app.candidates.phone })
+                                  }}
+                                >
+                                  <Phone className="h-3.5 w-3.5 text-zinc-400" />
+                                  {app.candidates.phone}
+                                </div>
+                              )}
+                              {app.candidates?.location && (
+                                <div className="flex items-center gap-1.5 text-xs text-zinc-500">
+                                  <MapPin className="h-3.5 w-3.5 text-zinc-400" />
+                                  {app.candidates.location}
+                                </div>
+                              )}
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-6 pt-3 mt-4 border-t border-zinc-100/80">
+                              {app.candidates?.current_salary && (
+                                <div className="flex flex-col">
+                                  <span className="text-[10px] uppercase font-black text-zinc-400 tracking-wider">Current CTC</span>
+                                  <span className="text-sm font-bold text-zinc-700">{app.candidates.current_salary}</span>
+                                </div>
+                              )}
+                              {app.candidates?.expected_salary && (
+                                <div className="flex flex-col">
+                                  <span className="text-[10px] uppercase font-black text-zinc-400 tracking-wider">Expected CTC</span>
+                                  <span className="text-sm font-bold text-zinc-700">{app.candidates.expected_salary}</span>
+                                </div>
+                              )}
+                              <div className="flex gap-2 ml-auto items-center pt-2">
+                                {app.candidates?.looking_for_work !== false && (
+                                  <Badge variant="secondary" className="bg-emerald-50 text-emerald-700 border-emerald-100 text-[10px] font-bold h-6 px-3">
+                                    Open to work
+                                  </Badge>
+                                )}
+                                {app.candidates?.tags?.includes('fresher:yes') && (
+                                  <Badge variant="secondary" className="bg-blue-50 text-blue-700 border-blue-100 text-[10px] font-bold h-6 px-3">
+                                    Fresher
+                                  </Badge>
+                                )}
+                              </div>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                      
-                      <div className="flex items-center gap-2">
-                        <Button 
-                          variant="outline" 
-                          size="sm" 
-                          className="h-8"
-                          onClick={() => openPreview(app)}
-                        >
-                          <Eye className="h-4 w-4 mr-2" />
-                          View Profile
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-8"
-                          disabled={!!candidateAiLoadingById[app.candidate_id]}
-                          onClick={() => toggleCandidateAi(app.candidate_id)}
-                        >
-                          {candidateAiLoadingById[app.candidate_id] ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Sparkles className="h-4 w-4 mr-2" />}
-                          AI
-                        </Button>
-                        <Select value={app.status} onValueChange={(val) => requestStageChange(app, val)}>
-                          <SelectTrigger className="h-8 w-36">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {STATUS_COLUMNS.map((s) => (
-                              <SelectItem key={s.id} value={s.id}>
-                                {s.label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                        
+                        <div className="flex flex-wrap md:flex-col items-center md:items-end gap-2 w-full md:w-auto">
+                          <div className="flex items-center gap-2 w-full md:w-auto">
+                            <Button 
+                              variant="outline" 
+                              size="sm" 
+                              className="h-9 flex-1 md:flex-none border-zinc-200 bg-white hover:bg-zinc-50 font-bold text-zinc-700 rounded-xl px-4"
+                              onClick={() => openPreview(app)}
+                            >
+                              <Eye className="h-4 w-4 mr-2 text-zinc-400" />
+                              View Profile
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-9 flex-1 md:flex-none border-zinc-200 bg-white hover:bg-zinc-50 font-bold text-zinc-700 rounded-xl px-4"
+                              disabled={!!candidateAiLoadingById[app.candidate_id]}
+                              onClick={() => toggleCandidateAi(app.candidate_id)}
+                            >
+                              {candidateAiLoadingById[app.candidate_id] ? <Loader2 className="h-4 w-4 mr-2 animate-spin text-purple-600" /> : <Sparkles className="h-4 w-4 mr-2 text-purple-600" />}
+                              AI
+                            </Button>
+                          </div>
+                          <Select value={app.status} onValueChange={(val) => requestStageChange(app, val)}>
+                            <SelectTrigger className="h-9 w-full md:w-[180px] bg-white border-zinc-200 rounded-xl font-bold text-zinc-700">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent className="rounded-xl">
+                              {STATUS_COLUMNS.map((s) => (
+                                <SelectItem key={s.id} value={s.id} className="text-sm font-medium">
+                                  {s.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
                       </div>
                     </div>
 
-                <div className="grid grid-cols-2 gap-4 text-xs text-gray-500">
-                    <div className="flex items-center gap-1">
-                        <span className="font-medium text-gray-700">Source:</span>
-                        <span className="capitalize px-2 py-0.5 bg-gray-100 rounded text-gray-600">
-                            {app.source?.replace('_', ' ') || 'Unknown'}
+                    <div className="px-6 py-3 bg-zinc-50/50 border-y border-zinc-100 flex items-center justify-between text-[11px] text-zinc-400 font-bold uppercase tracking-tight">
+                      <div className="flex items-center gap-2">
+                        <span className="text-zinc-300">Source:</span>
+                        <span className="px-2 py-0.5 bg-white border border-zinc-200 rounded-full text-zinc-500 shadow-sm">
+                          {app.source?.replace('_', ' ') || 'Unknown'}
                         </span>
-                    </div>
-                    <div className="flex items-center gap-1 justify-end">
+                      </div>
+                      <div className="flex items-center gap-2">
                         <Calendar className="h-3.5 w-3.5" />
                         Applied: {format(new Date(app.applied_at), "MMM d, yyyy, h:mm a")}
+                      </div>
                     </div>
-                </div>
 
-                {/* Notes Section */}
-                <div className="pt-3 border-t border-gray-100">
-                    <div className="flex items-center gap-2 mb-2">
-                        <MessageSquare className="h-3.5 w-3.5 text-gray-400" />
-                        <span className="text-xs font-medium text-gray-700">Notes</span>
-                    </div>
-                    
-                    {editingNoteId === app.id ? (
-                        <div className="space-y-2">
-                            <Textarea 
-                                value={noteContent}
-                                onChange={(e) => setNoteContent(e.target.value)}
-                                placeholder="Add notes about this candidate..."
-                                className="min-h-[80px] text-sm"
-                            />
-                            <div className="flex justify-end gap-2">
-                                <Button 
-                                    variant="ghost" 
-                                    size="sm" 
-                                    onClick={() => setEditingNoteId(null)}
-                                    className="h-7 text-xs"
-                                >
-                                    Cancel
-                                </Button>
-                                <Button 
-                                    size="sm" 
-                                    onClick={() => saveNote(app.id)}
-                                    className="h-7 text-xs bg-blue-600 hover:bg-blue-700"
-                                >
-                                    <Save className="h-3 w-3 mr-1" />
-                                    Save Note
-                                </Button>
-                            </div>
+                    {/* Notes Section */}
+                    <div className="p-5 md:p-6 pt-4">
+                      <div className="flex items-center gap-2 mb-3">
+                        <MessageSquare className="h-4 w-4 text-zinc-400" />
+                        <span className="text-xs font-black uppercase tracking-widest text-zinc-500">Recruiter Notes</span>
+                      </div>
+                      
+                      {editingNoteId === app.id ? (
+                        <div className="space-y-3 animate-in fade-in slide-in-from-top-1 duration-200">
+                          <Textarea 
+                            value={noteContent}
+                            onChange={(e) => setNoteContent(e.target.value)}
+                            placeholder="Add strategic notes about this candidate's fit..."
+                            className="min-h-[100px] text-sm rounded-xl border-zinc-200 focus:ring-blue-500"
+                          />
+                          <div className="flex justify-end gap-2">
+                            <Button 
+                              variant="ghost" 
+                              size="sm" 
+                              onClick={() => setEditingNoteId(null)}
+                              className="h-8 text-xs font-bold text-zinc-500 hover:bg-zinc-100 rounded-lg"
+                            >
+                              Cancel
+                            </Button>
+                            <Button 
+                              size="sm" 
+                              onClick={() => saveNote(app.id)}
+                              className="h-8 text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white rounded-lg shadow-sm"
+                            >
+                              <Save className="h-3.5 w-3.5 mr-1.5" />
+                              Save Note
+                            </Button>
+                          </div>
                         </div>
-                    ) : (
+                      ) : (
                         <div 
-                            className="bg-gray-50 rounded p-3 text-sm text-gray-600 cursor-pointer hover:bg-gray-100 transition-colors min-h-[40px]"
-                            onClick={() => handleNoteEdit(app)}
+                          className="group relative bg-white border border-zinc-200/60 rounded-xl p-4 text-sm text-zinc-600 cursor-pointer hover:border-blue-200 hover:bg-blue-50/20 transition-all min-h-[50px] shadow-sm"
+                          onClick={() => handleNoteEdit(app)}
                         >
-                            {app.notes ? (
-                                <p className="whitespace-pre-wrap">{app.notes.replace(/attribution:\{.*?\}/g, '').trim() || <span className="text-gray-400 italic">No notes</span>}</p>
-                            ) : (
-                                <p className="text-gray-400 italic">Click to add notes...</p>
-                            )}
+                          {app.notes ? (
+                            <p className="whitespace-pre-wrap leading-relaxed">{app.notes.replace(/attribution:\{.*?\}/g, '').trim() || <span className="text-zinc-400 italic">No detailed notes yet</span>}</p>
+                          ) : (
+                            <p className="text-zinc-400 italic">Click to document candidate interview insights...</p>
+                          )}
+                          <div className="absolute right-4 top-4 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <Pencil className="h-3.5 w-3.5 text-blue-500" />
+                          </div>
                         </div>
-                    )}
-                </div>
+                      )}
+                    </div>
 
                 {candidateAiById[app.candidate_id]?.summary && candidateAiById[app.candidate_id]?.visible ? (
-                  <div className="rounded-lg border bg-purple-50/40 p-3">
-                    <div className="flex items-center justify-between mb-1">
-                      <div className="text-xs font-semibold text-purple-700">AI Analysis</div>
+                  <div className="mx-5 md:mx-6 mb-5 md:mb-6 rounded-2xl border border-purple-100 bg-purple-50/30 overflow-hidden shadow-sm animate-in fade-in zoom-in-95 duration-300">
+                    <div className="px-4 py-3 bg-white/50 border-b border-purple-100/50 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className="p-1 bg-purple-100 rounded-lg">
+                          <Sparkles className="h-3.5 w-3.5 text-purple-600" />
+                        </div>
+                        <span className="text-[10px] font-black uppercase tracking-widest text-purple-700">AI Intelligent Match</span>
+                      </div>
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-6 px-2 text-xs text-purple-600 hover:text-purple-700 hover:bg-purple-100"
+                        className="h-7 px-2.5 text-[10px] font-bold text-purple-600 hover:text-purple-700 hover:bg-purple-100 rounded-lg transition-all"
                         onClick={() => toggleCandidateAi(app.candidate_id, true)}
                         disabled={!!candidateAiLoadingById[app.candidate_id]}
                       >
-                        {candidateAiLoadingById[app.candidate_id] ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <RotateCw className="h-3 w-3 mr-1" />}
-                        Re-analyze
+                        {candidateAiLoadingById[app.candidate_id] ? <Loader2 className="h-3 w-3 mr-1.5 animate-spin" /> : <RotateCw className="h-3 w-3 mr-1.5" />}
+                        Refresh Insights
                       </Button>
                     </div>
-                    <div className="text-sm text-gray-700 whitespace-pre-wrap">
-                      {candidateAiById[app.candidate_id].expanded
-                        ? candidateAiById[app.candidate_id].summary
-                        : candidateAiById[app.candidate_id].summary.length > 260
-                          ? candidateAiById[app.candidate_id].summary.slice(0, 260) + "…"
-                          : candidateAiById[app.candidate_id].summary}
-                    </div>
-                    {candidateAiById[app.candidate_id].summary.length > 260 ? (
-                      <div className="mt-2">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 px-2 text-xs"
+                    <div className="p-4">
+                      <div className="text-sm text-zinc-700 leading-relaxed whitespace-pre-wrap">
+                        {candidateAiById[app.candidate_id].expanded
+                          ? candidateAiById[app.candidate_id].summary
+                          : candidateAiById[app.candidate_id].summary.length > 260
+                            ? candidateAiById[app.candidate_id].summary.slice(0, 260) + "…"
+                            : candidateAiById[app.candidate_id].summary}
+                      </div>
+                      {candidateAiById[app.candidate_id].summary.length > 260 && (
+                        <button
+                          className="mt-3 text-[10px] font-black uppercase tracking-widest text-purple-600 hover:text-purple-700 transition-colors flex items-center gap-1"
                           onClick={() =>
                             setCandidateAiById((prev) => ({
                               ...prev,
@@ -2098,10 +2268,14 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
                             }))
                           }
                         >
-                          {candidateAiById[app.candidate_id].expanded ? "View less" : "View more"}
-                        </Button>
-                      </div>
-                    ) : null}
+                          {candidateAiById[app.candidate_id].expanded ? (
+                            <>Show Compact <ChevronUp className="h-3 w-3" /></>
+                          ) : (
+                            <>Read Full Analysis <ChevronDown className="h-3 w-3" /></>
+                          )}
+                        </button>
+                      )}
+                    </div>
                   </div>
                 ) : null}
               </CardContent>

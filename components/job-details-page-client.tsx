@@ -56,5 +56,11 @@ export function JobDetailsPageClient({ jobId }: { jobId: string }) {
     )
   }
 
-  return <JobDetails job={job} onBack={() => router.push("/jobs")} initialTab={tab} />
+  return <JobDetails job={job} onBack={() => {
+    if (window.history.length > 1) {
+      router.back()
+    } else {
+      router.push("/jobs")
+    }
+  }} initialTab={tab} />
 }

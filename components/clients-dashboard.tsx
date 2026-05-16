@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useState, useCallback } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -71,9 +71,26 @@ export function ClientsDashboard() {
   const searchParams = useSearchParams()
   const [clients, setClients] = useState<Client[]>([])
   const [loading, setLoading] = useState(true)
-  const [search, setSearch] = useState("")
-  const [sourceFilter, setSourceFilter] = useState<string>("all")
+  const [search, setSearch] = useState(() => searchParams.get("search") || "")
+  const [sourceFilter, setSourceFilter] = useState<string>(() => searchParams.get("source") || "all")
   const [clientStats, setClientStats] = useState<Record<string, { truckinzy: number; employee: number; total: number }>>({})
+
+  // Sync state to URL
+  const updateUrl = useCallback(() => {
+    const params = new URLSearchParams(searchParams.toString())
+    if (search) params.set("search", search)
+    else params.delete("search")
+    
+    if (sourceFilter !== "all") params.set("source", sourceFilter)
+    else params.delete("source")
+    
+    const qs = params.toString()
+    router.replace(`/clients${qs ? `?${qs}` : ""}`, { scroll: false })
+  }, [router, search, sourceFilter, searchParams])
+
+  useEffect(() => {
+    updateUrl()
+  }, [updateUrl])
 
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editing, setEditing] = useState<Client | null>(null)
@@ -102,6 +119,11 @@ export function ClientsDashboard() {
       const data = await cachedFetchJson<any[]>(`internal:clients:/api/clients`, "/api/clients", undefined, {
         ttlMs: 10 * 60_000,
         force: Boolean(opts?.force),
+        swr: true,
+        onData: (freshData) => {
+          const freshRows = Array.isArray(freshData) ? (freshData as any[]) : []
+          setClients(freshRows as Client[])
+        }
       })
       const rows = Array.isArray(data) ? (data as any[]) : []
       setClients(rows as Client[])
@@ -113,7 +135,14 @@ export function ClientsDashboard() {
           `internal:clients:/api/clients/stats:${url}`,
           url,
           undefined,
-          { ttlMs: 10 * 60_000, force: Boolean(opts?.force) }
+          { 
+            ttlMs: 10 * 60_000, 
+            force: Boolean(opts?.force), 
+            swr: true,
+            onData: (freshStats) => {
+              setClientStats(freshStats?.byClient || {})
+            }
+          }
         )
         setClientStats(stats?.byClient || {})
       } else {

@@ -1,7 +1,7 @@
 "use client"
 
 import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from "react"
-import { usePathname } from "next/navigation"
+import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { logger } from "@/lib/logger"
 import { cachedFetchJson, invalidateSessionCache } from "@/lib/utils"
 
@@ -63,20 +63,52 @@ const CandidateContext = createContext<CandidateContextType | undefined>(undefin
 
 export function CandidateProvider({ children }: { children: ReactNode }) {
   const pathname = usePathname()
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  
   const [candidates, setCandidates] = useState<Candidate[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [hasMore, setHasMore] = useState(false)
   const [lastFetched, setLastFetched] = useState<Date | null>(null)
-  const [currentPage, setCurrentPage] = useState(1)
-  const [pageSize, setPageSize] = useState(50)
+  const [currentPage, setCurrentPage] = useState(() => Number(searchParams.get("page")) || 1)
+  const [pageSize, setPageSize] = useState(() => Number(searchParams.get("pageSize")) || 50)
   const [total, setTotal] = useState(0)
-  const [searchQuery, setSearchQueryState] = useState("")
-  const [statusFilter, setStatusFilterState] = useState("all")
-  const [sortBy, setSortByState] = useState("uploaded_at")
-  const [sortOrder, setSortOrderState] = useState<'asc' | 'desc'>("desc")
+  const [searchQuery, setSearchQueryState] = useState(() => searchParams.get("search") || "")
+  const [statusFilter, setStatusFilterState] = useState(() => searchParams.get("status") || "all")
+  const [sortBy, setSortByState] = useState(() => searchParams.get("sortBy") || "uploaded_at")
+  const [sortOrder, setSortOrderState] = useState<'asc' | 'desc'>(() => (searchParams.get("sortOrder") as 'asc' | 'desc') || "desc")
   const [permissionKeys, setPermissionKeys] = useState<string[] | null>(null)
   const shouldFetchCandidates = Boolean(pathname?.startsWith("/candidates"))
+
+  // Sync state to URL when on candidates page
+  const updateUrl = useCallback(() => {
+    if (!pathname?.startsWith("/candidates")) return
+    
+    const params = new URLSearchParams(searchParams.toString())
+    if (searchQuery) params.set("search", searchQuery)
+    else params.delete("search")
+    
+    if (statusFilter !== "all") params.set("status", statusFilter)
+    else params.delete("status")
+    
+    if (currentPage > 1) params.set("page", String(currentPage))
+    else params.delete("page")
+    
+    if (sortBy !== "uploaded_at") params.set("sortBy", sortBy)
+    else params.delete("sortBy")
+    
+    if (sortOrder !== "desc") params.set("sortOrder", sortOrder)
+    else params.delete("sortOrder")
+
+    const qs = params.toString()
+    const newUrl = `${pathname}${qs ? `?${qs}` : ""}`
+    router.replace(newUrl, { scroll: false })
+  }, [pathname, searchQuery, statusFilter, currentPage, sortBy, sortOrder, searchParams, router])
+
+  useEffect(() => {
+    updateUrl()
+  }, [updateUrl])
 
   const loadPermissions = useCallback(async (opts?: { force?: boolean }) => {
     try {
@@ -126,6 +158,18 @@ export function CandidateProvider({ children }: { children: ReactNode }) {
       const data = await cachedFetchJson<any>(`internal:candidates:${url}`, url, undefined, {
         ttlMs: 5 * 60_000,
         force: Boolean(opts?.force),
+        swr: true,
+        onData: (freshData) => {
+          const freshItems = Array.isArray(freshData) ? freshData : (freshData.items || [])
+          const freshTotalCount = Array.isArray(freshData) ? freshItems.length : (freshData.total || freshItems.length)
+          const freshPageNum = Array.isArray(freshData) ? page : (freshData.page || page)
+          const freshPer = Array.isArray(freshData) ? perPage : (freshData.perPage || perPage)
+          
+          setCandidates(freshItems)
+          setTotal(freshTotalCount)
+          setHasMore(freshPageNum * freshPer < freshTotalCount)
+          setLastFetched(new Date())
+        }
       })
       logger.debug("API Response:", data)
 

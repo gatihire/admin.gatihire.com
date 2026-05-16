@@ -18,6 +18,7 @@ const navItems = [
   { href: "/jobs", name: "Jobs", icon: Briefcase, anyOf: ["jobs.view", "jobs.post", "jobs.edit"] },
   { href: "/candidates", name: "Candidates", icon: Users, anyOf: ["candidates.view", "candidates.edit"] },
   { href: "/clients", name: "Clients", icon: Building2, anyOf: ["jobs.view", "jobs.post", "jobs.edit"] },
+  { href: "/clients/dashboard", name: "Client Analytics", icon: BarChart, anyOf: ["jobs.view", "analytics.view"] },
   { href: "/clients/credit-requests", name: "Credit Requests", icon: CreditCard, anyOf: ["jobs.view", "jobs.post", "jobs.edit", "users.manage"], badgeKey: "creditRequests" },
   { href: "/search", name: "Smart Search", icon: Search, anyOf: ["candidates.view", "candidates.edit", "candidates.search", "candidates.search-only"] },
   { href: "/jd-generator", name: "JD Generator", icon: FileText, anyOf: ["jobs.post", "jobs.edit"] },
@@ -35,6 +36,7 @@ export default function Sidebar({ isHrUser = false, permissionKeys = [], isSuper
 
   const activeHref = useMemo(() => {
     const path = pathname.split("?")[0]
+    if (path.startsWith("/clients/dashboard")) return "/clients/dashboard"
     if (path.startsWith("/clients/credit-requests")) return "/clients/credit-requests"
     if (path.startsWith("/clients/")) return "/clients"
     return path

@@ -86,6 +86,8 @@ export function AnalyticsDashboard() {
       const jsonData = await cachedFetchJson<AnalyticsData>(`internal:analytics:/api/hr/analytics`, "/api/hr/analytics", undefined, {
         ttlMs: 60_000,
         force: Boolean(opts?.force),
+        swr: true,
+        onData: (freshData) => setData(freshData)
       })
       setData(jsonData)
     } catch (err: any) {
@@ -104,6 +106,8 @@ export function AnalyticsDashboard() {
       const json = await cachedFetchJson<any>(`internal:analytics:${url}`, url, undefined, {
         ttlMs: 60_000,
         force: Boolean(opts?.force),
+        swr: true,
+        onData: (freshData) => setSearchLogs(freshData.logs || [])
       })
       setSearchLogs(json.logs || [])
     } catch (e) {
@@ -120,6 +124,8 @@ export function AnalyticsDashboard() {
       const json = await cachedFetchJson<any>(`internal:analytics:${url}`, url, undefined, {
         ttlMs: 60_000,
         force: Boolean(opts?.force),
+        swr: true,
+        onData: (freshData) => setUploadLogs(freshData.logs || [])
       })
       setUploadLogs(json.logs || [])
     } catch (e) {
