@@ -1,6 +1,6 @@
 "use client"
 
-import { createContext, useContext, useState, useEffect, useCallback, ReactNode } from "react"
+import { createContext, useContext, useState, useEffect, useCallback, ReactNode, Suspense } from "react"
 import { usePathname, useRouter, useSearchParams } from "next/navigation"
 import { logger } from "@/lib/logger"
 import { cachedFetchJson, invalidateSessionCache } from "@/lib/utils"
@@ -62,6 +62,14 @@ interface CandidateContextType {
 const CandidateContext = createContext<CandidateContextType | undefined>(undefined)
 
 export function CandidateProvider({ children }: { children: ReactNode }) {
+  return (
+    <Suspense fallback={null}>
+      <CandidateProviderInner>{children}</CandidateProviderInner>
+    </Suspense>
+  )
+}
+
+function CandidateProviderInner({ children }: { children: ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
   const searchParams = useSearchParams()
