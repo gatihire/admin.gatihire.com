@@ -2,7 +2,60 @@ import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { getInternalAuthContext } from "@/lib/internal-auth"
 
-// GET — list all credit requests (optionally filter by status=pending|approved|rejected|all)
+function parseClientMessage(message: string | null): string {
+  if (!message) return ""
+  let msg = message
+  if (msg.includes("---ADMIN_NOTE---")) {
+    msg = msg.split("---ADMIN_NOTE---")[0]
+  }
+  if (msg.includes("---ORDER_DETAILS---")) {
+    msg = msg.split("---ORDER_DETAILS---")[0]
+  }
+  return msg.trim()
+}
+
+function parseOrderDetails(message: string | null) {
+  if (!message || !message.includes("---ORDER_DETAILS---")) return null
+  try {
+    const parts = message.split("---ORDER_DETAILS---")
+    return JSON.parse(parts[1].trim())
+  } catch {
+    return null
+  }
+}
+
+function determineCreditType(requestType: string, orderDetails: any): { profileUnlock: boolean, jobPost: boolean } {
+  if (orderDetails?.type === "bundle") {
+    const bundle = orderDetails.bundle
+    if (bundle === "database") return { profileUnlock: true, jobPost: false }
+    if (bundle === "jobposting") return { profileUnlock: false, jobPost: true }
+    if (bundle === "both") return { profileUnlock: true, jobPost: true }
+  }
+  if (orderDetails?.type === "individual") {
+    const creditType = orderDetails.creditType
+    return {
+      profileUnlock: creditType === "profile_unlocks" || creditType === "profile_unlock",
+      jobPost: creditType === "job_posts" || creditType === "job_post",
+    }
+  }
+  const isProfileUnlock = requestType === "profile_unlocks" || requestType === "profile_unlock"
+  const isJobPost = requestType === "job_posts" || requestType === "job_post"
+  return { profileUnlock: isProfileUnlock, jobPost: isJobPost }
+}
+
+function calculateCreditsFromBundle(orderDetails: any): { profileUnlock: number, jobPost: number } {
+  if (!orderDetails || orderDetails.type !== "bundle") return { profileUnlock: 0, jobPost: 0 }
+  
+  const credits = orderDetails.credits || ""
+  const profileMatch = credits.match(/(\d+)\s*profile\s*unlock/i)
+  const jobMatch = credits.match(/(\d+)\s*job/i)
+  
+  return {
+    profileUnlock: profileMatch ? parseInt(profileMatch[1], 10) : 0,
+    jobPost: jobMatch ? parseInt(jobMatch[1], 10) : 0,
+  }
+}
+
 export async function GET(request: NextRequest) {
   const ctx = await getInternalAuthContext(request)
   if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
@@ -27,17 +80,17 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Query failed" }, { status: 500 })
   }
 
-  // Map database enum to UI enum if needed
   const formattedData = (data || []).map(req => ({
     ...req,
     status: req.status === "fulfilled" ? "approved" : req.status,
     reviewed_at: req.fulfilled_at,
+    clientMessage: parseClientMessage(req.message),
+    orderDetails: parseOrderDetails(req.message),
   }))
 
   return NextResponse.json({ requests: formattedData })
 }
 
-// PATCH — approve or reject a credit request; approve also recharges credits
 export async function PATCH(request: NextRequest) {
   const ctx = await getInternalAuthContext(request)
   if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
@@ -49,7 +102,6 @@ export async function PATCH(request: NextRequest) {
     return NextResponse.json({ error: "request_id and action (approve|reject|edit) required" }, { status: 400 })
   }
 
-  // Fetch the request
   const { data: req } = await supabaseAdmin
     .from("client_credit_requests")
     .select("*")
@@ -58,8 +110,9 @@ export async function PATCH(request: NextRequest) {
 
   if (!req) return NextResponse.json({ error: "Request not found" }, { status: 404 })
 
+  const orderDetails = parseOrderDetails(req.message)
   const finalAmount = amount !== undefined ? Number(amount) : req.requested_amount
-  const originalMessage = req.message ? req.message.split("\n\n---ADMIN_NOTE---")[0] : ""
+  const originalMessage = parseClientMessage(req.message)
   const finalMessage = admin_note ? `${originalMessage}\n\n---ADMIN_NOTE---\n${admin_note}` : req.message
 
   if (action === "edit") {
@@ -69,13 +122,11 @@ export async function PATCH(request: NextRequest) {
 
     const amountDiff = finalAmount - req.requested_amount
 
-    // Update the request
     await supabaseAdmin.from("client_credit_requests").update({
       requested_amount: finalAmount,
       message: finalMessage,
     }).eq("id", request_id)
 
-    // If amount changed, adjust the client's credits
     if (amountDiff !== 0) {
       const { data: existing } = await supabaseAdmin
         .from("client_credits")
@@ -83,22 +134,20 @@ export async function PATCH(request: NextRequest) {
         .eq("client_id", req.client_id)
         .single()
 
-      const isProfileUnlock = req.request_type === "profile_unlocks" || req.request_type === "profile_unlock"
-      const isJobPost = req.request_type === "job_posts" || req.request_type === "job_post"
+      const { profileUnlock, jobPost } = determineCreditType(req.request_type, orderDetails)
 
       if (existing) {
         await supabaseAdmin.from("client_credits").update({
-          profile_unlock_credits: isProfileUnlock
+          profile_unlock_credits: profileUnlock
             ? (existing.profile_unlock_credits || 0) + amountDiff
             : (existing.profile_unlock_credits || 0),
-          job_post_credits: isJobPost
+          job_post_credits: jobPost
             ? (existing.job_post_credits || 0) + amountDiff
             : (existing.job_post_credits || 0),
           updated_at: new Date().toISOString(),
         }).eq("client_id", req.client_id)
       }
 
-      // Log transaction
       await supabaseAdmin.from("client_credit_transactions").insert({
         client_id: req.client_id,
         type: amountDiff > 0 ? "admin_add" : "admin_remove",
@@ -112,7 +161,6 @@ export async function PATCH(request: NextRequest) {
 
   if (req.status !== "pending") return NextResponse.json({ error: "Already processed" }, { status: 400 })
 
-  // Mark as processed
   await supabaseAdmin.from("client_credit_requests").update({
     status: action === "approve" ? "fulfilled" : "rejected",
     requested_amount: finalAmount,
@@ -127,33 +175,50 @@ export async function PATCH(request: NextRequest) {
       .eq("client_id", req.client_id)
       .single()
 
-    const isProfileUnlock = req.request_type === "profile_unlocks" || req.request_type === "profile_unlock"
-    const isJobPost = req.request_type === "job_posts" || req.request_type === "job_post"
+    const { profileUnlock, jobPost } = determineCreditType(req.request_type, orderDetails)
+
+    let profileUnlockAmount = 0
+    let jobPostAmount = 0
+
+    if (orderDetails?.type === "bundle") {
+      const bundleCredits = calculateCreditsFromBundle(orderDetails)
+      profileUnlockAmount = bundleCredits.profileUnlock
+      jobPostAmount = bundleCredits.jobPost
+    } else {
+      profileUnlockAmount = profileUnlock ? finalAmount : 0
+      jobPostAmount = jobPost ? finalAmount : 0
+    }
 
     if (existing) {
       await supabaseAdmin.from("client_credits").update({
-        profile_unlock_credits: isProfileUnlock
-          ? (existing.profile_unlock_credits || 0) + finalAmount
-          : (existing.profile_unlock_credits || 0),
-        job_post_credits: isJobPost
-          ? (existing.job_post_credits || 0) + finalAmount
-          : (existing.job_post_credits || 0),
+        profile_unlock_credits: (existing.profile_unlock_credits || 0) + profileUnlockAmount,
+        job_post_credits: (existing.job_post_credits || 0) + jobPostAmount,
         updated_at: new Date().toISOString(),
       }).eq("client_id", req.client_id)
     } else {
       await supabaseAdmin.from("client_credits").insert({
         client_id: req.client_id,
-        profile_unlock_credits: isProfileUnlock ? finalAmount : 0,
-        job_post_credits: isJobPost ? finalAmount : 0,
+        profile_unlock_credits: profileUnlockAmount,
+        job_post_credits: jobPostAmount,
       })
     }
 
-    // Log transaction
+    const noteParts = []
+    if (orderDetails?.type === "bundle") {
+      noteParts.push(`Bundle: ${orderDetails.bundle} (${orderDetails.duration})`)
+      noteParts.push(`Credits: ${orderDetails.credits}`)
+    } else if (orderDetails?.type === "individual") {
+      noteParts.push(`Individual: ${orderDetails.creditType} × ${orderDetails.amount}`)
+    } else {
+      noteParts.push(`${req.request_type} × ${finalAmount}`)
+    }
+    if (admin_note) noteParts.push(`Note: ${admin_note}`)
+
     await supabaseAdmin.from("client_credit_transactions").insert({
       client_id: req.client_id,
       type: "admin_add",
-      amount: finalAmount,
-      note: `Admin approved — ${req.request_type} × ${finalAmount} (request #${request_id})${admin_note ? ' - Note: ' + admin_note : ''}`,
+      amount: profileUnlockAmount + jobPostAmount,
+      note: `Admin approved — ${noteParts.join(" | ")} (request #${request_id})`,
     })
   }
 

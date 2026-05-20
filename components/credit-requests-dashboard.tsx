@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Building2, Mail, Phone, Users, Briefcase, Calendar, CheckCircle2, XCircle, Clock, Edit } from "lucide-react"
+import { Building2, Mail, Phone, Users, Briefcase, Calendar, CheckCircle2, XCircle, Clock, Edit, Package, ShoppingCart } from "lucide-react"
 import { cachedFetchJson } from "@/lib/utils"
 
 type ClientInfo = {
@@ -22,6 +22,17 @@ type ClientInfo = {
   hiring_for: string[] | null
 }
 
+type OrderDetails = {
+  type: "bundle" | "individual"
+  bundle?: string
+  duration?: string
+  price?: number
+  credits?: string
+  creditType?: string
+  amount?: number
+  estimatedCost?: number
+}
+
 type CreditRequest = {
   id: string
   client_id: string
@@ -32,6 +43,7 @@ type CreditRequest = {
   created_at: string
   reviewed_at: string | null
   clients: ClientInfo | null
+  orderDetails: OrderDetails | null
 }
 
 const STATUS_COLORS: Record<string, { bg: string, text: string, label: string }> = {
@@ -44,8 +56,51 @@ const STATUS_COLORS: Record<string, { bg: string, text: string, label: string }>
 const TYPE_LABELS: Record<string, string> = {
   profile_unlock: "Profile Unlock",
   job_post: "Job Post",
-  profile_unlocks: "Profile Unlock",
-  job_posts: "Job Post",
+  profile_unlocks: "Profile Unlocks",
+  job_posts: "Job Posts",
+}
+
+const BUNDLE_LABELS: Record<string, string> = {
+  database: "Database Only",
+  jobposting: "Job Posting Only",
+  both: "Database + Job Posting",
+}
+
+const DURATION_LABELS: Record<string, string> = {
+  "1month": "1 Month",
+  "3months": "3 Months",
+  "6months": "6 Months",
+}
+
+function parseOrderDetails(message: string | null): OrderDetails | null {
+  if (!message || !message.includes("---ORDER_DETAILS---")) return null
+  try {
+    const parts = message.split("---ORDER_DETAILS---")
+    return JSON.parse(parts[1].trim())
+  } catch {
+    return null
+  }
+}
+
+function parseClientMessage(message: string | null): string {
+  if (!message) return ""
+  let msg = message
+  if (msg.includes("---ADMIN_NOTE---")) {
+    msg = msg.split("---ADMIN_NOTE---")[0]
+  }
+  if (msg.includes("---ORDER_DETAILS---")) {
+    msg = msg.split("---ORDER_DETAILS---")[0]
+  }
+  return msg.trim()
+}
+
+function parseAdminNote(message: string | null): string {
+  if (!message || !message.includes("---ADMIN_NOTE---")) return ""
+  return message.split("---ADMIN_NOTE---")[1]?.trim() || ""
+}
+
+function formatPrice(price: number) {
+  return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(price)
 }
 
 export function CreditRequestsDashboard() {
@@ -54,11 +109,9 @@ export function CreditRequestsDashboard() {
   const [statusFilter, setStatusFilter] = useState<"pending" | "approved" | "rejected" | "all">("pending")
   const [processing, setProcessing] = useState<string | null>(null)
   
-  // Modals state
   const [selectedCompany, setSelectedCompany] = useState<ClientInfo | null>(null)
   const [reviewRequest, setReviewRequest] = useState<{ req: CreditRequest, isEdit: boolean } | null>(null)
   
-  // Review Form State
   const [reviewAmount, setReviewAmount] = useState<number>(0)
   const [adminNote, setAdminNote] = useState("")
 
@@ -75,11 +128,19 @@ export function CreditRequestsDashboard() {
           force: Boolean(opts?.force),
           swr: true,
           onData: (freshData) => {
-            setRequests(freshData.requests || [])
+            const parsed = (freshData.requests || []).map((req: any) => ({
+              ...req,
+              orderDetails: parseOrderDetails(req.message),
+            }))
+            setRequests(parsed)
           }
         }
       )
-      setRequests(data.requests || [])
+      const parsed = (data.requests || []).map((req: any) => ({
+        ...req,
+        orderDetails: parseOrderDetails(req.message),
+      }))
+      setRequests(parsed)
     } catch {
       console.error("Failed to load requests")
     } finally {
@@ -92,14 +153,7 @@ export function CreditRequestsDashboard() {
   const handleOpenReview = (req: CreditRequest, isEdit = false) => {
     setReviewRequest({ req, isEdit })
     setReviewAmount(req.requested_amount)
-    
-    // Parse existing admin note if present
-    if (req.message && req.message.includes("---ADMIN_NOTE---")) {
-      const parts = req.message.split("---ADMIN_NOTE---")
-      setAdminNote(parts[1]?.trim() || "")
-    } else {
-      setAdminNote("")
-    }
+    setAdminNote(parseAdminNote(req.message))
   }
 
   const submitReview = async (action: "approve" | "reject" | "edit") => {
@@ -153,7 +207,7 @@ export function CreditRequestsDashboard() {
         <div className="flex items-center justify-between mb-6">
           <div className="space-y-1">
             <h1 className="text-3xl font-bold tracking-tight">Credit Management</h1>
-            <p className="text-muted-foreground">Manage client credit requests and view analytics.</p>
+            <p className="text-muted-foreground">Manage client credit requests — bundles & individual purchases.</p>
           </div>
           <TabsList>
             <TabsTrigger value="requests">Requests {pendingCount > 0 && <Badge variant="destructive" className="ml-2">{pendingCount}</Badge>}</TabsTrigger>
@@ -162,7 +216,6 @@ export function CreditRequestsDashboard() {
         </div>
 
         <TabsContent value="requests" className="space-y-6">
-          {/* Filters */}
           <div className="flex gap-2">
             {(["pending", "approved", "rejected", "all"] as const).map(s => (
               <Button
@@ -177,7 +230,6 @@ export function CreditRequestsDashboard() {
             <Button variant="ghost" onClick={() => fetchRequests({ force: true })} className="ml-auto">↻ Refresh</Button>
           </div>
 
-          {/* List */}
           {loading ? (
             <div className="space-y-4">
               {[1, 2, 3].map(i => <div key={i} className="h-32 bg-muted animate-pulse rounded-lg" />)}
@@ -194,13 +246,9 @@ export function CreditRequestsDashboard() {
                 const isPending = req.status === "pending"
                 const isApproved = req.status === "approved" || req.status === "fulfilled"
                 
-                let clientMsg = req.message || ""
-                let existingAdminNote = ""
-                if (req.message && req.message.includes("---ADMIN_NOTE---")) {
-                  const parts = req.message.split("---ADMIN_NOTE---")
-                  clientMsg = parts[0].trim()
-                  existingAdminNote = parts[1]?.trim() || ""
-                }
+                const clientMsg = parseClientMessage(req.message)
+                const existingAdminNote = parseAdminNote(req.message)
+                const orderDetails = req.orderDetails
 
                 return (
                   <div key={req.id} className={`p-5 rounded-xl border bg-card text-card-foreground shadow-sm flex gap-6 ${isPending ? 'border-l-4 border-l-yellow-500' : ''}`}>
@@ -218,7 +266,18 @@ export function CreditRequestsDashboard() {
                             >
                               {client?.name || req.client_id}
                             </button>
+                            {client?.contact_phone && (
+                              <span className="flex items-center gap-1 text-sm text-muted-foreground">
+                                <Phone className="w-3 h-3" /> {client.contact_phone}
+                              </span>
+                            )}
                             <Badge className={`${st.bg} ${st.text} hover:${st.bg} border-none`}>{st.label}</Badge>
+                            {orderDetails && (
+                              <Badge variant={orderDetails.type === "bundle" ? "default" : "secondary"} className="flex items-center gap-1">
+                                {orderDetails.type === "bundle" ? <Package className="w-3 h-3" /> : <ShoppingCart className="w-3 h-3" />}
+                                {orderDetails.type === "bundle" ? "Bundle" : "Individual"}
+                              </Badge>
+                            )}
                           </div>
                           <div className="flex items-center gap-4 text-sm text-muted-foreground mt-1">
                             {client?.primary_contact_email && <span className="flex items-center gap-1"><Mail className="w-3 h-3"/> {client.primary_contact_email}</span>}
@@ -245,20 +304,76 @@ export function CreditRequestsDashboard() {
                         </div>
                       </div>
 
-                      <div className="flex gap-8 text-sm bg-muted/50 p-3 rounded-lg">
-                        <div>
-                          <span className="text-muted-foreground uppercase text-[10px] font-bold block">Type</span>
-                          <span className="font-medium">{TYPE_LABELS[req.request_type] || req.request_type}</span>
+                      {/* Order Details Card */}
+                      {orderDetails && (
+                        <div className={`p-4 rounded-lg border ${orderDetails.type === "bundle" ? "bg-blue-50 border-blue-200" : "bg-purple-50 border-purple-200"}`}>
+                          {orderDetails.type === "bundle" ? (
+                            <div className="space-y-2">
+                              <div className="flex items-center gap-2">
+                                <Package className="w-4 h-4 text-blue-600" />
+                                <span className="font-semibold text-blue-900">Subscription Bundle</span>
+                              </div>
+                              <div className="grid grid-cols-2 gap-3 text-sm">
+                                <div>
+                                  <span className="text-muted-foreground text-xs block">Plan</span>
+                                  <span className="font-medium">{BUNDLE_LABELS[orderDetails.bundle || ""] || orderDetails.bundle}</span>
+                                </div>
+                                <div>
+                                  <span className="text-muted-foreground text-xs block">Duration</span>
+                                  <span className="font-medium">{DURATION_LABELS[orderDetails.duration || ""] || orderDetails.duration}</span>
+                                </div>
+                                <div>
+                                  <span className="text-muted-foreground text-xs block">Price</span>
+                                  <span className="font-bold text-blue-700">{orderDetails.price ? formatPrice(orderDetails.price) : "N/A"}</span>
+                                </div>
+                                <div>
+                                  <span className="text-muted-foreground text-xs block">Includes</span>
+                                  <span className="font-medium">{orderDetails.credits}</span>
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="space-y-2">
+                              <div className="flex items-center gap-2">
+                                <ShoppingCart className="w-4 h-4 text-purple-600" />
+                                <span className="font-semibold text-purple-900">Individual Credits</span>
+                              </div>
+                              <div className="grid grid-cols-3 gap-3 text-sm">
+                                <div>
+                                  <span className="text-muted-foreground text-xs block">Type</span>
+                                  <span className="font-medium">{TYPE_LABELS[orderDetails.creditType || ""] || orderDetails.creditType}</span>
+                                </div>
+                                <div>
+                                  <span className="text-muted-foreground text-xs block">Amount</span>
+                                  <span className="font-bold">{orderDetails.amount} credits</span>
+                                </div>
+                                <div>
+                                  <span className="text-muted-foreground text-xs block">Est. Cost</span>
+                                  <span className="font-bold text-purple-700">{orderDetails.estimatedCost ? formatPrice(orderDetails.estimatedCost) : "N/A"}</span>
+                                </div>
+                              </div>
+                            </div>
+                          )}
                         </div>
-                        <div>
-                          <span className="text-muted-foreground uppercase text-[10px] font-bold block">Requested</span>
-                          <span className="font-bold text-primary">{req.requested_amount} credits</span>
+                      )}
+
+                      {/* Legacy display for old requests without order details */}
+                      {!orderDetails && (
+                        <div className="flex gap-8 text-sm bg-muted/50 p-3 rounded-lg">
+                          <div>
+                            <span className="text-muted-foreground uppercase text-[10px] font-bold block">Type</span>
+                            <span className="font-medium">{TYPE_LABELS[req.request_type] || req.request_type}</span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground uppercase text-[10px] font-bold block">Requested</span>
+                            <span className="font-bold text-primary">{req.requested_amount} credits</span>
+                          </div>
+                          <div>
+                            <span className="text-muted-foreground uppercase text-[10px] font-bold block">Date</span>
+                            <span>{new Date(req.created_at).toLocaleDateString()}</span>
+                          </div>
                         </div>
-                        <div>
-                          <span className="text-muted-foreground uppercase text-[10px] font-bold block">Date</span>
-                          <span>{new Date(req.created_at).toLocaleDateString()}</span>
-                        </div>
-                      </div>
+                      )}
 
                       {clientMsg && (
                         <div className="text-sm italic text-muted-foreground border-l-2 pl-3">
@@ -292,22 +407,96 @@ export function CreditRequestsDashboard() {
       <Dialog open={!!reviewRequest} onOpenChange={(open) => !open && setReviewRequest(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{reviewRequest?.isEdit ? 'Edit Approved Request' : 'Review Credit Request'}</DialogTitle>
+            <DialogTitle className="flex items-center gap-2">
+              {reviewRequest?.isEdit ? <Edit className="w-5 h-5" /> : <Clock className="w-5 h-5" />}
+              {reviewRequest?.isEdit ? 'Edit Approved Request' : 'Review Credit Request'}
+            </DialogTitle>
             <DialogDescription>
+              {reviewRequest?.req.clients?.name && (
+                <span className="block font-medium text-foreground mb-1">
+                  Client: {reviewRequest.req.clients.name}
+                  {reviewRequest.req.clients.primary_contact_email && (
+                    <span className="text-muted-foreground font-normal ml-2">
+                      ({reviewRequest.req.clients.primary_contact_email})
+                    </span>
+                  )}
+                </span>
+              )}
               {reviewRequest?.isEdit ? 'Adjust the credits granted or update the admin note.' : 'Review and modify the requested amount before approving.'}
             </DialogDescription>
           </DialogHeader>
           
+          {reviewRequest && reviewRequest.req.orderDetails && (
+            <div className={`p-4 rounded-lg border mb-4 ${reviewRequest.req.orderDetails.type === "bundle" ? "bg-blue-50 border-blue-200" : "bg-purple-50 border-purple-200"}`}>
+              {reviewRequest.req.orderDetails.type === "bundle" ? (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <Package className="w-4 h-4 text-blue-600" />
+                    <span className="font-semibold text-blue-900">Subscription Bundle</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div>
+                      <span className="text-muted-foreground text-xs block">Plan</span>
+                      <span className="font-medium">{BUNDLE_LABELS[reviewRequest.req.orderDetails.bundle || ""] || reviewRequest.req.orderDetails.bundle}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground text-xs block">Duration</span>
+                      <span className="font-medium">{DURATION_LABELS[reviewRequest.req.orderDetails.duration || ""] || reviewRequest.req.orderDetails.duration}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground text-xs block">Price</span>
+                      <span className="font-bold text-blue-700">{reviewRequest.req.orderDetails.price ? formatPrice(reviewRequest.req.orderDetails.price) : "N/A"}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground text-xs block">Includes</span>
+                      <span className="font-medium">{reviewRequest.req.orderDetails.credits}</span>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <ShoppingCart className="w-4 h-4 text-purple-600" />
+                    <span className="font-semibold text-purple-900">Individual Credits</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-3 text-sm">
+                    <div>
+                      <span className="text-muted-foreground text-xs block">Type</span>
+                      <span className="font-medium">{TYPE_LABELS[reviewRequest.req.orderDetails.creditType || ""] || reviewRequest.req.orderDetails.creditType}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground text-xs block">Amount</span>
+                      <span className="font-bold">{reviewRequest.req.orderDetails.amount} credits</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground text-xs block">Est. Cost</span>
+                      <span className="font-bold text-purple-700">{reviewRequest.req.orderDetails.estimatedCost ? formatPrice(reviewRequest.req.orderDetails.estimatedCost) : "N/A"}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium">Credits to Grant</label>
+              <label className="text-sm font-medium">
+                {reviewRequest?.req.orderDetails?.type === "bundle" ? "Number of Bundles to Grant" : "Credits to Grant"}
+              </label>
               <Input 
                 type="number" 
                 value={reviewAmount} 
                 onChange={e => setReviewAmount(Number(e.target.value))} 
                 min={0}
               />
-              <p className="text-xs text-muted-foreground">Original request: {reviewRequest?.req.requested_amount}</p>
+              <div className="flex justify-between items-center">
+                <p className="text-xs text-muted-foreground">Original request: {reviewRequest?.req.requested_amount}</p>
+                {reviewRequest?.req.orderDetails?.type === "bundle" && (
+                  <p className="text-[10px] text-blue-600 font-medium italic">
+                    Credits will be added based on bundle description.
+                  </p>
+                )}
+              </div>
             </div>
             
             <div className="space-y-2">
