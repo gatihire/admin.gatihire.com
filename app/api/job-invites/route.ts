@@ -122,6 +122,10 @@ async function processSingleInvite({
   from,
   jobTitle,
   companyName,
+  jobDescription,
+  location,
+  experience,
+  compensation,
   inviteEmailTemplate,
   inviteWhatsappTemplate,
   now,
@@ -137,28 +141,35 @@ async function processSingleInvite({
   from: string
   jobTitle: string
   companyName: string
+  jobDescription?: string | null
+  location?: string | null
+  experience?: string | null
+  compensation?: string | null
   inviteEmailTemplate: any
   inviteWhatsappTemplate: any
   now: string
   buildLink: (t: string) => string
 }) {
   let candidateName: string | null = null
+  let localEmail = email
+  let localPhone = phone
+  
   if (candidateId) {
     const { data } = await supabaseAdmin
       .from("candidates")
       .select("email,phone,name")
       .eq("id", candidateId)
       .maybeSingle()
-    if (!email) email = (data?.email as string | undefined) || null
-    if (!phone) phone = (data?.phone as string | undefined) || null
+    if (!localEmail) localEmail = (data?.email as string | undefined) || null
+    if (!localPhone) localPhone = (data?.phone as string | undefined) || null
     candidateName = (data?.name as string | undefined) || null
   }
-  if (!email) return { success: false, error: "Candidate email not found" }
-  if (!/^\S+@\S+\.\S+$/.test(email)) return { success: false, error: "Invalid email" }
+  if (!localEmail) return { success: false, error: "Candidate email not found" }
+  if (!/^\S+@\S+\.\S+$/.test(localEmail)) return { success: false, error: "Invalid email" }
 
-  const normalizedPhone = phone ? phone.replace(/\s+/g, "") : null
-  phone = normalizedPhone || null
-  const shouldSendWhatsapp = sendWhatsapp && Boolean(phone)
+  const normalizedPhone = localPhone ? localPhone.replace(/\s+/g, "") : null
+  localPhone = normalizedPhone || null
+  const shouldSendWhatsapp = sendWhatsapp && Boolean(localPhone)
 
   let invite: any = null
   let error: any = null
@@ -170,9 +181,8 @@ async function processSingleInvite({
       .insert({
         job_id: jobId,
         candidate_id: candidateId || null,
-        email,
+        email: localEmail,
         token: attemptToken,
-        status: "pending",
         created_at: now,
         updated_at: now,
         metadata: { source: "internal" }
@@ -192,7 +202,7 @@ async function processSingleInvite({
         .from("job_invites")
         .select("id, token, metadata")
         .eq("job_id", jobId)
-        .eq("email", email)
+        .eq("email", localEmail)
         .maybeSingle()
 
       if (existing?.token) {
@@ -203,35 +213,20 @@ async function processSingleInvite({
         let whatsappSent = false
         let whatsappError: string | null = null
         if (resend && sendEmail && from) {
-          const subject = renderTemplate(
-            inviteEmailTemplate.subject || `Truckinzy: Invitation to apply — {{job_title}}`,
-            {
-              candidate_name: candidateName || "there",
-              job_title: jobTitle,
-              company_name: companyName,
-              invite_link: link
-            },
-            true
-          )
-          const html = renderTemplate(
-            inviteEmailTemplate.body,
-            {
-              candidate_name: candidateName || "there",
-              job_title: jobTitle,
-              company_name: companyName,
-              invite_link: link
-            },
-            true
-          )
-
           try {
             await sendInviteEmail({
-              to: email,
+              to: localEmail,
               from,
-              subject,
+              subject: `${companyName}: Invitation to apply — ${jobTitle}`,
               jobTitle,
+              candidateName,
               inviteLink: link,
-              html
+              companyName,
+              jobDescription,
+              location,
+              experience,
+              compensation,
+              clientName: companyName
             })
             emailSent = true
           } catch (e: any) {
@@ -250,7 +245,7 @@ async function processSingleInvite({
             }
           )
           const result = await aisensyService.sendWhatsAppMessage({
-            phoneNumber: phone as string,
+            phoneNumber: localPhone as string,
             candidateName: candidateName || "there",
             jobTitle,
             companyName,
@@ -271,7 +266,7 @@ async function processSingleInvite({
         if (shouldSendWhatsapp || sendWhatsapp) {
           updateData.metadata.whatsapp = {
             status: whatsappSent ? "sent" : "failed",
-            phone,
+            phone: localPhone,
             error: whatsappError,
             sent_at: whatsappSent ? now : null
           }
@@ -311,29 +306,21 @@ async function processSingleInvite({
   let whatsappError: string | null = null
 
   if (sendEmail && from) {
-    const subject = renderTemplate(
-      inviteEmailTemplate.subject || `Truckinzy: Invitation to apply — {{job_title}}`,
-      {
-        candidate_name: candidateName || "there",
-        job_title: jobTitle,
-        company_name: companyName,
-        invite_link: link
-      },
-      true
-    )
-    const html = renderTemplate(
-      inviteEmailTemplate.body,
-      {
-        candidate_name: candidateName || "there",
-        job_title: jobTitle,
-        company_name: companyName,
-        invite_link: link
-      },
-      true
-    )
-
     try {
-      await sendInviteEmail({ to: email, from, subject, jobTitle, inviteLink: link, html })
+      await sendInviteEmail({
+        to: localEmail,
+        from,
+        subject: `${companyName}: Invitation to apply — ${jobTitle}`,
+        jobTitle,
+        candidateName,
+        inviteLink: link,
+        companyName,
+        jobDescription,
+        location,
+        experience,
+        compensation,
+        clientName: companyName
+      })
       emailSent = true
     } catch (e: any) {
       emailError = e?.message || "Failed to send email"
@@ -352,7 +339,7 @@ async function processSingleInvite({
       }
     )
     const result = await aisensyService.sendWhatsAppMessage({
-      phoneNumber: phone as string,
+      phoneNumber: localPhone as string,
       candidateName: candidateName || "there",
       jobTitle,
       companyName,
@@ -372,7 +359,7 @@ async function processSingleInvite({
   if (shouldSendWhatsapp || sendWhatsapp) {
     updateData.metadata.whatsapp = {
       status: whatsappSent ? "sent" : "failed",
-      phone,
+      phone: localPhone,
       error: whatsappError,
       sent_at: whatsappSent ? now : null
     }
@@ -455,247 +442,10 @@ export async function POST(request: NextRequest) {
   const inviteEmailTemplate = templates.invite_email
   const inviteWhatsappTemplate = templates.invite_whatsapp
 
-  // Update processSingleInvite to accept new fields
-  const enhancedProcessSingleInvite = async (params: any) => {
-    const { jobId, candidateId, email: initialEmail, phone: initialPhone, sendEmail, sendWhatsapp, resend } = params
-    let email = initialEmail
-    let phone = initialPhone
-    let candidateName: string | null = null
-    if (candidateId) {
-      const { data } = await supabaseAdmin
-        .from("candidates")
-        .select("email,phone,name")
-        .eq("id", candidateId)
-        .maybeSingle()
-      if (!email) email = (data?.email as string | undefined) || null
-      if (!phone) phone = (data?.phone as string | undefined) || null
-      candidateName = (data?.name as string | undefined) || null
-    }
-    if (!email) return { success: false, error: "Candidate email not found" }
-    if (!/^\S+@\S+\.\S+$/.test(email)) return { success: false, error: "Invalid email" }
-
-    const normalizedPhone = phone ? phone.replace(/\s+/g, "") : null
-    phone = normalizedPhone || null
-    const shouldSendWhatsapp = sendWhatsapp && Boolean(phone)
-
-    let invite: any = null
-    let error: any = null
-    let tokenToUse = createToken()
-    for (let i = 0; i < 3; i++) {
-      const attemptToken = i === 0 ? tokenToUse : createToken()
-      const res = await supabaseAdmin
-        .from("job_invites")
-        .insert({
-          job_id: jobId,
-          candidate_id: candidateId || null,
-          email,
-          token: attemptToken,
-          status: "pending",
-          created_at: now,
-          updated_at: now,
-          metadata: { source: "internal" }
-        })
-        .select("id, token")
-        .single()
-      invite = res.data
-      error = res.error
-      tokenToUse = attemptToken
-      if (!error) break
-
-      if (
-        String(error?.message || "").toLowerCase().includes("job_invites_job_email_unique") ||
-        error?.code === "23505"
-      ) {
-        const { data: existing } = await supabaseAdmin
-          .from("job_invites")
-          .select("id, token, metadata")
-          .eq("job_id", jobId)
-          .eq("email", email)
-          .maybeSingle()
-
-        if (existing?.token) {
-          const link = buildLink(existing.token)
-
-          let emailSent = false
-          let emailError: string | null = null
-          let whatsappSent = false
-          let whatsappError: string | null = null
-          if (resend && sendEmail && from) {
-            try {
-              await sendInviteEmail({
-                to: email,
-                from,
-                subject: `${companyName}: Invitation to apply — ${jobTitle}`,
-                jobTitle,
-                candidateName,
-                inviteLink: link,
-                companyName,
-                jobDescription,
-                location,
-                experience,
-                compensation,
-                clientName: companyName
-              })
-              emailSent = true
-            } catch (e: any) {
-              emailError = e?.message || "Failed to send email"
-              console.error("sendInviteEmail error:", e)
-            }
-          }
-          if (shouldSendWhatsapp) {
-            const templateParams = buildTemplateParams(
-              inviteWhatsappTemplate?.metadata?.paramOrder || undefined,
-              {
-                candidate_name: candidateName || "there",
-                job_title: jobTitle,
-                company_name: companyName,
-                invite_link: link
-              }
-            )
-            const result = await aisensyService.sendWhatsAppMessage({
-              phoneNumber: phone as string,
-              candidateName: candidateName || "there",
-              jobTitle,
-              companyName,
-              uniqueLink: link
-            }, {
-              campaignName: inviteWhatsappTemplate?.metadata?.campaignName,
-              templateParams
-            })
-            whatsappSent = result.success
-            whatsappError = result.success ? null : result.error || "Failed to send WhatsApp"
-          }
-
-          const metaBase = existing?.metadata && typeof existing.metadata === "object" ? existing.metadata : {}
-          const updateData: any = { updated_at: now, metadata: { ...metaBase } }
-          if (sendEmail) {
-            updateData.metadata.email = { sent: emailSent, error: emailError, sent_at: emailSent ? now : null }
-          }
-          if (shouldSendWhatsapp || sendWhatsapp) {
-            updateData.metadata.whatsapp = {
-              status: whatsappSent ? "sent" : "failed",
-              phone,
-              error: whatsappError,
-              sent_at: whatsappSent ? now : null
-            }
-          }
-          if (emailSent || whatsappSent) {
-            updateData.sent_at = now
-            updateData.status = "sent"
-          } else if (emailError || whatsappError) {
-            updateData.status = "failed"
-          }
-          await supabaseAdmin.from("job_invites").update(updateData).eq("id", existing.id)
-
-          return {
-            success: true,
-            invite: existing,
-            link,
-            emailSent,
-            emailError,
-            whatsappSent,
-            whatsappError,
-            created: false
-          }
-        }
-        return { success: false, error: "Invite already exists for this email" }
-      }
-    }
-
-    if (error) {
-      console.error("Invite create failed:", error)
-      return { success: false, error: error.message || "Failed to create invite" }
-    }
-
-    const link = buildLink(tokenToUse)
-    let emailSent = false
-    let emailError: string | null = null
-    let whatsappSent = false
-    let whatsappError: string | null = null
-
-    if (sendEmail && from) {
-      try {
-        await sendInviteEmail({
-          to: email,
-          from,
-          subject: `${companyName}: Invitation to apply — ${jobTitle}`,
-          jobTitle,
-          candidateName,
-          inviteLink: link,
-          companyName,
-          jobDescription,
-          location,
-          experience,
-          compensation,
-          clientName: companyName
-        })
-        emailSent = true
-      } catch (e: any) {
-        emailError = e?.message || "Failed to send email"
-        console.error("sendInviteEmail error:", e)
-      }
-    }
-
-    if (shouldSendWhatsapp) {
-      const templateParams = buildTemplateParams(
-        inviteWhatsappTemplate?.metadata?.paramOrder || undefined,
-        {
-          candidate_name: candidateName || "there",
-          job_title: jobTitle,
-          company_name: companyName,
-          invite_link: link
-        }
-      )
-      const result = await aisensyService.sendWhatsAppMessage({
-        phoneNumber: phone as string,
-        candidateName: candidateName || "there",
-        jobTitle,
-        companyName,
-        uniqueLink: link
-      }, {
-        campaignName: inviteWhatsappTemplate?.metadata?.campaignName,
-        templateParams
-      })
-      whatsappSent = result.success
-      whatsappError = result.success ? null : result.error || "Failed to send WhatsApp"
-    }
-
-    const updateData: any = { updated_at: now, metadata: { source: "internal" } }
-    if (sendEmail) {
-      updateData.metadata.email = { sent: emailSent, error: emailError, sent_at: emailSent ? now : null }
-    }
-    if (shouldSendWhatsapp || sendWhatsapp) {
-      updateData.metadata.whatsapp = {
-        status: whatsappSent ? "sent" : "failed",
-        phone,
-        error: whatsappError,
-        sent_at: whatsappSent ? now : null
-      }
-    }
-    if (emailSent || whatsappSent) {
-      updateData.sent_at = now
-      updateData.status = "sent"
-    } else if (emailError || whatsappError) {
-      updateData.status = "failed"
-    }
-    await supabaseAdmin.from("job_invites").update(updateData).eq("id", invite.id)
-
-    return {
-      success: true,
-      invite,
-      link,
-      emailSent,
-      emailError,
-      whatsappSent,
-      whatsappError,
-      created: true
-    }
-  }
-
   if (candidateIds.length > 0) {
     const results: any[] = []
     for (const cId of candidateIds) {
-      const res = await enhancedProcessSingleInvite({
+      const res = await processSingleInvite({
         jobId,
         candidateId: cId,
         sendEmail,
@@ -704,6 +454,10 @@ export async function POST(request: NextRequest) {
         from,
         jobTitle,
         companyName,
+        jobDescription,
+        location,
+        experience,
+        compensation,
         inviteEmailTemplate,
         inviteWhatsappTemplate,
         now,
@@ -713,7 +467,7 @@ export async function POST(request: NextRequest) {
     }
     return NextResponse.json({ results })
   } else {
-    const res = await enhancedProcessSingleInvite({
+    const res = await processSingleInvite({
       jobId,
       candidateId,
       email: emailFromBody,
@@ -724,6 +478,10 @@ export async function POST(request: NextRequest) {
       from,
       jobTitle,
       companyName,
+      jobDescription,
+      location,
+      experience,
+      compensation,
       inviteEmailTemplate,
       inviteWhatsappTemplate,
       now,
