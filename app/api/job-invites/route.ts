@@ -457,7 +457,9 @@ export async function POST(request: NextRequest) {
 
   // Update processSingleInvite to accept new fields
   const enhancedProcessSingleInvite = async (params: any) => {
-    const { jobId, candidateId, email, phone, sendEmail, sendWhatsapp, resend } = params
+    const { jobId, candidateId, email: initialEmail, phone: initialPhone, sendEmail, sendWhatsapp, resend } = params
+    let email = initialEmail
+    let phone = initialPhone
     let candidateName: string | null = null
     if (candidateId) {
       const { data } = await supabaseAdmin
