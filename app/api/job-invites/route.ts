@@ -130,6 +130,7 @@ async function processSingleInvite({
   inviteWhatsappTemplate,
   now,
   buildLink,
+  ctx,
 }: {
   jobId: string
   candidateId?: string | null
@@ -149,6 +150,7 @@ async function processSingleInvite({
   inviteWhatsappTemplate: any
   now: string
   buildLink: (t: string) => string
+  ctx: any
 }) {
   let candidateName: string | null = null
   let localEmail = email
@@ -279,6 +281,44 @@ async function processSingleInvite({
         }
         await supabaseAdmin.from("job_invites").update(updateData).eq("id", existing.id)
 
+        // Insert into outreach_messages
+        const outreachRecords = []
+        if (emailSent || emailError) {
+          outreachRecords.push({
+            job_id: jobId,
+            candidate_id: candidateId || null,
+            message_type: "email",
+            recipient_contact: localEmail,
+            unique_link: link,
+            status: emailSent ? "sent" : "failed",
+            sent_at: emailSent ? now : null,
+            error_message: emailError,
+            created_at: now,
+            updated_at: now,
+            created_by: ctx?.authUser?.id
+          })
+        }
+        if (whatsappSent || whatsappError) {
+          outreachRecords.push({
+            job_id: jobId,
+            candidate_id: candidateId || null,
+            message_type: "whatsapp",
+            recipient_contact: localPhone,
+            unique_link: link,
+            status: whatsappSent ? "sent" : "failed",
+            sent_at: whatsappSent ? now : null,
+            error_message: whatsappError,
+            created_at: now,
+            updated_at: now,
+            created_by: ctx?.authUser?.id
+          })
+        }
+        if (outreachRecords.length > 0) {
+          await supabaseAdmin.from("outreach_messages").insert(outreachRecords).catch(err => {
+            console.error("Failed to insert outreach messages:", err)
+          })
+        }
+
         return {
           success: true,
           invite: existing,
@@ -372,6 +412,44 @@ async function processSingleInvite({
   }
   await supabaseAdmin.from("job_invites").update(updateData).eq("id", invite.id)
 
+  // Insert into outreach_messages
+  const outreachRecords = []
+  if (emailSent || emailError) {
+    outreachRecords.push({
+      job_id: jobId,
+      candidate_id: candidateId || null,
+      message_type: "email",
+      recipient_contact: localEmail,
+      unique_link: link,
+      status: emailSent ? "sent" : "failed",
+      sent_at: emailSent ? now : null,
+      error_message: emailError,
+      created_at: now,
+      updated_at: now,
+      created_by: ctx?.authUser?.id
+    })
+  }
+  if (whatsappSent || whatsappError) {
+    outreachRecords.push({
+      job_id: jobId,
+      candidate_id: candidateId || null,
+      message_type: "whatsapp",
+      recipient_contact: localPhone,
+      unique_link: link,
+      status: whatsappSent ? "sent" : "failed",
+      sent_at: whatsappSent ? now : null,
+      error_message: whatsappError,
+      created_at: now,
+      updated_at: now,
+      created_by: ctx?.authUser?.id
+    })
+  }
+  if (outreachRecords.length > 0) {
+    await supabaseAdmin.from("outreach_messages").insert(outreachRecords).catch(err => {
+      console.error("Failed to insert outreach messages:", err)
+    })
+  }
+
   return {
     success: true,
     invite,
@@ -461,7 +539,8 @@ export async function POST(request: NextRequest) {
         inviteEmailTemplate,
         inviteWhatsappTemplate,
         now,
-        buildLink
+        buildLink,
+        ctx
       })
       results.push({ candidateId: cId, ...res })
     }
@@ -485,7 +564,8 @@ export async function POST(request: NextRequest) {
       inviteEmailTemplate,
       inviteWhatsappTemplate,
       now,
-      buildLink
+      buildLink,
+      ctx
     })
     if (!res.success) return NextResponse.json({ error: res.error }, { status: 500 })
     return NextResponse.json(res)

@@ -80,6 +80,8 @@ export function OutreachDashboard({ jobId }: OutreachDashboardProps) {
   const [reinviteChannel, setReinviteChannel] = useState<"email" | "whatsapp" | "both">("both")
   const [reiniviting, setReinviting] = useState(false)
   const [reinviteConfirmOpen, setReinviteConfirmOpen] = useState(false)
+  const [selectedCandidate, setSelectedCandidate] = useState<any>(null)
+  const [candidateProfileOpen, setCandidateProfileOpen] = useState(false)
   const { toast } = useToast()
   const router = useRouter()
 
@@ -104,6 +106,19 @@ export function OutreachDashboard({ jobId }: OutreachDashboardProps) {
       }
     } catch (error) {
       console.error("Failed to fetch job details", error)
+    }
+  }
+
+  const fetchCandidateProfile = async (candidateId: string) => {
+    try {
+      const res = await fetch(`/api/candidates/${candidateId}`)
+      if (res.ok) {
+        const data = await res.json()
+        setSelectedCandidate(data)
+        setCandidateProfileOpen(true)
+      }
+    } catch (error) {
+      console.error("Failed to fetch candidate profile", error)
     }
   }
 
@@ -567,7 +582,12 @@ export function OutreachDashboard({ jobId }: OutreachDashboardProps) {
                         disabled={candidate.responded}
                       />
                       <div>
-                      <h3 className="font-semibold">{candidate.name}</h3>
+                      <h3 
+                        className="font-semibold cursor-pointer hover:text-blue-600 transition-colors"
+                        onClick={() => fetchCandidateProfile(candidate.id)}
+                      >
+                        {candidate.name}
+                      </h3>
                       <p className="text-sm text-muted-foreground">{candidate.current_role}</p>
                       <div className="flex items-center gap-2 mt-1">
                         <Mail className="h-3 w-3 text-muted-foreground" />
@@ -672,6 +692,88 @@ export function OutreachDashboard({ jobId }: OutreachDashboardProps) {
               Send re-invite
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={candidateProfileOpen} onOpenChange={setCandidateProfileOpen}>
+        <DialogContent className="sm:max-w-[600px] max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Candidate Profile</DialogTitle>
+          </DialogHeader>
+          {selectedCandidate && (
+            <div className="space-y-4">
+              <div className="flex items-center gap-4">
+                <div className="w-16 h-16 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold text-xl">
+                  {selectedCandidate.name?.charAt(0) || "C"}
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold">{selectedCandidate.name || "N/A"}</h3>
+                  <p className="text-sm text-muted-foreground">{selectedCandidate.current_role || "N/A"}</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-sm font-medium text-muted-foreground">Email</label>
+                  <p className="text-sm">{selectedCandidate.email || "N/A"}</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-muted-foreground">Phone</label>
+                  <p className="text-sm">{selectedCandidate.phone || "N/A"}</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-muted-foreground">Location</label>
+                  <p className="text-sm">{selectedCandidate.location || "N/A"}</p>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-muted-foreground">Experience</label>
+                  <p className="text-sm">
+                    {selectedCandidate.experience_min_years != null || selectedCandidate.experience_max_years != null ? 
+                      `${selectedCandidate.experience_min_years != null ? selectedCandidate.experience_min_years : '0'}-${selectedCandidate.experience_max_years != null ? selectedCandidate.experience_max_years : '∞'} years` : 
+                      "N/A"}
+                  </p>
+                </div>
+              </div>
+
+              {selectedCandidate.description && (
+                <div>
+                  <label className="text-sm font-medium text-muted-foreground block mb-1">Profile</label>
+                  <p className="text-sm text-muted-foreground">{selectedCandidate.description}</p>
+                </div>
+              )}
+
+              {selectedCandidate.technical_skills && selectedCandidate.technical_skills.length > 0 && (
+                <div>
+                  <label className="text-sm font-medium text-muted-foreground block mb-1">Technical Skills</label>
+                  <div className="flex flex-wrap gap-2">
+                    {selectedCandidate.technical_skills.map((skill: string, idx: number) => (
+                      <Badge key={idx} variant="outline">{skill}</Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {selectedCandidate.soft_skills && selectedCandidate.soft_skills.length > 0 && (
+                <div>
+                  <label className="text-sm font-medium text-muted-foreground block mb-1">Soft Skills</label>
+                  <div className="flex flex-wrap gap-2">
+                    {selectedCandidate.soft_skills.map((skill: string, idx: number) => (
+                      <Badge key={idx} variant="outline">{skill}</Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="pt-4 border-t">
+                <Button
+                  variant="outline"
+                  onClick={() => router.push(`/candidates/${selectedCandidate.id}`)}
+                >
+                  View Full Profile
+                </Button>
+              </div>
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>
