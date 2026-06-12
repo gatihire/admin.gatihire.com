@@ -73,12 +73,14 @@ export default function MatchesClient({ jobId }: { jobId: string }) {
     try {
       setLoading(true)
       const url = `/api/jobs/${jobId}/matches?page=${page}&perPage=${perPage}${opts?.refresh ? "&refresh=1" : ""}`
-      const data = await cachedFetchJson<any>(
-        `internal:job-matches:${jobId}:page:${page}:per:${perPage}:${opts?.refresh ? "refresh" : "base"}`,
-        url,
-        undefined,
-        { ttlMs: 5 * 60_000, force: Boolean(opts?.refresh) },
-      )
+      const data = opts?.refresh 
+        ? await fetch(url).then(r => r.json()) 
+        : await cachedFetchJson<any>(
+            `internal:job-matches:${jobId}:page:${page}:per:${perPage}`,
+            url,
+            undefined,
+            { ttlMs: 5 * 60_000 },
+          )
       setItems(data.items || [])
       setTotal(data.total || 0)
       setCachedTotal(typeof data.cachedTotal === "number" ? data.cachedTotal : (data.items?.length || 0))
@@ -216,12 +218,7 @@ export default function MatchesClient({ jobId }: { jobId: string }) {
   const selectAllMatches = async () => {
     setSelectingAll(true)
     try {
-      const data = await cachedFetchJson<any>(
-        `internal:job-match-ids:${jobId}`,
-        `/api/jobs/${jobId}/matches?idsOnly=1`,
-        undefined,
-        { ttlMs: 5 * 60_000 }
-      )
+      const data = await fetch(`/api/jobs/${jobId}/matches?idsOnly=1&refresh=1`).then(r => r.json())
       const ids = Array.isArray(data?.candidateIds) ? data.candidateIds.map((x: any) => String(x || "")).filter(Boolean) : []
       const next: Record<string, true> = {}
       const limit = Math.min(ids.length, MAX_SELECTED_CANDIDATES)
