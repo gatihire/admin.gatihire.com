@@ -85,7 +85,10 @@ export function ClientsDashboard() {
     else params.delete("source")
     
     const qs = params.toString()
-    router.replace(`/clients${qs ? `?${qs}` : ""}`, { scroll: false })
+    // Only replace if the query string actually changed to prevent infinite loops
+    if (qs !== searchParams.toString()) {
+      router.replace(`/clients${qs ? `?${qs}` : ""}`, { scroll: false })
+    }
   }, [router, search, sourceFilter, searchParams])
 
   useEffect(() => {
@@ -446,6 +449,16 @@ export function ClientsDashboard() {
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
                       <DropdownMenuItem onClick={() => openEdit(c)}>Edit</DropdownMenuItem>
+                      <DropdownMenuItem asChild>
+                        <a
+                          href={`/api/admin/impersonate?clientId=${c.id}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center w-full"
+                        >
+                          Login as Client
+                        </a>
+                      </DropdownMenuItem>
                       <DropdownMenuItem
                         onClick={() => {
                           const el = document.getElementById(`client-logo-upload-${c.id}`) as HTMLInputElement | null

@@ -111,26 +111,37 @@ export async function GET(request: NextRequest) {
   })
 }
 
-export async function POST(request: NextRequest) {
-  const ctx = await getInternalAuthContext(request)
-  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-  if (!hasPermission(ctx, "jobs.edit") && !hasPermission(ctx, "jobs.post")) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
-  }
-
-  const body = (await request.json().catch(() => null)) as any
-  const jobId = typeof body?.jobId === "string" ? body.jobId : null
-  const candidateId = typeof body?.candidateId === "string" ? body.candidateId : null
-  const emailFromBody = typeof body?.email === "string" ? body.email.trim().toLowerCase() : null
-  const phoneFromBody = typeof body?.phone === "string" ? body.phone.trim() : null
-  const sendWhatsapp = body?.sendWhatsapp === true
-  const sendEmail = body?.sendEmail !== false
-  const resend = body?.resend === true
-  if (!jobId) return NextResponse.json({ error: "Missing jobId" }, { status: 400 })
-  if (!candidateId && !emailFromBody) return NextResponse.json({ error: "Missing candidateId/email" }, { status: 400 })
-
-  let email = emailFromBody
-  let phone = phoneFromBody
+async function processSingleInvite({
+  jobId,
+  candidateId,
+  email,
+  phone,
+  sendEmail,
+  sendWhatsapp,
+  resend,
+  from,
+  jobTitle,
+  companyName,
+  inviteEmailTemplate,
+  inviteWhatsappTemplate,
+  now,
+  buildLink,
+}: {
+  jobId: string
+  candidateId?: string | null
+  email?: string | null
+  phone?: string | null
+  sendEmail: boolean
+  sendWhatsapp: boolean
+  resend: boolean
+  from: string
+  jobTitle: string
+  companyName: string
+  inviteEmailTemplate: any
+  inviteWhatsappTemplate: any
+  now: string
+  buildLink: (t: string) => string
+}) {
   let candidateName: string | null = null
   if (candidateId) {
     const { data } = await supabaseAdmin
@@ -142,43 +153,26 @@ export async function POST(request: NextRequest) {
     if (!phone) phone = (data?.phone as string | undefined) || null
     candidateName = (data?.name as string | undefined) || null
   }
-  if (!email) return NextResponse.json({ error: "Candidate email not found" }, { status: 400 })
-  if (!/^\S+@\S+\.\S+$/.test(email)) return NextResponse.json({ error: "Invalid email" }, { status: 400 })
+  if (!email) return { success: false, error: "Candidate email not found" }
+  if (!/^\S+@\S+\.\S+$/.test(email)) return { success: false, error: "Invalid email" }
 
-  const token = createToken()
-  const now = nowIso()
-  const from = process.env.INVITES_FROM || process.env.POSTMARK_FROM || process.env.SMTP_USER || ""
   const normalizedPhone = phone ? phone.replace(/\s+/g, "") : null
   phone = normalizedPhone || null
   const shouldSendWhatsapp = sendWhatsapp && Boolean(phone)
-  if (sendEmail && !from && !shouldSendWhatsapp) return NextResponse.json({ error: "Email not configured" }, { status: 400 })
-
-  const base = getBoardAppBaseUrl()
-  const buildLink = (t: string) => `${base}/invite/${t}`
-  const needsJobDetails = Boolean((sendEmail && from) || shouldSendWhatsapp)
-  const { data: jobDetails } = needsJobDetails
-    ? await supabaseAdmin.from("jobs").select("title,client_name").eq("id", jobId).maybeSingle()
-    : { data: null }
-  const jobTitle = (jobDetails?.title as string | undefined) || "a role"
-  const companyName = (jobDetails?.client_name as string | undefined) || "Truckinzy"
-  const templates = await loadMessageTemplates()
-  const inviteEmailTemplate = templates.invite_email
-  const inviteWhatsappTemplate = templates.invite_whatsapp
 
   let invite: any = null
   let error: any = null
-  let tokenToUse = token
+  let tokenToUse = createToken()
   for (let i = 0; i < 3; i++) {
     const attemptToken = i === 0 ? tokenToUse : createToken()
     const res = await supabaseAdmin
       .from("job_invites")
       .insert({
         job_id: jobId,
-        candidate_id: candidateId,
+        candidate_id: candidateId || null,
         email,
         token: attemptToken,
-        status: "sent",
-        sent_at: now,
+        status: "pending",
         created_at: now,
         updated_at: now,
         metadata: { source: "internal" }
@@ -190,7 +184,10 @@ export async function POST(request: NextRequest) {
     tokenToUse = attemptToken
     if (!error) break
 
-    if (String(error?.message || "").toLowerCase().includes("job_invites_job_email_unique") || error?.code === "23505") {
+    if (
+      String(error?.message || "").toLowerCase().includes("job_invites_job_email_unique") ||
+      error?.code === "23505"
+    ) {
       const { data: existing } = await supabaseAdmin
         .from("job_invites")
         .select("id, token, metadata")
@@ -237,12 +234,9 @@ export async function POST(request: NextRequest) {
               html
             })
             emailSent = true
-            await supabaseAdmin
-              .from("job_invites")
-              .update({ status: "sent", sent_at: now, updated_at: now })
-              .eq("id", existing.id)
           } catch (e: any) {
             emailError = e?.message || "Failed to send email"
+            console.error("sendInviteEmail error:", e)
           }
         }
         if (shouldSendWhatsapp) {
@@ -267,42 +261,50 @@ export async function POST(request: NextRequest) {
           })
           whatsappSent = result.success
           whatsappError = result.success ? null : result.error || "Failed to send WhatsApp"
-          const metaBase = existing?.metadata && typeof existing.metadata === "object" ? existing.metadata : {}
-          await supabaseAdmin
-            .from("job_invites")
-            .update({
-              metadata: {
-                ...metaBase,
-                whatsapp: {
-                  status: whatsappSent ? "sent" : "failed",
-                  phone,
-                  error: whatsappError,
-                  sent_at: whatsappSent ? now : null
-                }
-              },
-              updated_at: now
-            })
-            .eq("id", existing.id)
-        } else if (sendWhatsapp && !phone) {
-          whatsappError = "Missing phone number"
         }
 
-        return NextResponse.json(
-          { invite: existing, link, emailSent, emailError, whatsappSent, whatsappError, created: false },
-          { status: 200 }
-        )
+        const metaBase = existing?.metadata && typeof existing.metadata === "object" ? existing.metadata : {}
+        const updateData: any = { updated_at: now, metadata: { ...metaBase } }
+        if (sendEmail) {
+          updateData.metadata.email = { sent: emailSent, error: emailError, sent_at: emailSent ? now : null }
+        }
+        if (shouldSendWhatsapp || sendWhatsapp) {
+          updateData.metadata.whatsapp = {
+            status: whatsappSent ? "sent" : "failed",
+            phone,
+            error: whatsappError,
+            sent_at: whatsappSent ? now : null
+          }
+        }
+        if (emailSent || whatsappSent) {
+          updateData.sent_at = now
+          updateData.status = "sent"
+        } else if (emailError || whatsappError) {
+          updateData.status = "failed"
+        }
+        await supabaseAdmin.from("job_invites").update(updateData).eq("id", existing.id)
+
+        return {
+          success: true,
+          invite: existing,
+          link,
+          emailSent,
+          emailError,
+          whatsappSent,
+          whatsappError,
+          created: false
+        }
       }
-      return NextResponse.json({ error: "Invite already exists for this email" }, { status: 409 })
+      return { success: false, error: "Invite already exists for this email" }
     }
   }
 
   if (error) {
     console.error("Invite create failed:", error)
-    return NextResponse.json({ error: error.message || "Failed to create invite" }, { status: 500 })
+    return { success: false, error: error.message || "Failed to create invite" }
   }
 
   const link = buildLink(tokenToUse)
-
   let emailSent = false
   let emailError: string | null = null
   let whatsappSent = false
@@ -331,19 +333,14 @@ export async function POST(request: NextRequest) {
     )
 
     try {
-      await sendInviteEmail({
-        to: email,
-        from,
-        subject,
-        jobTitle,
-        inviteLink: link,
-        html
-      })
+      await sendInviteEmail({ to: email, from, subject, jobTitle, inviteLink: link, html })
       emailSent = true
     } catch (e: any) {
       emailError = e?.message || "Failed to send email"
+      console.error("sendInviteEmail error:", e)
     }
   }
+
   if (shouldSendWhatsapp) {
     const templateParams = buildTemplateParams(
       inviteWhatsappTemplate?.metadata?.paramOrder || undefined,
@@ -366,25 +363,117 @@ export async function POST(request: NextRequest) {
     })
     whatsappSent = result.success
     whatsappError = result.success ? null : result.error || "Failed to send WhatsApp"
-    const metaBase = { source: "internal" }
-    await supabaseAdmin
-      .from("job_invites")
-      .update({
-        metadata: {
-          ...metaBase,
-          whatsapp: {
-            status: whatsappSent ? "sent" : "failed",
-            phone,
-            error: whatsappError,
-            sent_at: whatsappSent ? now : null
-          }
-        },
-        updated_at: now
-      })
-      .eq("id", invite.id)
-  } else if (sendWhatsapp && !phone) {
-    whatsappError = "Missing phone number"
   }
 
-  return NextResponse.json({ invite, link, emailSent, emailError, whatsappSent, whatsappError, created: true })
+  const updateData: any = { updated_at: now, metadata: { source: "internal" } }
+  if (sendEmail) {
+    updateData.metadata.email = { sent: emailSent, error: emailError, sent_at: emailSent ? now : null }
+  }
+  if (shouldSendWhatsapp || sendWhatsapp) {
+    updateData.metadata.whatsapp = {
+      status: whatsappSent ? "sent" : "failed",
+      phone,
+      error: whatsappError,
+      sent_at: whatsappSent ? now : null
+    }
+  }
+  if (emailSent || whatsappSent) {
+    updateData.sent_at = now
+    updateData.status = "sent"
+  } else if (emailError || whatsappError) {
+    updateData.status = "failed"
+  }
+  await supabaseAdmin.from("job_invites").update(updateData).eq("id", invite.id)
+
+  return {
+    success: true,
+    invite,
+    link,
+    emailSent,
+    emailError,
+    whatsappSent,
+    whatsappError,
+    created: true
+  }
+}
+
+export async function POST(request: NextRequest) {
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "jobs.edit") && !hasPermission(ctx, "jobs.post")) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  }
+
+  const body = (await request.json().catch(() => null)) as any
+  const jobId = typeof body?.jobId === "string" ? body.jobId : null
+  const candidateIds = Array.isArray(body?.candidateIds)
+    ? body.candidateIds.map((x: any) => String(x || "").trim()).filter(Boolean)
+    : []
+  const candidateId = typeof body?.candidateId === "string" ? body.candidateId : null
+  const emailFromBody = typeof body?.email === "string" ? body.email.trim().toLowerCase() : null
+  const phoneFromBody = typeof body?.phone === "string" ? body.phone.trim() : null
+  const sendWhatsapp = body?.sendWhatsapp === true
+  const sendEmail = body?.sendEmail !== false
+  const resend = body?.resend === true
+
+  if (!jobId) return NextResponse.json({ error: "Missing jobId" }, { status: 400 })
+  if (candidateIds.length === 0 && !candidateId && !emailFromBody) {
+    return NextResponse.json({ error: "Missing candidateIds/candidateId/email" }, { status: 400 })
+  }
+
+  const now = nowIso()
+  const from = process.env.INVITES_FROM || process.env.POSTMARK_FROM || process.env.SMTP_USER || ""
+  const base = getBoardAppBaseUrl()
+  const buildLink = (t: string) => `${base}/invite/${t}`
+  const { data: jobDetails } = await supabaseAdmin
+    .from("jobs")
+    .select("title,client_name")
+    .eq("id", jobId)
+    .maybeSingle()
+  const jobTitle = (jobDetails?.title as string | undefined) || "a role"
+  const companyName = (jobDetails?.client_name as string | undefined) || "Truckinzy"
+  const templates = await loadMessageTemplates()
+  const inviteEmailTemplate = templates.invite_email
+  const inviteWhatsappTemplate = templates.invite_whatsapp
+
+  if (candidateIds.length > 0) {
+    const results: any[] = []
+    for (const cId of candidateIds) {
+      const res = await processSingleInvite({
+        jobId,
+        candidateId: cId,
+        sendEmail,
+        sendWhatsapp,
+        resend,
+        from,
+        jobTitle,
+        companyName,
+        inviteEmailTemplate,
+        inviteWhatsappTemplate,
+        now,
+        buildLink
+      })
+      results.push({ candidateId: cId, ...res })
+    }
+    return NextResponse.json({ results })
+  } else {
+    const res = await processSingleInvite({
+      jobId,
+      candidateId,
+      email: emailFromBody,
+      phone: phoneFromBody,
+      sendEmail,
+      sendWhatsapp,
+      resend,
+      from,
+      jobTitle,
+      companyName,
+      inviteEmailTemplate,
+      inviteWhatsappTemplate,
+      now,
+      buildLink
+    })
+    if (!res.success) return NextResponse.json({ error: res.error }, { status: 500 })
+    return NextResponse.json(res)
+  }
 }

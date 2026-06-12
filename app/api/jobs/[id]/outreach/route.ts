@@ -1,13 +1,22 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabase, supabaseAdmin } from "@/lib/supabase"
-import { jdBasedSearch } from "@/lib/search-service"
-import { aisensyService } from "@/lib/aisensy"
-import { logger } from "@/lib/logger"
-import { sendOutreachEmail } from "@/lib/mailer"
+import { GoogleGenerativeAI } from "@google/generative-ai"
+import { generateEmbedding } from "@/lib/embedding"
+import { redis } from "@/lib/redis"
+import { calculateCandidateScore, applySidebarFilters } from "@/lib/scoring"
 import crypto from "crypto"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { buildTemplateParams, loadMessageTemplates, renderTemplate } from "@/lib/message-templates"
 import { getBoardAppBaseUrl } from "@/lib/utils"
+import { aisensyService } from "@/lib/aisensy"
+import { logger } from "@/lib/logger"
+import { sendOutreachEmail } from "@/lib/mailer"
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
+
+function buildWebsearchQuery(terms: string[], max = 15): string {
+  return terms.slice(0, max).map(t => t.includes(" ") ? `"${t}"` : t).filter(Boolean).join(" OR ")
+}
 
 export const runtime = "nodejs"
 
@@ -111,45 +120,121 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         if (cid && link && !existingLinkByCandidateId.has(cid)) existingLinkByCandidateId.set(cid, link)
       }
     } else {
-      const { data: storedMatches } = await supabaseAdmin
-        .from("job_matches")
-        .select("candidate_id, relevance_score, candidates:candidate_id (id, name, email, phone, current_role)")
-        .eq("job_id", id)
-        .order("relevance_score", { ascending: false })
-        .limit(25)
+      // Run enhanced matchmaking to get top 500 candidates
+      const jdHash = crypto.createHash('md5').update((job.description || "").trim().toLowerCase()).digest('hex')
+      const cacheKey = `jd_search_criteria:${jdHash}`
+      let criteriaResult: any = null
+      let embedding: number[] = []
 
-      const matches = Array.isArray(storedMatches) && storedMatches.length
-        ? storedMatches
-            .filter((m: any) => Boolean(m?.candidates?.id))
-            .map((m: any) => ({
-              candidate: {
-                id: m.candidates.id,
-                name: m.candidates.name,
-                email: m.candidates.email,
-                phone: m.candidates.phone,
-                current_role: m.candidates.current_role,
-              },
-              score: typeof m.relevance_score === "number" ? m.relevance_score : 0,
-              matchedSkills: [],
-              explanation: "",
-            }))
-        : await (async () => {
-            const results = await jdBasedSearch(job.description || "", [], "current_past")
-            return results.map(c => ({
-              candidate: {
-                id: c.id,
-                name: c.name,
-                email: c.email,
-                phone: c.phone,
-                current_role: c.currentRole || c.current_role,
-              },
-              score: c.relevanceScore || 0,
-              matchedSkills: c.matchingKeywords || [],
-              explanation: c.searchExplanation || "",
-            }))
-          })()
+      if (redis) {
+        const cachedData = await redis.get<{ criteria: any, embedding: number[] }>(cacheKey)
+        if (cachedData) {
+          criteriaResult = cachedData.criteria
+          embedding = cachedData.embedding
+        }
+      }
 
-      if (matches.length === 0) {
+      if (!criteriaResult) {
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" })
+        const prompt = `Analyze this job description and extract key hiring criteria for candidate matching.
+JD: """${(job.description || "").slice(0, 3000)}"""
+Return ONLY valid JSON:
+{"title": string, "required_skills": string[], "preferred_skills": string[], "min_experience_years": number|null, "location": string|null, "key_keywords": string[]}`
+
+        const [extracted, emb] = await Promise.all([
+          model.generateContent(prompt).then(r => {
+            const text = r.response.text().replace(/```json\n?|\n?```/g, "").trim()
+            return JSON.parse(text)
+          }).catch(() => ({ title: "", required_skills: [], preferred_skills: [], key_keywords: [] })),
+          generateEmbedding((job.description || "").slice(0, 7000)).catch(() => [] as number[]),
+        ])
+        
+        criteriaResult = extracted
+        embedding = emb
+
+        if (redis && embedding.length > 0) {
+          await redis.set(cacheKey, { criteria: criteriaResult, embedding }, { ex: 3600 * 24 }) // Cache 24h
+        }
+      }
+
+      const criteria = criteriaResult
+
+      // Step 2: Build websearch query
+      const allKeyTerms = [...(criteria.required_skills || []), ...(criteria.key_keywords || []), criteria.title || ""].filter(Boolean)
+      const websearchQ = buildWebsearchQuery(allKeyTerms, 15).replace(/[()]/g, " ").trim()
+
+      // Step 3: Build RPC filters
+      const rpcFilters: any = {}
+      if (criteria.location) rpcFilters.currentCity = [criteria.location]
+      if (criteria.min_experience_years) rpcFilters.exp_min = criteria.min_experience_years.toString()
+      if (allKeyTerms.length > 0) rpcFilters.must_kw = allKeyTerms
+
+      // Step 4: Run RPC search
+      const { data, error } = await supabaseAdmin.rpc("search_candidates_hybrid", {
+        p_query_text: websearchQ,
+        p_query_embedding: embedding.length ? embedding : null,
+        p_match_threshold: 0.15,
+        p_filters: rpcFilters,
+        p_limit: 500,
+        p_offset: 0
+      })
+
+      if (error) {
+        console.error("Matchmaking RPC error:", error)
+        return NextResponse.json({ 
+          message: "Failed to run matchmaking",
+          candidates: [],
+          messages_sent: 0
+        })
+      }
+
+      // Step 5: Score and sort candidates
+      const mappedCriteria = {
+        role: criteria.title,
+        location: criteria.location,
+        min_experience_years: criteria.min_experience_years,
+        skills: [...(criteria.required_skills || []), ...(criteria.preferred_skills || [])]
+      }
+
+      let results = (data || [])
+        .map((row: any) => {
+          const rawCandidate = row.candidate_data
+          const calculatedScore = calculateCandidateScore(mappedCriteria, rawCandidate)
+          const finalScore = Math.max(calculatedScore, row.match_score * 100)
+          return { ...rawCandidate, match_score: Math.round(finalScore) }
+        })
+        .filter((c: any) => c.match_score >= 12)
+
+      results.sort((a: any, b: any) => (b.match_score || 0) - (a.match_score || 0))
+      results = results.map((c: any) => ({ ...c, match_score: Math.min(100, c.match_score) }))
+      results = applySidebarFilters(results, {})
+
+      // Store matches in job_matches for future use
+      if (results.length > 0) {
+        const matchInserts = results.map((c: any) => ({
+          job_id: id,
+          candidate_id: c.id,
+          relevance_score: c.match_score / 100,
+          source: 'enhanced_match',
+          created_at: new Date().toISOString()
+        }))
+
+        await supabaseAdmin.from("job_matches").upsert(matchInserts, { onConflict: 'job_id, candidate_id' })
+      }
+
+      // Update job_match_runs
+      await supabaseAdmin.from("job_match_runs").upsert({
+        job_id: id,
+        total_matches: results.length,
+        cached_matches: results.length,
+        per_page: 25,
+        max_pages: 5,
+        candidate_ids: results.map((c: any) => c.id),
+        last_matched_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'job_id' })
+
+      if (results.length === 0) {
         return NextResponse.json({ 
           message: "No suitable candidates found for outreach",
           candidates: [],
@@ -157,15 +242,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         })
       }
 
-      outreachCandidates = matches.map(match => ({
-        id: match.candidate.id,
-        name: match.candidate.name,
-        email: match.candidate.email,
-        phone: match.candidate.phone,
-        current_role: match.candidate.current_role,
-        match_score: match.score,
-        matched_skills: match.matchedSkills,
-        explanation: match.explanation
+      // Take top 150 candidates for outreach
+      outreachCandidates = results.slice(0, 150).map(candidate => ({
+        id: candidate.id,
+        name: candidate.name,
+        email: candidate.email,
+        phone: candidate.phone,
+        current_role: candidate.current_role,
+        match_score: candidate.match_score / 100,
+        matched_skills: [...(candidate.technical_skills || []), ...(candidate.soft_skills || [])],
+        explanation: ""
       }))
     }
 
@@ -327,6 +413,34 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
       if (outreachError) {
         logger.error("Error saving outreach records", outreachError)
+      }
+
+      // Also save job_invites records for consistency with client-app
+      const jobInviteRecords = []
+      for (const candidate of outreachCandidates) {
+        const matchingRecord = outreachRecords.find(r => r.candidate_id === candidate.id)
+        if (matchingRecord) {
+          jobInviteRecords.push({
+            job_id: id,
+            candidate_id: candidate.id,
+            email: candidate.email,
+            token: matchingRecord.unique_link.split("token=")[1],
+            status: matchingRecord.status,
+            sent_at: matchingRecord.sent_at,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            metadata: { source: 'admin_outreach' }
+          })
+        }
+      }
+
+      if (jobInviteRecords.length > 0) {
+        const { error: inviteError } = await supabaseAdmin
+          .from("job_invites")
+          .insert(jobInviteRecords)
+        if (inviteError) {
+          logger.error("Error saving job_invites records", inviteError)
+        }
       }
 
       // Update job outreach counts

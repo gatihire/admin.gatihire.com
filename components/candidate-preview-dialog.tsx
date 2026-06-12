@@ -1421,7 +1421,7 @@ export function CandidatePreviewDialog({
                                 <p className="text-gray-500 max-w-md">
                                     Generate a detailed AI analysis of how this candidate matches the specific requirements of this job.
                                 </p>
-                                <Button onClick={generateAnalysis} className="bg-purple-600 hover:bg-purple-700">
+                                <Button onClick={() => generateAnalysis()} className="bg-purple-600 hover:bg-purple-700">
                                     <BrainCircuit className="mr-2 h-4 w-4" />
                                     Generate Analysis
                                 </Button>

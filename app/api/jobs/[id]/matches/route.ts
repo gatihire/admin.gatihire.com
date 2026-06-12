@@ -1,8 +1,112 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabase, supabaseAdmin } from "@/lib/supabase"
-import { parseSearchRequirement, intelligentCandidateSearch } from "@/lib/intelligent-search"
 import { SupabaseCandidateService } from "@/lib/supabase-candidates"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
+import { GoogleGenerativeAI } from "@google/generative-ai"
+import { generateEmbedding } from "@/lib/embedding"
+import { redis } from "@/lib/redis"
+import crypto from "crypto"
+import { calculateCandidateScore, applySidebarFilters } from "@/lib/scoring"
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!)
+
+function buildWebsearchQuery(terms: string[], max = 15): string {
+  return terms.slice(0, max).map(t => t.includes(" ") ? `"${t}"` : t).filter(Boolean).join(" OR ")
+}
+
+async function runEnhancedMatchmaking(jobId: string, jd: string) {
+  try {
+    // Step 1: Extract criteria + embedding (same as client-app jd search)
+    const jdHash = crypto.createHash('md5').update(jd.trim().toLowerCase()).digest('hex')
+    const cacheKey = `jd_search_criteria:${jdHash}`
+    let criteriaResult: any = null
+    let embedding: number[] = []
+
+    if (redis) {
+      const cachedData = await redis.get<{ criteria: any, embedding: number[] }>(cacheKey)
+      if (cachedData) {
+        criteriaResult = cachedData.criteria
+        embedding = cachedData.embedding
+      }
+    }
+
+    if (!criteriaResult) {
+      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" })
+      const prompt = `Analyze this job description and extract key hiring criteria for candidate matching.
+JD: """${jd.slice(0, 3000)}"""
+Return ONLY valid JSON:
+{"title": string, "required_skills": string[], "preferred_skills": string[], "min_experience_years": number|null, "location": string|null, "key_keywords": string[]}`
+
+      const [extracted, emb] = await Promise.all([
+        model.generateContent(prompt).then(r => {
+          const text = r.response.text().replace(/```json\n?|\n?```/g, "").trim()
+          return JSON.parse(text)
+        }).catch(() => ({ title: "", required_skills: [], preferred_skills: [], key_keywords: [] })),
+        generateEmbedding(jd.slice(0, 7000)).catch(() => [] as number[]),
+      ])
+      
+      criteriaResult = extracted
+      embedding = emb
+
+      if (redis && embedding.length > 0) {
+        await redis.set(cacheKey, { criteria: criteriaResult, embedding }, { ex: 3600 * 24 }) // Cache 24h
+      }
+    }
+
+    const criteria = criteriaResult
+
+    // Step 2: Build websearch query
+    const allKeyTerms = [...(criteria.required_skills || []), ...(criteria.key_keywords || []), criteria.title || ""].filter(Boolean)
+    const websearchQ = buildWebsearchQuery(allKeyTerms, 15).replace(/[()]/g, " ").trim()
+
+    // Step 3: Build RPC filters
+    const rpcFilters: any = {}
+    if (criteria.location) rpcFilters.currentCity = [criteria.location]
+    if (criteria.min_experience_years) rpcFilters.exp_min = criteria.min_experience_years.toString()
+    if (allKeyTerms.length > 0) rpcFilters.must_kw = allKeyTerms
+
+    // Step 4: Run RPC search
+    const { data, error } = await supabaseAdmin.rpc("search_candidates_hybrid", {
+      p_query_text: websearchQ,
+      p_query_embedding: embedding.length ? embedding : null,
+      p_match_threshold: 0.15,
+      p_filters: rpcFilters,
+      p_limit: 500,
+      p_offset: 0
+    })
+
+    if (error) {
+      console.error("Matchmaking RPC error:", error)
+      return { success: false, error }
+    }
+
+    // Step 5: Score and sort candidates
+    const mappedCriteria = {
+      role: criteria.title,
+      location: criteria.location,
+      min_experience_years: criteria.min_experience_years,
+      skills: [...(criteria.required_skills || []), ...(criteria.preferred_skills || [])]
+    }
+
+    let results = (data || [])
+      .map((row: any) => {
+        const rawCandidate = row.candidate_data
+        const calculatedScore = calculateCandidateScore(mappedCriteria, rawCandidate)
+        const finalScore = Math.max(calculatedScore, row.match_score * 100)
+        return { ...rawCandidate, match_score: Math.round(finalScore) }
+      })
+      .filter((c: any) => c.match_score >= 12)
+
+    results.sort((a: any, b: any) => (b.match_score || 0) - (a.match_score || 0))
+    results = results.map((c: any) => ({ ...c, match_score: Math.min(100, c.match_score) }))
+    results = applySidebarFilters(results, {})
+
+    return { success: true, candidates: results }
+  } catch (err) {
+    console.error("Enhanced matchmaking failed:", err)
+    return { success: false, error: err }
+  }
+}
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -22,12 +126,12 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     const maxPages = 5
     const cacheLimit = Math.max(1, Math.min(100, perPage * maxPages))
 
-    const { data: job, error: jobErr } = await supabaseAdmin
+    const { data: job, error: jobError } = await supabaseAdmin
       .from("jobs")
       .select("*")
       .eq("id", id)
       .single()
-    if (jobErr || !job) {
+    if (jobError || !job) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 })
     }
 
@@ -82,22 +186,24 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         job.description || "",
       ].join("\n").trim()
 
-      const candidates = await SupabaseCandidateService.getAllCandidates()
-      const requirements = await parseSearchRequirement(baseText)
-      const ranked = await intelligentCandidateSearch(requirements, candidates)
+      const matchmakingResult = await runEnhancedMatchmaking(id, baseText)
+      let ranked: any[] = []
+      if (matchmakingResult.success && matchmakingResult.candidates) {
+        ranked = matchmakingResult.candidates
+      }
 
       totalMatches = Array.isArray(ranked) ? ranked.length : 0
       orderedCandidateIds = (Array.isArray(ranked) ? ranked : []).map((c: any) => String(c?.id || "")).filter(Boolean)
-      storedRequirements = requirements
+      storedRequirements = null
       const rankedTop = (Array.isArray(ranked) ? ranked : []).slice(0, cacheLimit)
       matches = rankedTop.map((c: any) => ({
         job_id: id,
         candidate_id: c.id,
-        relevance_score: c.relevanceScore || 0,
-        match_summary: c.matchSummary || null,
-        score_breakdown: c.scoreBreakdown || null,
-        matching_keywords: c.matchingKeywords || [],
-        source: "database",
+        relevance_score: c.match_score || 0,
+        match_summary: null,
+        score_breakdown: null,
+        matching_keywords: [],
+        source: "enhanced_match",
         created_at: new Date().toISOString()
       }))
       cachedMatches = matches.length
@@ -107,21 +213,21 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         if (forceRefresh) {
           await supabaseAdmin.from("job_matches").delete().eq("job_id", id)
         }
-        const { error: insertErr } = await supabaseAdmin
+        const { error: insertError } = await supabaseAdmin
           .from("job_matches")
           .upsert(matches, { onConflict: "job_id,candidate_id" })
-        if (insertErr) {
+        if (insertError) {
           // If matching_keywords column is missing, retry without it
-          if ((insertErr as any)?.code === 'PGRST204' || insertErr.message.includes("matching_keywords")) {
+          if ((insertError as any)?.code === 'PGRST204' || insertError.message.includes("matching_keywords")) {
             console.warn("Retrying upsert without matching_keywords column...")
             const matchesNoKeywords = matches.map(({ matching_keywords, ...rest }: any) => rest)
-            const { error: retryErr } = await supabaseAdmin
+            const { error: retryError } = await supabaseAdmin
               .from("job_matches")
               .upsert(matchesNoKeywords, { onConflict: "job_id,candidate_id" })
             
-            if (retryErr) console.warn("Retry failed:", retryErr.message)
+            if (retryError) console.warn("Retry failed:", retryError.message)
           } else {
-            console.warn("job_matches upsert failed:", insertErr.message)
+            console.warn("job_matches upsert failed:", insertError.message)
           }
         }
       } catch (_ignore) {}
@@ -185,26 +291,14 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
             .select("*")
             .in("id", pageIds)
           const candMap = new Map((cands || []).map((c: any) => [String(c.id), SupabaseCandidateService.mapRowToCandidate(c)]))
-          const candidatesForScoring = pageIds.map((cid) => candMap.get(cid)).filter(Boolean) as any[]
-          let scoreById = new Map<string, { score: number; keywords: any[] }>()
-          if (storedRequirements && candidatesForScoring.length) {
-            const scored = await intelligentCandidateSearch(storedRequirements, candidatesForScoring)
-            scoreById = new Map(
-              (Array.isArray(scored) ? scored : []).map((c: any) => [
-                String(c?.id || ""),
-                { score: c?.relevanceScore || 0, keywords: c?.matchingKeywords || [] }
-              ])
-            )
-          }
           items = pageIds.map((cid) => {
-            const s = scoreById.get(cid)
             return {
               job_id: id,
               candidate_id: cid,
-              relevance_score: s?.score || 0,
+              relevance_score: 0,
               match_summary: null,
               score_breakdown: null,
-              matching_keywords: s?.keywords || [],
+              matching_keywords: [],
               source: "database",
               created_at: null,
               candidate: candMap.get(cid) || null,
@@ -251,7 +345,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       perPage,
       total: totalMatches,
       cachedTotal: cachedMatches,
-      maxPages
+      maxPages,
     })
   } catch (error) {
     console.error("Job matches error:", error)

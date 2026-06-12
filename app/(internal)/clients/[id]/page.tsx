@@ -41,6 +41,14 @@ export default async function ClientDetailPage(props: { params: Promise<{ id: st
           ← Back to clients
         </Link>
         <div className="flex items-center gap-2">
+          <a
+            href={`/api/admin/impersonate?clientId=${client.id}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-full border bg-blue-50 px-4 py-2 text-sm text-blue-600 hover:bg-blue-100 dark:bg-blue-900/30 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-900/50"
+          >
+            Login as Client
+          </a>
           <Link
             href={`/clients?edit=${client.id}`}
             className="rounded-full border bg-white px-4 py-2 text-sm hover:bg-gray-50 dark:bg-zinc-900 dark:border-zinc-800"

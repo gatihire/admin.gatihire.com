@@ -45,6 +45,7 @@ export default function MatchesClient({ jobId }: { jobId: string }) {
   const [manageBusy, setManageBusy] = useState<boolean>(false)
 
   const [selectedCandidateIds, setSelectedCandidateIds] = useState<Record<string, true>>({})
+  const MAX_SELECTED_CANDIDATES = 150
   const [bulkStage, setBulkStage] = useState<string>("shortlist")
   const [bulkInviteChannel, setBulkInviteChannel] = useState<"whatsapp" | "email" | "both">("both")
   const [bulkBusy, setBulkBusy] = useState(false)
@@ -155,8 +156,20 @@ export default function MatchesClient({ jobId }: { jobId: string }) {
   const toggleSelected = (candidateId: string, nextChecked: boolean) => {
     setSelectedCandidateIds((prev) => {
       const next = { ...prev }
-      if (nextChecked) next[candidateId] = true
-      else delete next[candidateId]
+      if (nextChecked) {
+        // Check if we're already at max
+        if (Object.keys(prev).length >= MAX_SELECTED_CANDIDATES && !prev[candidateId]) {
+          toast({
+            title: "Limit reached",
+            description: `You can select a maximum of ${MAX_SELECTED_CANDIDATES} candidates for invitations`,
+            variant: "destructive"
+          })
+          return prev
+        }
+        next[candidateId] = true
+      } else {
+        delete next[candidateId]
+      }
       return next
     })
   }
@@ -164,9 +177,35 @@ export default function MatchesClient({ jobId }: { jobId: string }) {
   const setSelectedForPage = (checked: boolean) => {
     setSelectedCandidateIds((prev) => {
       const next = { ...prev }
-      for (const id of allIdsOnPage) {
-        if (checked) next[id] = true
-        else delete next[id]
+      if (checked) {
+        // Calculate how many we can add
+        const currentCount = Object.keys(prev).length
+        const availableSlots = MAX_SELECTED_CANDIDATES - currentCount
+        if (availableSlots <= 0) {
+          toast({
+            title: "Limit reached",
+            description: `You can select a maximum of ${MAX_SELECTED_CANDIDATES} candidates for invitations`,
+            variant: "destructive"
+          })
+          return prev
+        }
+        // Add only up to available slots
+        const idsToAdd = allIdsOnPage.slice(0, availableSlots)
+        for (const id of idsToAdd) {
+          next[id] = true
+        }
+        if (idsToAdd.length < allIdsOnPage.length) {
+          toast({
+            title: "Partial selection",
+            description: `Only added ${idsToAdd.length} candidates (max ${MAX_SELECTED_CANDIDATES})`,
+            variant: "default"
+          })
+        }
+      } else {
+        // Remove all page ids
+        for (const id of allIdsOnPage) {
+          delete next[id]
+        }
       }
       return next
     })
@@ -185,13 +224,19 @@ export default function MatchesClient({ jobId }: { jobId: string }) {
       )
       const ids = Array.isArray(data?.candidateIds) ? data.candidateIds.map((x: any) => String(x || "")).filter(Boolean) : []
       const next: Record<string, true> = {}
-      for (const id of ids) next[id] = true
+      const limit = Math.min(ids.length, MAX_SELECTED_CANDIDATES)
+      for (let i = 0; i < limit; i++) {
+        next[ids[i]] = true
+      }
       setSelectedCandidateIds(next)
       const totalMatches = typeof data?.total === "number" ? data.total : ids.length
       const cachedCount = typeof data?.cachedTotal === "number" ? data.cachedTotal : ids.length
       setCachedTotal(cachedCount)
       setTotal(totalMatches)
-      toast({ title: "Selected all matches", description: `${ids.length} candidates selected.` })
+      toast({ 
+        title: limit === ids.length ? "Selected all matches" : "Selected top candidates", 
+        description: `${limit} candidates selected (max ${MAX_SELECTED_CANDIDATES})` 
+      })
     } catch (e: any) {
       toast({ title: "Selection failed", description: e?.message || "Failed to select all matches", variant: "destructive" })
     } finally {
@@ -262,7 +307,9 @@ export default function MatchesClient({ jobId }: { jobId: string }) {
       let assigned = 0
       let invited = 0
       let failed = 0
+      const flags = inviteFlagsForChannel(bulkInviteChannel)
 
+      // First associate all candidates
       for (const candidateId of candidateIds) {
         setPendingCandidateIds((prev) => ({ ...prev, [candidateId]: true }))
         try {
@@ -294,18 +341,6 @@ export default function MatchesClient({ jobId }: { jobId: string }) {
             if (res.status !== 409 && !res.ok) throw new Error("Failed to associate candidate")
           }
           assigned += 1
-
-          if (opts?.alsoInvite) {
-            const flags = inviteFlagsForChannel(bulkInviteChannel)
-            const res = await fetch("/api/job-invites", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ jobId, candidateId, resend: true, ...flags })
-            })
-            const data = await res.json().catch(() => null)
-            if (!res.ok) throw new Error(data?.error || "Failed to invite candidate")
-            invited += 1
-          }
         } catch {
           failed += 1
         } finally {
@@ -314,6 +349,22 @@ export default function MatchesClient({ jobId }: { jobId: string }) {
             delete next[candidateId]
             return next
           })
+        }
+      }
+
+      // Then bulk invite if needed
+      if (opts?.alsoInvite) {
+        try {
+          const res = await fetch("/api/job-invites", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jobId, candidateIds, resend: true, ...flags })
+          })
+          const data = await res.json().catch(() => null)
+          if (!res.ok) throw new Error(data?.error || "Failed to invite candidates")
+          invited = (data?.results || []).filter((r: any) => r.success).length
+        } catch {
+          // If bulk invite fails, don't fail whole operation
         }
       }
 
@@ -337,35 +388,23 @@ export default function MatchesClient({ jobId }: { jobId: string }) {
 
     setBulkBusy(true)
     try {
-      let invited = 0
-      let failed = 0
       const flags = inviteFlagsForChannel(bulkInviteChannel)
-
-      for (const candidateId of candidateIds) {
-        setPendingCandidateIds((prev) => ({ ...prev, [candidateId]: true }))
-        try {
-          const res = await fetch("/api/job-invites", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ jobId, candidateId, resend: true, ...flags })
-          })
-          const data = await res.json().catch(() => null)
-          if (!res.ok) throw new Error(data?.error || "Failed to invite candidate")
-          invited += 1
-        } catch {
-          failed += 1
-        } finally {
-          setPendingCandidateIds((prev) => {
-            const next = { ...prev }
-            delete next[candidateId]
-            return next
-          })
-        }
-      }
-
+      const res = await fetch("/api/job-invites", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId, candidateIds, resend: true, ...flags })
+      })
+      const data = await res.json().catch(() => null)
+      if (!res.ok) throw new Error(data?.error || "Failed to invite candidates")
+      
+      const invited = (data?.results || []).filter((r: any) => r.success).length
+      const failed = (data?.results || []).filter((r: any) => !r.success).length
+      
       invalidateSessionCache(`internal:job-invites:${jobId}`)
       clearSelection()
       toast({ title: "Invites sent", description: `Invited: ${invited}${failed ? ` • Failed: ${failed}` : ""}` })
+    } catch (e: any) {
+      toast({ title: "Invites failed", description: e?.message || "Unknown error", variant: "destructive" })
     } finally {
       setBulkBusy(false)
     }
@@ -489,11 +528,11 @@ export default function MatchesClient({ jobId }: { jobId: string }) {
     return "bg-gray-400"
   }
 
-  const toggleAi = async (candidateId: string) => {
+  const toggleAi = async (candidateId: string, force = false) => {
     if (!candidateId) return
 
     const existing = aiByCandidateId[candidateId]
-    if (existing?.summary) {
+    if (existing?.summary && !force) {
       setAiByCandidateId((prev) => ({
         ...prev,
         [candidateId]: { ...prev[candidateId], visible: !prev[candidateId].visible }
