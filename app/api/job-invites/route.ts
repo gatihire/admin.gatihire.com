@@ -522,27 +522,37 @@ export async function POST(request: NextRequest) {
 
   if (candidateIds.length > 0) {
     const results: any[] = []
-    for (const cId of candidateIds) {
-      const res = await processSingleInvite({
-        jobId,
-        candidateId: cId,
-        sendEmail,
-        sendWhatsapp,
-        resend,
-        from,
-        jobTitle,
-        companyName,
-        jobDescription,
-        location,
-        experience,
-        compensation,
-        inviteEmailTemplate,
-        inviteWhatsappTemplate,
-        now,
-        buildLink,
-        ctx
-      })
-      results.push({ candidateId: cId, ...res })
+    const concurrencyLimit = 5
+    for (let i = 0; i < candidateIds.length; i += concurrencyLimit) {
+      const batch = candidateIds.slice(i, i + concurrencyLimit)
+      const batchResults = await Promise.all(batch.map(async cId => {
+        try {
+          const res = await processSingleInvite({
+            jobId,
+            candidateId: cId,
+            sendEmail,
+            sendWhatsapp,
+            resend,
+            from,
+            jobTitle,
+            companyName,
+            jobDescription,
+            location,
+            experience,
+            compensation,
+            inviteEmailTemplate,
+            inviteWhatsappTemplate,
+            now,
+            buildLink,
+            ctx
+          })
+          return { candidateId: cId, ...res }
+        } catch (e: any) {
+          console.error(`Error processing candidate ${cId}:`, e)
+          return { candidateId: cId, success: false, error: e?.message || "Failed to process candidate" }
+        }
+      }))
+      results.push(...batchResults)
     }
     return NextResponse.json({ results })
   } else {

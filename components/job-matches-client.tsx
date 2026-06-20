@@ -661,7 +661,7 @@ export default function MatchesClient({ jobId }: { jobId: string }) {
           items.map((m) => {
             const candidate = m.candidate || {}
             const score = m.relevance_score || 0
-            const matchPercentage = Math.round(score * 100)
+            const matchPercentage = Math.max(0, Math.min(100, Math.round((score > 1 ? score / 100 : score) * 100)))
             const isAdded = !!existingAppsByCandidateId[m.candidate_id]
             const isPending = !!pendingCandidateIds[m.candidate_id]
             const addedStage = existingAppsByCandidateId[m.candidate_id]?.status || ""
@@ -670,24 +670,28 @@ export default function MatchesClient({ jobId }: { jobId: string }) {
             return (
               <Card
                 key={`${m.job_id}-${m.candidate_id}`}
-                className={`hover:shadow-md transition-all border-l-4 border-l-transparent hover:border-l-blue-500 ${isSelected ? "ring-2 ring-blue-200" : ""}`}
+                className={`hover:shadow-xl transition-all duration-300 border-l-4 border-l-transparent hover:border-l-blue-500 ${isSelected ? "ring-2 ring-blue-300 bg-blue-50/30" : ""}`}
               >
                 <CardContent className="p-4">
                   <div className="flex flex-col sm:flex-row gap-4 items-start">
                     {/* Avatar Section */}
-                    <div className="flex-shrink-0">
-                        <div className="flex items-center gap-2 mb-2">
+                    <div className="flex-shrink-0 flex flex-col items-center gap-2">
+                        <div className="flex items-center gap-2">
                           <Checkbox checked={isSelected} onCheckedChange={(v) => toggleSelected(m.candidate_id, Boolean(v))} />
-                          <div className="text-xs text-gray-500">Select</div>
+                          <div className="text-xs text-gray-500 font-medium">Select</div>
                         </div>
-                         <Avatar className="h-12 w-12 border-2 border-white shadow-sm">
-                            <AvatarFallback className={`text-white ${getAvatarColor(score)}`}>
+                         <Avatar className="h-16 w-16 border-2 border-gray-100 shadow-md">
+                            <AvatarFallback className={`text-white font-bold text-lg ${getAvatarColor(score > 1 ? score / 100 : score)}`}>
                                 {candidate.name?.substring(0, 2).toUpperCase() || "CN"}
                             </AvatarFallback>
                         </Avatar>
-                        <div className="mt-2 text-center">
-                            <Badge variant={score >= 0.8 ? "default" : score >= 0.5 ? "secondary" : "outline"} className="text-[10px] px-1 h-5">
-                                {matchPercentage}%
+                        <div className="text-center">
+                            <Badge variant={matchPercentage >= 80 ? "default" : matchPercentage >= 50 ? "secondary" : "outline"} className={`text-xs px-3 py-1 h-7 font-semibold ${
+                              matchPercentage >= 80 ? "bg-green-600 hover:bg-green-700" : 
+                              matchPercentage >= 50 ? "bg-yellow-500 hover:bg-yellow-600" : 
+                              "bg-gray-500 hover:bg-gray-600"
+                            }`}>
+                                {matchPercentage}% Match
                             </Badge>
                         </div>
                     </div>
@@ -696,15 +700,15 @@ export default function MatchesClient({ jobId }: { jobId: string }) {
                     <div className="flex-grow min-w-0 space-y-1">
                         <div className="flex justify-between items-start">
                             <div>
-                                <h3 className="font-semibold text-base truncate pr-2">{candidate.name || "Unknown Candidate"}</h3>
-                                <div className="flex items-center text-sm text-gray-500 mt-1">
-                                    <Briefcase className="h-3.5 w-3.5 mr-1" />
-                                    <span className="truncate max-w-[200px]">{candidate.current_role || "No role"}</span>
-                                </div>
-                                <div className="flex items-center text-sm text-gray-500 mt-0.5">
-                                    <MapPin className="h-3.5 w-3.5 mr-1" />
-                                    <span className="truncate">{candidate.location || "No location"}</span>
-                                </div>
+                                <h3 className="font-semibold text-lg truncate pr-2 text-gray-900">{candidate.name || "Unknown Candidate"}</h3>
+                              <div className="flex items-center text-sm text-gray-600 mt-1">
+                                <Briefcase className="h-4 w-4 mr-1.5 text-blue-500" />
+                                <span className="truncate max-w-[250px] font-medium">{candidate.currentRole || candidate.current_role || "No role listed"}</span>
+                              </div>
+                              <div className="flex items-center text-sm text-gray-500 mt-1">
+                                <MapPin className="h-4 w-4 mr-1.5 text-green-500" />
+                                <span className="truncate">{candidate.location || "No location listed"}</span>
+                              </div>
                             </div>
                             
                             <div className="flex gap-2 flex-shrink-0">
@@ -874,15 +878,20 @@ export default function MatchesClient({ jobId }: { jobId: string }) {
                         )}
 
                         {/* Skills/Tags if available (Fallback) */}
-                        {(!(m.matching_keywords || candidate.matchingKeywords) || (m.matching_keywords || candidate.matchingKeywords).length === 0) && (candidate.skills || []).length > 0 && (
-                            <div className="flex flex-wrap gap-1 mt-2">
-                                {candidate.skills.slice(0, 3).map((skill: string, i: number) => (
-                                    <Badge key={i} variant="secondary" className="text-[10px] px-1.5 py-0 h-5 font-normal bg-gray-100 text-gray-600 hover:bg-gray-200">
+                        {(!(m.matching_keywords || candidate.matchingKeywords) || (m.matching_keywords || candidate.matchingKeywords).length === 0) && ((candidate.technicalSkills || candidate.technical_skills || []).length > 0 || (candidate.softSkills || candidate.soft_skills || []).length > 0) && (
+                            <div className="flex flex-wrap gap-1.5 mt-3">
+                                {((candidate.technicalSkills || candidate.technical_skills || []) as string[]).slice(0, 4).map((skill: string, i: number) => (
+                                    <Badge key={`tech-${i}`} variant="secondary" className="text-xs px-2 py-1 h-6 font-normal bg-blue-50 text-blue-700 border border-blue-100">
                                         {skill}
                                     </Badge>
                                 ))}
-                                {candidate.skills.length > 3 && (
-                                    <span className="text-[10px] text-gray-400 self-center">+{candidate.skills.length - 3} more</span>
+                                {((candidate.softSkills || candidate.soft_skills || []) as string[]).slice(0, 2).map((skill: string, i: number) => (
+                                    <Badge key={`soft-${i}`} variant="secondary" className="text-xs px-2 py-1 h-6 font-normal bg-purple-50 text-purple-700 border border-purple-100">
+                                        {skill}
+                                    </Badge>
+                                ))}
+                                {((candidate.technicalSkills || candidate.technical_skills || []).length + (candidate.softSkills || candidate.soft_skills || []).length) > 6 && (
+                                    <span className="text-xs text-gray-400 self-center">+{((candidate.technicalSkills || candidate.technical_skills || []).length + (candidate.softSkills || candidate.soft_skills || []).length) - 6} more</span>
                                 )}
                             </div>
                         )}

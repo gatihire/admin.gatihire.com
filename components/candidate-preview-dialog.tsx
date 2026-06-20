@@ -491,8 +491,8 @@ export function CandidatePreviewDialog({
                   Assign to Job
                 </Button>
                 {showRelevanceScore && safeCandidate.relevanceScore !== undefined && (
-                  <Badge className={`${getRelevanceColor(safeCandidate.relevanceScore)} font-medium text-sm px-3 py-1`}>
-                    {getRelevanceLabel(safeCandidate.relevanceScore)} ({Math.round(safeCandidate.relevanceScore * 100)}%)
+                  <Badge className={`${getRelevanceColor(safeCandidate.relevanceScore > 1 ? safeCandidate.relevanceScore / 100 : safeCandidate.relevanceScore)} font-medium text-sm px-3 py-1`}>
+                    {getRelevanceLabel(safeCandidate.relevanceScore > 1 ? safeCandidate.relevanceScore / 100 : safeCandidate.relevanceScore)} ({Math.max(0, Math.min(100, Math.round((safeCandidate.relevanceScore > 1 ? safeCandidate.relevanceScore / 100 : safeCandidate.relevanceScore) * 100)))}%)
                   </Badge>
                 )}
                 <Badge className={`${getStatusColor(safeCandidate.status)} font-medium text-sm px-3 py-1`}>

@@ -144,7 +144,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
         .eq("job_id", id)
         .order("relevance_score", { ascending: false })
         .limit(cacheLimit)
-      cached = cachedData || []
+      // Normalize relevance_score to be between 0 and 1
+      cached = (cachedData || []).map(match => ({
+        ...match,
+        relevance_score: Math.max(0, Math.min(1, match.relevance_score > 1 ? match.relevance_score / 100 : match.relevance_score))
+      }))
     } catch (_ignore) {
       cached = []
     }
@@ -199,7 +203,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       matches = rankedTop.map((c: any) => ({
         job_id: id,
         candidate_id: c.id,
-        relevance_score: c.match_score || 0,
+        relevance_score: Math.max(0, Math.min(1, (c.match_score || 0) / 100)),
         match_summary: null,
         score_breakdown: null,
         matching_keywords: [],

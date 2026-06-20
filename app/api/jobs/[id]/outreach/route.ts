@@ -256,8 +256,7 @@ Return ONLY valid JSON:
     }
 
     // Generate unique links and send messages
-    const messagesToSend = []
-    const outreachRecords = []
+    const outreachRecords: any[] = []
     let messagesSent = 0
     let emailSentCount = 0
     let whatsappSentCount = 0
@@ -267,140 +266,187 @@ Return ONLY valid JSON:
     const outreachEmailTemplate = templates.outreach_email
     const outreachWhatsappTemplate = templates.outreach_whatsapp
 
-    for (const candidate of outreachCandidates) {
-      // Generate unique application link
-      const uniqueToken = crypto.randomBytes(16).toString("hex")
-      const base = getBoardAppBaseUrl()
-      const generatedLink = `${base}/apply/${id}?token=${uniqueToken}`
-      const uniqueLink = mode === "resend" ? (existingLinkByCandidateId.get(String(candidate.id)) || generatedLink) : generatedLink
+    // Helper to process a single candidate
+    const processCandidate = async (candidate: any) => {
+      const candidateRecords: any[] = []
+      let candidateMessagesSent = 0
+      
+      try {
+        // Generate unique application link
+        const uniqueToken = crypto.randomBytes(16).toString("hex")
+        const base = getBoardAppBaseUrl()
+        const generatedLink = `${base}/apply/${id}?token=${uniqueToken}`
+        const uniqueLink = mode === "resend" ? (existingLinkByCandidateId.get(String(candidate.id)) || generatedLink) : generatedLink
 
-      const variables = {
-        candidate_name: candidate.name || "there",
-        job_title: job.title,
-        company_name: job.client_name || "Truckinzy",
-        apply_link: uniqueLink,
-        match_score: `${Math.round(candidate.match_score * 100)}%`,
-        skills: candidate.matched_skills.slice(0, 6).join(", ")
-      }
-      const whatsappMessageContent = renderTemplate(outreachWhatsappTemplate.body, variables, false)
-      const emailHtml = renderTemplate(outreachEmailTemplate.body, variables, true)
-      const emailSubject = renderTemplate(
-        outreachEmailTemplate.subject || "Truckinzy: Apply for {{job_title}}",
-        variables,
-        true
-      )
+        const variables = {
+          candidate_name: candidate.name || "there",
+          job_title: job.title,
+          company_name: job.client_name || "Truckinzy",
+          apply_link: uniqueLink,
+          match_score: `${Math.round(candidate.match_score * 100)}%`,
+          skills: candidate.matched_skills.slice(0, 6).join(", ")
+        }
+        const whatsappMessageContent = renderTemplate(outreachWhatsappTemplate.body, variables, false)
+        const emailHtml = renderTemplate(outreachEmailTemplate.body, variables, true)
+        const emailSubject = renderTemplate(
+          outreachEmailTemplate.subject || "Truckinzy: Apply for {{job_title}}",
+          variables,
+          true
+        )
 
-      // Send WhatsApp message if enabled
-      if (messagingPreference === "whatsapp" || messagingPreference === "both") {
-        if (candidate.phone) {
-          const templateParams = buildTemplateParams(outreachWhatsappTemplate?.metadata?.paramOrder || undefined, variables)
-          const whatsappResult = await aisensyService.sendWhatsAppMessage(
-            {
-              phoneNumber: candidate.phone,
-              candidateName: candidate.name,
-              jobTitle: job.title,
-              companyName: job.client_name || "Truckinzy",
-              uniqueLink
-            },
-            {
-              campaignName: outreachWhatsappTemplate?.metadata?.campaignName,
-              templateParams
+        // Send WhatsApp message if enabled
+        if (messagingPreference === "whatsapp" || messagingPreference === "both") {
+          if (candidate.phone) {
+            try {
+              const templateParams = buildTemplateParams(outreachWhatsappTemplate?.metadata?.paramOrder || undefined, variables)
+              const whatsappResult = await aisensyService.sendWhatsAppMessage(
+                {
+                  phoneNumber: candidate.phone,
+                  candidateName: candidate.name,
+                  jobTitle: job.title,
+                  companyName: job.client_name || "Truckinzy",
+                  uniqueLink
+                },
+                {
+                  campaignName: outreachWhatsappTemplate?.metadata?.campaignName,
+                  templateParams
+                }
+              )
+
+              logger.info(`WhatsApp attempt for ${candidate.phone}: success=${whatsappResult.success} error=${whatsappResult.error}`, { 
+                candidateId: candidate.id, 
+                phone: candidate.phone 
+              })
+
+              if (whatsappResult.success) {
+                candidateMessagesSent++
+                candidateRecords.push({
+                  job_id: id,
+                  candidate_id: candidate.id,
+                  message_type: "whatsapp",
+                  recipient_contact: candidate.phone,
+                  message_content: whatsappMessageContent,
+                  unique_link: uniqueLink,
+                  status: "sent",
+                  sent_at: new Date().toISOString(),
+                  created_by: ctx.authUser.id
+                })
+              } else {
+                candidateRecords.push({
+                  job_id: id,
+                  candidate_id: candidate.id,
+                  message_type: "whatsapp",
+                  recipient_contact: candidate.phone,
+                  message_content: whatsappMessageContent,
+                  unique_link: uniqueLink,
+                  status: "failed",
+                  error_message: whatsappResult.error,
+                  created_at: new Date().toISOString(),
+                  created_by: ctx.authUser.id
+                })
+              }
+            } catch (e: any) {
+              logger.error(`Error sending WhatsApp to ${candidate.phone}`, e)
+              candidateRecords.push({
+                job_id: id,
+                candidate_id: candidate.id,
+                message_type: "whatsapp",
+                recipient_contact: candidate.phone,
+                unique_link: generatedLink,
+                status: "failed",
+                error_message: e?.message || "Failed to send WhatsApp",
+                created_at: new Date().toISOString(),
+                created_by: ctx.authUser.id
+              })
             }
-          )
+          }
+        }
 
-          logger.info(`WhatsApp attempt for ${candidate.phone}: success=${whatsappResult.success} error=${whatsappResult.error}`, { 
-             candidateId: candidate.id, 
-             phone: candidate.phone 
-          })
-
-          if (whatsappResult.success) {
-            messagesSent++
-            whatsappSentCount++
-            outreachRecords.push({
+        // Send email if enabled
+        if (messagingPreference === "email" || messagingPreference === "both") {
+          if (!emailFrom) {
+            candidateRecords.push({
               job_id: id,
               candidate_id: candidate.id,
-              message_type: "whatsapp",
-              recipient_contact: candidate.phone,
-              message_content: whatsappMessageContent,
-              unique_link: uniqueLink,
-              status: "sent",
-              sent_at: new Date().toISOString(),
+              message_type: "email",
+              recipient_contact: candidate.email,
+              message_content: emailHtml,
+              unique_link: generatedLink,
+              status: "failed",
+              error_message: "Missing OUTREACH_FROM/POSTMARK_FROM",
+              created_at: new Date().toISOString(),
               created_by: ctx.authUser.id
             })
           } else {
-            outreachRecords.push({
-              job_id: id,
-              candidate_id: candidate.id,
-              message_type: "whatsapp",
-              recipient_contact: candidate.phone,
-              message_content: whatsappMessageContent,
-              unique_link: uniqueLink,
-              status: "failed",
-              error_message: whatsappResult.error,
-              created_at: new Date().toISOString(),
-              created_by: ctx.authUser.id
-            })
+            try {
+              await sendOutreachEmail({
+                to: candidate.email,
+                from: emailFrom,
+                subject: emailSubject,
+                jobTitle: job.title,
+                applyLink: uniqueLink,
+                candidateName: candidate.name,
+                matchScorePercent: Math.round(candidate.match_score * 100),
+                matchedSkills: candidate.matched_skills,
+                html: emailHtml
+              })
+
+              candidateMessagesSent++
+              candidateRecords.push({
+                job_id: id,
+                candidate_id: candidate.id,
+                message_type: "email",
+                recipient_contact: candidate.email,
+                message_content: emailHtml,
+                unique_link: uniqueLink,
+                status: "sent",
+                sent_at: new Date().toISOString(),
+                created_at: new Date().toISOString(),
+                created_by: ctx.authUser.id
+              })
+            } catch (e: any) {
+              logger.error(`Error sending email to ${candidate.email}`, e)
+              candidateRecords.push({
+                job_id: id,
+                candidate_id: candidate.id,
+                message_type: "email",
+                recipient_contact: candidate.email,
+                message_content: emailHtml,
+                unique_link: generatedLink,
+                status: "failed",
+                error_message: e?.message || "Failed to send email",
+                created_at: new Date().toISOString(),
+                created_by: ctx.authUser.id
+              })
+            }
           }
         }
+      } catch (e: any) {
+        logger.error(`Error processing candidate ${candidate.id}`, e)
       }
 
-      // Send email if enabled
-      if (messagingPreference === "email" || messagingPreference === "both") {
-        if (!emailFrom) {
-          outreachRecords.push({
-            job_id: id,
-            candidate_id: candidate.id,
-            message_type: "email",
-            recipient_contact: candidate.email,
-            message_content: emailHtml,
-            unique_link: uniqueLink,
-            status: "failed",
-            error_message: "Missing OUTREACH_FROM/POSTMARK_FROM",
-            created_at: new Date().toISOString(),
-            created_by: ctx.authUser.id
-          })
-        } else {
-          try {
-            await sendOutreachEmail({
-              to: candidate.email,
-              from: emailFrom,
-              subject: emailSubject,
-              jobTitle: job.title,
-              applyLink: uniqueLink,
-              candidateName: candidate.name,
-              matchScorePercent: Math.round(candidate.match_score * 100),
-              matchedSkills: candidate.matched_skills,
-              html: emailHtml
-            })
+      return { records: candidateRecords, messagesSent: candidateMessagesSent }
+    }
 
-            messagesSent++
-            emailSentCount++
-            outreachRecords.push({
-              job_id: id,
-              candidate_id: candidate.id,
-              message_type: "email",
-              recipient_contact: candidate.email,
-              message_content: emailHtml,
-              unique_link: uniqueLink,
-              status: "sent",
-              sent_at: new Date().toISOString(),
-              created_at: new Date().toISOString(),
-              created_by: ctx.authUser.id
-            })
-          } catch (e: any) {
-            outreachRecords.push({
-              job_id: id,
-              candidate_id: candidate.id,
-              message_type: "email",
-              recipient_contact: candidate.email,
-              message_content: emailHtml,
-              unique_link: uniqueLink,
-              status: "failed",
-              error_message: e?.message || "Failed to send email",
-              created_at: new Date().toISOString(),
-              created_by: ctx.authUser.id
-            })
-          }
+    // Process candidates with concurrency control (5 at a time)
+    const concurrencyLimit = 5
+    const results: Array<{ records: any[], messagesSent: number }> = []
+    
+    for (let i = 0; i < outreachCandidates.length; i += concurrencyLimit) {
+      const batch = outreachCandidates.slice(i, i + concurrencyLimit)
+      const batchResults = await Promise.all(batch.map(processCandidate))
+      results.push(...batchResults)
+    }
+
+    // Aggregate results
+    for (const result of results) {
+      outreachRecords.push(...result.records)
+      messagesSent += result.messagesSent
+      // Count email vs whatsapp sent
+      for (const record of result.records) {
+        if (record.status === "sent") {
+          if (record.message_type === "email") emailSentCount++
+          if (record.message_type === "whatsapp") whatsappSentCount++
         }
       }
     }
