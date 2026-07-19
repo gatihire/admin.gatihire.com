@@ -212,50 +212,57 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       }))
       cachedMatches = matches.length
 
-      // Do NOT persist to database when refresh is true (per user request)
-      if (!forceRefresh) {
-        try {
-          if (forceRefresh) {
-            await supabaseAdmin.from("job_matches").delete().eq("job_id", id)
-          }
-          const { error: insertError } = await supabaseAdmin
-            .from("job_matches")
-            .upsert(matches, { onConflict: "job_id,candidate_id" })
-          if (insertError) {
-            // If matching_keywords column is missing, retry without it
-            if ((insertError as any)?.code === 'PGRST204' || insertError.message.includes("matching_keywords")) {
-              console.warn("Retrying upsert without matching_keywords column...")
-              const matchesNoKeywords = matches.map(({ matching_keywords, ...rest }: any) => rest)
-              const { error: retryError } = await supabaseAdmin
-                .from("job_matches")
-                .upsert(matchesNoKeywords, { onConflict: "job_id,candidate_id" })
-              
-              if (retryError) console.warn("Retry failed:", retryError.message)
-            } else {
-              console.warn("job_matches upsert failed:", insertError.message)
-            }
-          }
-        } catch (_ignore) {}
+      // Always persist recomputed matches — a "refresh" that isn't written back
+      // just means the very next page navigation (which reads job_matches with
+      // no refresh param) hits an empty/stale cache, triggers its OWN
+      // independent recompute, and overwrites the cache with a different
+      // (LLM/embedding nondeterminism) score set than what refresh just showed.
+      // That's what produced the "page 2 drops, page 1 goes to 0%" bug — every
+      // read must serve the SAME persisted numbers, and only an explicit
+      // recompute (refresh, or an empty cache) should ever write new ones.
+      try {
+        if (forceRefresh) {
+          // Full replace on refresh, not a merge-upsert: otherwise candidates
+          // that no longer match linger in the cache from a wider older run.
+          await supabaseAdmin.from("job_matches").delete().eq("job_id", id)
+        }
+        const { error: insertError } = await supabaseAdmin
+          .from("job_matches")
+          .upsert(matches, { onConflict: "job_id,candidate_id" })
+        if (insertError) {
+          // If matching_keywords column is missing, retry without it
+          if ((insertError as any)?.code === 'PGRST204' || insertError.message.includes("matching_keywords")) {
+            console.warn("Retrying upsert without matching_keywords column...")
+            const matchesNoKeywords = matches.map(({ matching_keywords, ...rest }: any) => rest)
+            const { error: retryError } = await supabaseAdmin
+              .from("job_matches")
+              .upsert(matchesNoKeywords, { onConflict: "job_id,candidate_id" })
 
-        try {
-          await supabaseAdmin
-            .from("job_match_runs")
-            .upsert(
-              {
-                job_id: id,
-                total_matches: totalMatches,
-                cached_matches: cachedMatches,
-                per_page: perPage,
-                max_pages: maxPages,
-                candidate_ids: orderedCandidateIds as any,
-                requirements: storedRequirements as any,
-                last_matched_at: new Date().toISOString(),
-                updated_at: new Date().toISOString(),
-              },
-              { onConflict: "job_id" }
-            )
-        } catch (_ignore) {}
-      }
+            if (retryError) console.warn("Retry failed:", retryError.message)
+          } else {
+            console.warn("job_matches upsert failed:", insertError.message)
+          }
+        }
+      } catch (_ignore) {}
+
+      try {
+        await supabaseAdmin
+          .from("job_match_runs")
+          .upsert(
+            {
+              job_id: id,
+              total_matches: totalMatches,
+              cached_matches: cachedMatches,
+              per_page: perPage,
+              max_pages: maxPages,
+              candidate_ids: orderedCandidateIds as any,
+              requirements: storedRequirements as any,
+              last_matched_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            },
+            { onConflict: "job_id" }
+          )
+      } catch (_ignore) {}
     }
 
     if (idsOnly) {
