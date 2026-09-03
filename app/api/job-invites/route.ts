@@ -314,9 +314,8 @@ async function processSingleInvite({
           })
         }
         if (outreachRecords.length > 0) {
-          await supabaseAdmin.from("outreach_messages").insert(outreachRecords).catch(err => {
-            console.error("Failed to insert outreach messages:", err)
-          })
+          const { error: outreachInsertError } = await supabaseAdmin.from("outreach_messages").insert(outreachRecords)
+          if (outreachInsertError) console.error("Failed to insert outreach messages:", outreachInsertError)
         }
 
         return {
@@ -445,9 +444,8 @@ async function processSingleInvite({
     })
   }
   if (outreachRecords.length > 0) {
-    await supabaseAdmin.from("outreach_messages").insert(outreachRecords).catch(err => {
-      console.error("Failed to insert outreach messages:", err)
-    })
+    const { error: outreachError } = await supabaseAdmin.from("outreach_messages").insert(outreachRecords)
+    if (outreachError) console.error("Failed to insert outreach messages:", outreachError)
   }
 
   return {
@@ -525,7 +523,7 @@ export async function POST(request: NextRequest) {
     const concurrencyLimit = 5
     for (let i = 0; i < candidateIds.length; i += concurrencyLimit) {
       const batch = candidateIds.slice(i, i + concurrencyLimit)
-      const batchResults = await Promise.all(batch.map(async cId => {
+      const batchResults = await Promise.all(batch.map(async (cId: string) => {
         try {
           const res = await processSingleInvite({
             jobId,

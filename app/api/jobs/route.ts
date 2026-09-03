@@ -3,6 +3,7 @@ import { supabaseAdmin } from "@/lib/supabase"
 import { parseSearchRequirement, intelligentCandidateSearch } from "@/lib/intelligent-search"
 import { SupabaseCandidateService } from "@/lib/supabase-candidates"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
+import { bumpJobsSearchRevision } from "@/lib/jobsCacheRevision"
 
 export async function GET(request: NextRequest) {
   const ctx = await getInternalAuthContext(request)
@@ -24,8 +25,8 @@ export async function GET(request: NextRequest) {
     const q = (searchParams.get("search") || "").trim()
 
     let query = supabaseAdmin.from("jobs").select("*", { count: paginate ? "exact" : undefined as any })
-    // Prefer explicit prioritization if available, then newest first.
-    query = query.order("priority_rank", { ascending: true, nullsFirst: true }).order("created_at", { ascending: false })
+    // Newest first (client also sorts, but this ensures consistent base order)
+    query = query.order("created_at", { ascending: false })
 
     if (status && status !== "all") {
       query = query.eq("status", status)
@@ -186,6 +187,8 @@ export async function POST(request: NextRequest) {
     }
 
     const jobId = data.id
+
+    void bumpJobsSearchRevision()
 
     if (Array.isArray(sections) && sections.length > 0) {
       try {

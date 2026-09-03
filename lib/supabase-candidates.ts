@@ -328,6 +328,7 @@ export class SupabaseCandidateService {
         .from('candidates')
         .select('*')
         .order('uploaded_at', { ascending: false })
+        .or('source.is.null,source.neq.juicebox')
 
       queryBuilder = this.applyInternalUserExclusions(queryBuilder, filters)
       const { data, error } = await queryBuilder
@@ -435,6 +436,7 @@ export class SupabaseCandidateService {
         .from('candidates')
         .select('*', { count: 'exact' })
         .order(sortBy, { ascending: sortOrder === 'asc' })
+        .or('source.is.null,source.neq.juicebox')
 
       // Apply status filter if not 'all'
       if (status && status !== 'all') {

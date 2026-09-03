@@ -237,8 +237,8 @@ export function AssignJobDialog({ candidateId, open, onOpenChange, candidateName
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="applied">Applied</SelectItem>
+                  <SelectItem value="ai_screen">AI Screen</SelectItem>
                   <SelectItem value="shortlist">Shortlist</SelectItem>
-                  <SelectItem value="screening">Screening</SelectItem>
                   <SelectItem value="interview">Interview</SelectItem>
                   <SelectItem value="offer">Offer</SelectItem>
                   <SelectItem value="hired">Hired</SelectItem>

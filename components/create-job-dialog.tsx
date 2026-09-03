@@ -132,12 +132,6 @@ export function CreateJobDialog({ onJobCreated, open, onOpenChange, trigger, job
   const [internalOpen, setInternalOpen] = useState(false)
   const [industryOpen, setIndustryOpen] = useState(false)
   const [generateHintOpen, setGenerateHintOpen] = useState(false)
-  const [outreachProgressOpen, setOutreachProgressOpen] = useState(false)
-  const [outreachProgressTitle, setOutreachProgressTitle] = useState<string>("")
-  const [outreachProgressDetail, setOutreachProgressDetail] = useState<string>("")
-  const [outreachProgressJobId, setOutreachProgressJobId] = useState<string>("")
-  const [outreachProgressCounts, setOutreachProgressCounts] = useState<{ email: number; whatsapp: number; total: number } | null>(null)
-  const [outreachProgressError, setOutreachProgressError] = useState<string | null>(null)
   const [minRequirements, setMinRequirements] = useState("")
   const [mustSkillInput, setMustSkillInput] = useState("")
   const [goodSkillInput, setGoodSkillInput] = useState("")
@@ -370,49 +364,8 @@ export function CreateJobDialog({ onJobCreated, open, onOpenChange, trigger, job
         description: jobId ? "Job updated successfully" : "Job created successfully",
       })
 
-      const createdJobId = String(created?.id || "")
-      const shouldAutoOutreach = !jobId && !formData.is_external_link && formData.auto_matchmaking_enabled && (formData.messaging_preferences === "email" || formData.messaging_preferences === "whatsapp" || formData.messaging_preferences === "both")
-      const pref = formData.messaging_preferences
-
       setIsOpen(false)
       onJobCreated()
-
-      if (shouldAutoOutreach && createdJobId) {
-        setOutreachProgressOpen(true)
-        setOutreachProgressJobId(createdJobId)
-        setOutreachProgressCounts(null)
-        setOutreachProgressError(null)
-        setOutreachProgressTitle("Finding relevant candidates")
-        setOutreachProgressDetail("Preparing to send outreach messages…")
-
-        try {
-          setOutreachProgressTitle("Preparing messages")
-          const outRes = await fetch(`/api/jobs/${createdJobId}/outreach`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              jobId: createdJobId,
-              messagingPreference: pref,
-              autoMatchmaking: true,
-            })
-          })
-
-          const outData = await outRes.json().catch(() => null)
-          if (!outRes.ok) throw new Error(outData?.error || "Failed to send outreach")
-
-          const emailCount = Number(outData?.sent_by_channel?.email || 0)
-          const whatsappCount = Number(outData?.sent_by_channel?.whatsapp || 0)
-          const total = Number(outData?.messages_sent || emailCount + whatsappCount || 0)
-
-          setOutreachProgressCounts({ email: emailCount, whatsapp: whatsappCount, total })
-          setOutreachProgressTitle("Outreach completed")
-          setOutreachProgressDetail(`Sent ${total} messages (${emailCount} email, ${whatsappCount} WhatsApp).`)
-        } catch (e: any) {
-          setOutreachProgressTitle("Outreach failed")
-          setOutreachProgressDetail("Could not send outreach messages.")
-          setOutreachProgressError(e?.message || "Failed")
-        }
-      }
 
       setFormData({
         title: "",
@@ -1172,48 +1125,6 @@ export function CreateJobDialog({ onJobCreated, open, onOpenChange, trigger, job
                 {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 Generate
               </Button>
-            </div>
-          </div>
-        </UiDialogContent>
-      </UiDialog>
-
-      <UiDialog open={outreachProgressOpen} onOpenChange={setOutreachProgressOpen}>
-        <UiDialogContent className="sm:max-w-[520px]">
-          <UiDialogHeader>
-            <UiDialogTitle>{outreachProgressTitle || "Outreach"}</UiDialogTitle>
-          </UiDialogHeader>
-          <div className="space-y-3">
-            <div className="text-sm text-muted-foreground">{outreachProgressDetail}</div>
-            {!outreachProgressCounts && !outreachProgressError ? (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                Working…
-              </div>
-            ) : null}
-            {outreachProgressCounts ? (
-              <div className="rounded-lg border bg-muted/30 p-3 text-sm">
-                <div>Total sent: {outreachProgressCounts.total}</div>
-                <div>Email: {outreachProgressCounts.email}</div>
-                <div>WhatsApp: {outreachProgressCounts.whatsapp}</div>
-              </div>
-            ) : null}
-            {outreachProgressError ? (
-              <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">{outreachProgressError}</div>
-            ) : null}
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={() => setOutreachProgressOpen(false)}>
-                Close
-              </Button>
-              {outreachProgressJobId ? (
-                <Button
-                  onClick={() => {
-                    setOutreachProgressOpen(false)
-                    window.open(`/jobs/${outreachProgressJobId}/outreach`, "_blank")
-                  }}
-                >
-                  View Dashboard
-                </Button>
-              ) : null}
             </div>
           </div>
         </UiDialogContent>

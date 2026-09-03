@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabase, supabaseAdmin } from "@/lib/supabase"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
+import { deriveOrigin } from "@/lib/origin"
 
 export async function GET(request: NextRequest) {
   const ctx = await getInternalAuthContext(request)
@@ -51,7 +52,7 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json()
-    const { job_id, candidate_id, notes, status, source = "database", match_score } = body
+    const { job_id, candidate_id, notes, candidate_notes, status, source = "database", match_score, origin } = body
 
     if (!job_id || !candidate_id) {
       return NextResponse.json({ error: "Job ID and Candidate ID are required" }, { status: 400 })
@@ -76,7 +77,9 @@ export async function POST(request: NextRequest) {
         candidate_id,
         status: status || 'applied',
         notes,
+        candidate_notes,
         source,
+        origin: origin || deriveOrigin(source),
         match_score,
         created_by: ctx.authUser.id,
         applied_at: new Date().toISOString()
@@ -85,9 +88,9 @@ export async function POST(request: NextRequest) {
       .single()
 
     if (error) {
-      // Fallback: if 'source' or 'match_score' column doesn't exist yet, retry without them
-      if ((error as any)?.code === 'PGRST204' || String(error?.message || '').toLowerCase().includes("source") || String(error?.message || '').toLowerCase().includes("match_score")) {
-        // Try without match_score first if source exists
+      // Fallback: if 'source', 'origin', or 'match_score' column doesn't exist yet, retry without them
+      if ((error as any)?.code === 'PGRST204' || String(error?.message || '').toLowerCase().includes("source") || String(error?.message || '').toLowerCase().includes("origin") || String(error?.message || '').toLowerCase().includes("match_score")) {
+        // Try without match_score and origin first
         const { data: dataNoScore, error: errNoScore } = await supabaseAdmin
             .from("applications")
             .insert({
@@ -95,6 +98,7 @@ export async function POST(request: NextRequest) {
                 candidate_id,
                 status: status || 'applied',
                 notes,
+                candidate_notes,
                 source,
                 created_by: ctx.authUser.id,
                 applied_at: new Date().toISOString()
@@ -112,6 +116,7 @@ export async function POST(request: NextRequest) {
             candidate_id,
             status: status || 'applied',
             notes,
+            candidate_notes,
             created_by: ctx.authUser.id,
             applied_at: new Date().toISOString()
           })

@@ -15,7 +15,7 @@ export async function POST(request: NextRequest) {
 
     const { data: existingMatch } = await supabaseAdmin
       .from("job_matches")
-      .select("match_summary")
+      .select("match_summary, relevance_score")
       .eq("job_id", jobId)
       .eq("candidate_id", candidateId)
       .maybeSingle()
@@ -57,6 +57,18 @@ export async function POST(request: NextRequest) {
 
     const model = genAI.getGenerativeModel({ model: DEFAULT_GEMINI_MODEL })
     
+    // Anchor the AI verdict to the match engine's score. job_matches stores
+    // relevance_score in mixed conventions (admin writes 0-1, client 0-100).
+    const rawRelevance = Number(existingMatch?.relevance_score ?? NaN)
+    const matchPct = Number.isFinite(rawRelevance)
+      ? Math.round(rawRelevance <= 1 ? rawRelevance * 100 : rawRelevance)
+      : null
+    const scoreContext = matchPct !== null
+      ? `Match engine score: ${matchPct}/100 (criteria-based: role fit, experience, location, skills).`
+      : "Match engine score: unavailable."
+    const mustHave = (Array.isArray(job.skills_must_have) ? job.skills_must_have : [])
+      .map(String).filter(Boolean).slice(0, 10)
+
     const prompt = `
 You are an expert recruiter. Write a SHORT, structured match analysis.
 
@@ -77,12 +89,17 @@ Rules:
 - Max 150 words total.
 - Use concrete job requirements (skills, location, experience).
 - If info is missing, say "Unknown" briefly.
+- Your Fit verdict must be consistent with the match engine score below:
+  Strong Match for ~75+, Potential Match for ~50-74, Risky below ~50.
+
+MATCH ENGINE CONTEXT:
+${scoreContext}
 
 JOB:
 - Title: ${job.title}
 - Location: ${[job.city, job.location].filter(Boolean).join(", ")}
 - Experience: ${job.experience_min_years || 0}-${job.experience_max_years || 0} years
-- Must-have skills: ${Array.isArray(job.skills_must_have) ? job.skills_must_have.join(", ") : ""}
+- Must-have skills: ${mustHave.join(", ") || "Not specified"}
 - Good-to-have skills: ${Array.isArray(job.skills_good_to_have) ? job.skills_good_to_have.join(", ") : ""}
 - JD: ${(job.description || "").substring(0, 350)}
 

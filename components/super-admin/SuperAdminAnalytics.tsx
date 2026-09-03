@@ -79,6 +79,12 @@ type OutreachResponse = {
   by_user: Record<string, { sent: number; delivered: number; opened: number; failed: number }>
 }
 
+type SourcingResponse = {
+  range: { from: string | null; to: string | null }
+  rows: Array<{ source: string; job_category: string; applied: number; shortlisted: number; interviewed: number; hired: number }>
+  by_source: Record<string, { applied: number; shortlisted: number; interviewed: number; hired: number }>
+}
+
 type TeamResponse = {
   range: { from: string; to: string }
   rows: Array<{

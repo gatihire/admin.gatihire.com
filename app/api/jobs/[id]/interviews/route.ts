@@ -23,7 +23,11 @@ async function ensureDefaultRounds(jobId: string) {
   ])
 }
 
-const ALLOWED_STATUSES = new Set(["pending", "waitlist", "on_hold", "passed", "move_next", "rejected"])
+const ALLOWED_STATUSES = new Set([
+  "pending", "waitlist", "on_hold", "passed", "move_next", "rejected",
+  "scheduled", "completed", "failed", "no_show",
+  "invite_sent", "confirmed", "rescheduled", "cancelled",
+])
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const ctx = await getInternalAuthContext(request)
@@ -88,7 +92,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
   const { data: interviews, error: interviewsErr } = await supabaseAdmin
     .from("job_interviews")
-    .select("id, round_id, application_id, status, scheduled_at, notes, created_at, updated_at")
+    .select("id, round_id, application_id, status, scheduled_at, notes, candidate_response, suggested_times, invite_sent_at, confirmed_at, whatsapp_message_id, created_at, updated_at")
     .in("round_id", roundIds)
 
   if (interviewsErr) return NextResponse.json({ error: interviewsErr.message }, { status: 500 })
@@ -132,6 +136,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   }
   if (typeof body?.notes === "string") patch.notes = body.notes
   if (typeof body?.scheduled_at === "string" || body?.scheduled_at === null) patch.scheduled_at = body.scheduled_at
+  if (typeof body?.suggested_times !== "undefined") patch.suggested_times = body.suggested_times
+  if (typeof body?.candidate_response === "string") patch.candidate_response = body.candidate_response
+  if (patch.status === "invite_sent") patch.invite_sent_at = now
+  if (patch.status === "confirmed") patch.confirmed_at = now
 
   const { data: existing } = await supabaseAdmin
     .from("job_interviews")
@@ -146,7 +154,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       .from("job_interviews")
       .update(patch)
       .eq("id", existing.id)
-      .select("id, round_id, application_id, status, scheduled_at, notes, created_at, updated_at")
+      .select("id, round_id, application_id, status, scheduled_at, notes, candidate_response, suggested_times, invite_sent_at, confirmed_at, created_at, updated_at")
       .single()
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
     saved = data
@@ -154,7 +162,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const { data, error } = await supabaseAdmin
       .from("job_interviews")
       .insert({ round_id: roundId, application_id: applicationId, ...patch, created_at: now })
-      .select("id, round_id, application_id, status, scheduled_at, notes, created_at, updated_at")
+      .select("id, round_id, application_id, status, scheduled_at, notes, candidate_response, suggested_times, invite_sent_at, confirmed_at, created_at, updated_at")
       .single()
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })

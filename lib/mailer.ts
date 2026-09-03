@@ -36,6 +36,24 @@ type SendEmailInput = {
   from: string
   subject: string
   html: string
+  cc?: string[]
+}
+
+type SendClientShortlistEmailInput = {
+  to: string
+  cc?: string[]
+  from: string
+  subject: string
+  clientName?: string | null
+  jobTitle?: string | null
+  location?: string | null
+  candidates: Array<{
+    name?: string | null
+    currentRole?: string | null
+    currentCompany?: string | null
+    fitScore?: number | null
+  }>
+  notes?: string | null
 }
 
 function getSmtpConfig() {
@@ -86,7 +104,8 @@ async function sendEmail(input: SendEmailInput) {
       from: input.from,
       to: input.to,
       subject: input.subject,
-      html: input.html
+      html: input.html,
+      ...(input.cc?.length ? { cc: input.cc.join(", ") } : {})
     })
 
     return { messageId: info.messageId }
@@ -99,6 +118,7 @@ async function sendEmail(input: SendEmailInput) {
       To: input.to,
       Subject: input.subject,
       HtmlBody: input.html,
+      ...(input.cc?.length ? { Cc: input.cc.join(", ") } : {}),
       MessageStream: messageStream || undefined
     })
     return { messageId: res.MessageID }
@@ -337,4 +357,75 @@ export async function sendOutreachEmail(input: SendOutreachEmailInput) {
   }
 
   return sendEmail({ to: input.to, from: input.from, subject: input.subject, html })
+}
+
+export async function sendRejectionEmail(input: {
+  to: string
+  from: string
+  subject: string
+  candidateName?: string | null
+  jobTitle?: string | null
+  companyName?: string | null
+  rejectionReason?: string | null
+  html?: string
+}) {
+  const candidateGreeting = input.candidateName ? `Hi ${escapeHtml(input.candidateName)},` : "Hi,"
+  const jobRef = input.jobTitle ? ` for the <strong>${escapeHtml(input.jobTitle)}</strong> position` : ""
+  const companyRef = input.companyName ? ` at <strong>${escapeHtml(input.companyName)}</strong>` : ""
+  const reasonText = input.rejectionReason ? `<p style="margin:0 0 12px;color:#374151">Reason: <strong>${escapeHtml(input.rejectionReason)}</strong></p>` : ""
+
+  const defaultHtml = `
+  <!DOCTYPE html>
+  <html>
+  <body style="font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;line-height:1.5;color:#111827;background:#f9fafb;padding:24px">
+    <div style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:12px;padding:32px;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
+      <p style="margin:0 0 16px">${candidateGreeting}</p>
+      <p style="margin:0 0 12px">Thank you for your interest in the role${jobRef}${companyRef}.</p>
+      <p style="margin:0 0 12px">After careful consideration, we regret to inform you that we will not be moving forward with your application at this time.</p>
+      ${reasonText}
+      <p style="margin:0 0 16px">We appreciate the time you invested in the process and wish you the very best in your job search and future endeavors.</p>
+      <p style="margin:0;color:#6b7280;font-size:13px">This is an automated message from GatiHire. Please do not reply directly to this email.</p>
+    </div>
+  </body>
+  </html>
+  `.trim()
+
+  let html = (input.html || "").trim()
+  if (!html) html = defaultHtml
+
+  return sendEmail({ to: input.to, from: input.from, subject: input.subject, html })
+}
+
+export async function sendClientShortlistEmail(input: SendClientShortlistEmailInput) {
+  const clientName = input.clientName || "the client"
+  const jobTitle = input.jobTitle || "the role"
+  const rows = input.candidates
+    .map((c) => {
+      const role = [c.currentRole, c.currentCompany].filter(Boolean).join(" at ")
+      const score = typeof c.fitScore === "number" ? ` &nbsp;&middot;&nbsp; <strong>Fit ${c.fitScore}/100</strong>` : ""
+      return `<li style="margin:8px 0"><strong>${escapeHtml(c.name || "Candidate")}</strong>${role ? ` &mdash; ${escapeHtml(role)}` : ""}${score}</li>`
+    })
+    .join("")
+
+  const defaultHtml = `
+  <div style="font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;line-height:1.5;color:#111827;max-width:620px">
+    <p style="margin:0 0 16px">Hi ${escapeHtml(clientName)},</p>
+    <p style="margin:0 0 16px">
+      Here is the shortlist for the <strong>${escapeHtml(jobTitle)}</strong>${input.location ? ` (${escapeHtml(input.location)})` : ""}.
+      Each candidate has cleared our AI screening round and is ready for the next interview round.
+    </p>
+    <ol style="margin:0 0 16px;padding-left:20px">${rows}</ol>
+    ${input.notes ? `<p style="margin:0 0 16px;color:#374151">${escapeHtml(input.notes)}</p>` : ""}
+    <p style="margin:0 0 8px">Review the profiles and share your approval to proceed with interviews.</p>
+    <p style="margin:0;color:#6b7280;font-size:13px">This email was sent by your Tzy recruitment partner. Your Account Manager and Tzy Recruiter are copied for continuity.</p>
+  </div>
+  `.trim()
+
+  return sendEmail({
+    to: input.to,
+    from: input.from,
+    subject: input.subject,
+    html: defaultHtml,
+    cc: input.cc,
+  })
 }

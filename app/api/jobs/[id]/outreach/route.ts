@@ -3,7 +3,8 @@ import { supabase, supabaseAdmin } from "@/lib/supabase"
 import { GoogleGenerativeAI } from "@google/generative-ai"
 import { generateEmbedding } from "@/lib/embedding"
 import { redis } from "@/lib/redis"
-import { calculateCandidateScore, applySidebarFilters } from "@/lib/scoring"
+import { calculateCandidateScore } from "@/lib/scoring"
+import { applySidebarFilters } from "@/lib/search-service"
 import crypto from "crypto"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { buildTemplateParams, loadMessageTemplates, renderTemplate } from "@/lib/message-templates"
@@ -135,7 +136,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       }
 
       if (!criteriaResult) {
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-latest" })
+        const model = genAI.getGenerativeModel({ model: process.env.GEMINI_MODEL || "gemini-2.5-flash" })
         const prompt = `Analyze this job description and extract key hiring criteria for candidate matching.
 JD: """${(job.description || "").slice(0, 3000)}"""
 Return ONLY valid JSON:
@@ -173,7 +174,7 @@ Return ONLY valid JSON:
       const { data, error } = await supabaseAdmin.rpc("search_candidates_hybrid", {
         p_query_text: websearchQ,
         p_query_embedding: embedding.length ? embedding : null,
-        p_match_threshold: 0.15,
+        p_match_threshold: 0.05,
         p_filters: rpcFilters,
         p_limit: 500,
         p_offset: 0
@@ -193,7 +194,10 @@ Return ONLY valid JSON:
         role: criteria.title,
         location: criteria.location,
         min_experience_years: criteria.min_experience_years,
-        skills: [...(criteria.required_skills || []), ...(criteria.preferred_skills || [])]
+        max_experience_years: criteria.max_experience_years,
+        skills: [...(criteria.required_skills || []), ...(criteria.preferred_skills || [])],
+        must_have_skills: criteria.required_skills || [],
+        good_to_have_skills: criteria.preferred_skills || [],
       }
 
       let results = (data || [])
@@ -243,7 +247,7 @@ Return ONLY valid JSON:
       }
 
       // Take top 150 candidates for outreach
-      outreachCandidates = results.slice(0, 150).map(candidate => ({
+      outreachCandidates = results.slice(0, 150).map((candidate: any) => ({
         id: candidate.id,
         name: candidate.name,
         email: candidate.email,

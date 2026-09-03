@@ -39,6 +39,8 @@ export default function Sidebar({ isHrUser = false, permissionKeys = [], isSuper
     if (path.startsWith("/clients/dashboard")) return "/clients/dashboard"
     if (path.startsWith("/clients/credit-requests")) return "/clients/credit-requests"
     if (path.startsWith("/clients/")) return "/clients"
+    if (path.startsWith("/jobs/")) return "/jobs"
+    if (path.startsWith("/candidates/")) return "/candidates"
     return path
   }, [pathname])
 

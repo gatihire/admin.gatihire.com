@@ -153,6 +153,8 @@ export interface Database {
           uploaded_by: string | null
           search_vector: any
           embedding: any // vector
+          source: string | null
+          source_profile_id: string | null
         }
         Insert: {
           id?: string
@@ -222,6 +224,8 @@ export interface Database {
           parsing_errors?: any[] | null
           uploaded_by?: string | null
           embedding?: any // vector(768)
+          source?: string | null
+          source_profile_id?: string | null
         }
         Update: {
           id?: string
@@ -291,6 +295,8 @@ export interface Database {
           parsing_errors?: any[] | null
           uploaded_by?: string | null
           embedding?: any // vector(768)
+          source?: string | null
+          source_profile_id?: string | null
         }
       }
       work_experience: {
@@ -329,6 +335,47 @@ export interface Database {
           end_date?: string | null
           is_current?: boolean
           created_at?: string
+        }
+      },
+      job_matches: {
+        Row: {
+          job_id: string
+          candidate_id: string
+          relevance_score: number | null
+          match_summary: string | null
+          score_breakdown: any | null
+          matching_keywords: any[] | null
+          matchingCriteria: any | null
+          match_score: number | null
+          source: string | null
+          created_at: string
+          updated_at: string | null
+        }
+        Insert: {
+          job_id: string
+          candidate_id: string
+          relevance_score?: number | null
+          match_summary?: string | null
+          score_breakdown?: any | null
+          matching_keywords?: any[] | null
+          matchingCriteria?: any | null
+          match_score?: number | null
+          source?: string | null
+          created_at?: string
+          updated_at?: string | null
+        }
+        Update: {
+          job_id?: string
+          candidate_id?: string
+          relevance_score?: number | null
+          match_summary?: string | null
+          score_breakdown?: any | null
+          matching_keywords?: any[] | null
+          matchingCriteria?: any | null
+          match_score?: number | null
+          source?: string | null
+          created_at?: string
+          updated_at?: string | null
         }
       }
       education: {

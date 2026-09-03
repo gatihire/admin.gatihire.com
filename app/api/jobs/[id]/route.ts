@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
+import { bumpJobsSearchRevision } from "@/lib/jobsCacheRevision"
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -87,6 +88,8 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
       return NextResponse.json({ error: error.message }, { status: 500 })
     }
 
+    void bumpJobsSearchRevision()
+
     if (sections && sections.length > 0) {
       try {
         await supabaseAdmin.from("job_sections").delete().eq("job_id", id)
@@ -130,6 +133,8 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 })
     }
+
+    void bumpJobsSearchRevision()
 
     return NextResponse.json({ message: "Job deleted successfully" })
   } catch (error) {
