@@ -90,15 +90,21 @@ function formatSalaryRange(job: any): string {
   return ""
 }
 
+type CallUserDataResult = {
+  userData: Record<string, unknown>
+  generatedQuestions: string[]
+  geminiPromptUsed: string
+}
+
 async function buildCallUserData(
   candidate: ScreeningCandidate,
   job: any,
   client: any,
   origin: string,
   participantId?: string
-): Promise<Record<string, unknown>> {
-  const questions = await generateJDQuestions(job, candidate as any)
-  return {
+): Promise<CallUserDataResult> {
+  const { questions, promptUsed } = await generateJDQuestions(job, candidate as any)
+  const userData = {
     candidate_name: candidate.name || "",
     current_role: candidate.current_role || "",
     current_company: candidate.current_company || "",
@@ -126,6 +132,7 @@ async function buildCallUserData(
     timezone: "",
     participant_id: participantId || "",
   }
+  return { userData, generatedQuestions: questions, geminiPromptUsed: promptUsed }
 }
 
 export interface OrchestrateScreeningInput {
@@ -217,7 +224,7 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
     const participantId = participantByCandidate.get(candidate.id)
 
     if (whatsappFirst) {
-      const userData = await buildCallUserData(candidate, job, client, origin, participantId)
+      const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(candidate, job, client, origin, participantId)
       const jobLink = `${getBoardAppBaseUrl()}/board/${job.id}`
       const outreachResult = await aisensyService.sendOutreachMessage(
         candidate.phone as string,
@@ -249,6 +256,17 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
             whatsapp_outbound_params: { jobTitle: job.title, location: job.city, salaryBudget: formatSalaryRange(job) },
             whatsapp_history: history,
             call_payload_json: userData,
+            generated_questions: generatedQuestions.join("\n"),
+            gemini_prompt_used: geminiPromptUsed,
+            screening_context: {
+              jobTitle: job.title,
+              clientName: job.client_name || client?.name || "",
+              origin,
+              salaryRange: formatSalaryRange(job),
+              mustHaveSkills: Array.isArray(job.skills_must_have) ? job.skills_must_have.join(", ") : job.skills_must_have || "",
+              experienceRange: `${job.experience_min_years ?? 0}-${job.experience_max_years ?? "any"}`,
+              location: job.city || "",
+            },
             updated_at: new Date().toISOString(),
           })
           .eq("campaign_id", campaign.id)
@@ -278,7 +296,7 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
       continue
     }
 
-    const userData = await buildCallUserData(candidate, job, client, origin, participantId)
+    const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(candidate, job, client, origin, participantId)
 
     // Pre-call WhatsApp: always send context so the candidate expects the call.
     // In call_now mode this is the only WhatsApp; in whatsapp_first mode the
@@ -314,6 +332,17 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
             whatsapp_sent_at: new Date().toISOString(),
             whatsapp_delivery_status: "sent",
             whatsapp_history: history,
+            generated_questions: generatedQuestions.join("\n"),
+            gemini_prompt_used: geminiPromptUsed,
+            screening_context: {
+              jobTitle: job.title,
+              clientName: job.client_name || client?.name || "",
+              origin,
+              salaryRange: formatSalaryRange(job),
+              mustHaveSkills: Array.isArray(job.skills_must_have) ? job.skills_must_have.join(", ") : job.skills_must_have || "",
+              experienceRange: `${job.experience_min_years ?? 0}-${job.experience_max_years ?? "any"}`,
+              location: job.city || "",
+            },
             updated_at: new Date().toISOString(),
           })
           .eq("campaign_id", campaign.id)
@@ -347,6 +376,17 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
           call_attempts: 1,
           last_attempt_at: new Date().toISOString(),
           call_payload_json: userData,
+          generated_questions: generatedQuestions.join("\n"),
+          gemini_prompt_used: geminiPromptUsed,
+          screening_context: {
+            jobTitle: job.title,
+            clientName: job.client_name || client?.name || "",
+            origin,
+            salaryRange: formatSalaryRange(job),
+            mustHaveSkills: Array.isArray(job.skills_must_have) ? job.skills_must_have.join(", ") : job.skills_must_have || "",
+            experienceRange: `${job.experience_min_years ?? 0}-${job.experience_max_years ?? "any"}`,
+            location: job.city || "",
+          },
           whatsapp_message_id: preCallMessageId,
           whatsapp_history: history,
           updated_at: new Date().toISOString(),

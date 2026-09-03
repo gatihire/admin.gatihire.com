@@ -84,21 +84,24 @@ function buildCandidateProfile(candidate: CandidateContext): string {
   return parts.join("\n")
 }
 
+export type QuestionGenerationResult = {
+  questions: string[]
+  promptUsed: string
+}
+
 export async function generateJDQuestions(
   job: JobContext,
   candidate: CandidateContext
-): Promise<string[]> {
+): Promise<QuestionGenerationResult> {
   const jobDescription = buildJobDescription(job)
   const candidateProfile = buildCandidateProfile(candidate)
   const resumeExcerpt = candidate.resume_text ? candidate.resume_text.slice(0, 3000) : ""
 
   if (!process.env.GEMINI_API_KEY) {
-    return buildFallbackQuestions(job, candidate)
+    return { questions: buildFallbackQuestions(job, candidate), promptUsed: "fallback" }
   }
 
-  try {
-    const model = genAI.getGenerativeModel({ model: MODEL })
-    const prompt = `You are a recruiter preparing a first-round phone screening for a candidate. Generate exactly 5 to 8 highly specific, job-relevant screening questions that probe the candidate's fit for the role.
+  const prompt = `You are a recruiter preparing a first-round phone screening for a candidate. Generate exactly 5 to 8 highly specific, job-relevant screening questions that probe the candidate's fit for the role.
 
 JOB DESCRIPTION:
 ${jobDescription || "(no job description available)"}
@@ -119,17 +122,19 @@ Requirements for the questions:
 
 Return ONLY a JSON array of strings, e.g. ["Question 1", "Question 2"]. No markdown, no code fences, no extra text.`
 
+  try {
+    const model = genAI.getGenerativeModel({ model: MODEL })
     const result = await model.generateContent(prompt)
     const text = result.response.text().trim().replace(/^```(json)?\s*/i, "").replace(/```$/, "").trim()
     const parsed = JSON.parse(text)
     if (Array.isArray(parsed) && parsed.length > 0) {
-      return parsed.map((q) => String(q)).slice(0, 8)
+      return { questions: parsed.map((q) => String(q)).slice(0, 8), promptUsed: prompt }
     }
   } catch (err: any) {
     logger.warn("JD question generation failed, using fallback", { error: err?.message })
   }
 
-  return buildFallbackQuestions(job, candidate)
+  return { questions: buildFallbackQuestions(job, candidate), promptUsed: prompt }
 }
 
 export function buildFallbackQuestions(
