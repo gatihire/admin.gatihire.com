@@ -20,7 +20,7 @@ import { CandidateActivityTimeline } from "./candidate-activity-timeline"
 import {
   Loader2, User, MapPin, Briefcase, Eye, Sparkles, Mail, Phone, ChevronDown, ChevronUp,
   PhoneCall, PhoneOff, CheckCircle, Clock, UserX, Play, Save, Filter, MessageCircle, Send,
-  AlertCircle, RefreshCw,
+  AlertCircle, RefreshCw, BrainCircuit,
 } from "lucide-react"
 import {
   AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription,
@@ -70,6 +70,8 @@ interface CandidateCardProps {
   aiInfo?: { recommendation?: string; score?: number }
   clientDecision?: string | null
   selected: boolean
+  isNew?: boolean
+  fitScore?: number
   callNowBusy?: boolean
   nudgeBusy?: boolean
   onCallNow?: () => void
@@ -268,12 +270,12 @@ const NEXT_ACTION_CONFIG: Record<string, { label: string; cta: string; icon: any
   rejected: null,
 }
 
-function getActionForCard(application: Application, callStatus?: string, participant?: any): { label: string; cta: string; icon: any; color: string; action: string } | null {
+function getActionForCard(application: Application, callStatus?: string, participant?: any): { label: string; cta: string; icon: any; color: string; action: string | null } | null {
   // If there's an active call sub-status, use that for more specific action
   if (application.status === "ai_screen" && callStatus) {
     if (callStatus === "call_done") return { label: "Screening complete — review call results and AI verdict", cta: "View Results", icon: CheckCircle, color: "bg-emerald-50 border-emerald-200 text-emerald-800", action: "view_results" }
-    if (callStatus === "calling") return { label: "AI call in progress — results will appear shortly", cta: "Calling...", icon: PhoneCall, color: "bg-amber-50 border-amber-200 text-amber-800", action: "view_results" }
-    if (callStatus === "whatsapp_sent") return { label: "WhatsApp sent — waiting for candidate to respond", cta: "Waiting", icon: Send, color: "bg-teal-50 border-teal-200 text-teal-800", action: "view_results" }
+    if (callStatus === "calling") return { label: "AI call in progress — results will appear shortly", cta: "In Progress", icon: PhoneCall, color: "bg-amber-50 border-amber-200 text-amber-800", action: null }
+    if (callStatus === "whatsapp_sent") return { label: "WhatsApp sent — waiting for candidate to respond", cta: "Waiting", icon: Send, color: "bg-teal-50 border-teal-200 text-teal-800", action: null }
     if (callStatus === "replied") return { label: "Candidate replied — ready to start AI call", cta: "Start Call", icon: PhoneCall, color: "bg-green-50 border-green-200 text-green-800", action: "start_call" }
     if (callStatus === "no_answer") {
       const retryCount = participant?.retry_count || 0
@@ -338,6 +340,10 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
   const [interviewLoading, setInterviewLoading] = useState(false)
   const [interviewDrafts, setInterviewDrafts] = useState<Record<string, { notes: string; scheduledAtLocal: string }>>({})
 
+  // Fit analysis state
+  const [fitScores, setFitScores] = useState<Record<string, number>>({})
+  const [viewedCandidates, setViewedCandidates] = useState<Set<string>>(new Set())
+
   const fetchParticipants = useCallback(async () => {
     try {
       const res = await fetch(`/api/phone-screening/participants?jobId=${jobId}`)
@@ -378,6 +384,30 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
     }, 30000)
     return () => clearInterval(interval)
   }, [callStatusByCandidate])
+
+  // Auto-fit: trigger fit analysis for candidates without scores
+  useEffect(() => {
+    if (!jobId || applications.length === 0) return
+    fetch(`/api/jobs/${jobId}/fit/auto`, { method: "POST" }).catch(() => {})
+  }, [jobId, applications.length])
+
+  // Fetch existing fit scores
+  useEffect(() => {
+    if (!jobId || applications.length === 0) return
+    const ids = applications.map(a => a.candidate_id).join(",")
+    fetch(`/api/jobs/${jobId}/fit?candidateIds=${ids}`)
+      .then(res => res.json())
+      .then(data => {
+        if (data.fits) {
+          const scores: Record<string, number> = {}
+          Object.entries(data.fits).forEach(([id, fit]: [string, any]) => {
+            if (fit.fit_score != null) scores[id] = fit.fit_score
+          })
+          setFitScores(scores)
+        }
+      })
+      .catch(() => {})
+  }, [jobId, applications])
 
   const fetchInterviews = useCallback(async () => {
     setInterviewLoading(true)
@@ -478,8 +508,16 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
       if (activeStage !== "ai_screen" || callSubFilter === "all") return true
       return (callStatusByCandidate[a.candidate_id] || "pending") === callSubFilter
     })
+    .sort((a, b) => {
+      // Sort by fit_score descending (best first), then by applied_at descending
+      const scoreA = fitScores[a.candidate_id] ?? -1
+      const scoreB = fitScores[b.candidate_id] ?? -1
+      if (scoreB !== scoreA) return scoreB - scoreA
+      return new Date(b.applied_at).getTime() - new Date(a.applied_at).getTime()
+    })
 
   const stageCount = (stageId: string) => applications.filter((a) => a.status === stageId).length
+  const totalFilteredCount = filtered.length
   const interviewApps = activeStage === "interview" ? applications.filter((a) => a.status === "interview") : []
   const interviewAppCount = interviewApps.length
 
@@ -607,6 +645,21 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
           animate={{ opacity: 1, y: 0 }}
           className="flex flex-wrap items-center gap-3 p-4 bg-white rounded-2xl border border-zinc-200 shadow-sm"
         >
+          <button
+            onClick={() => onStageSelect("all")}
+            className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold transition-all ${
+              activeStage === "all"
+                ? "bg-zinc-900 text-white shadow-md"
+                : "bg-zinc-50 text-zinc-700 hover:bg-zinc-100 border border-zinc-200"
+            }`}
+          >
+            <span>All</span>
+            <span className={`inline-flex items-center justify-center min-w-[20px] h-5 px-1.5 rounded-md text-[10px] font-bold ${
+              activeStage === "all" ? "bg-white/20 text-white" : "bg-zinc-200/80 text-zinc-600"
+            }`}>
+              {applications.length}
+            </span>
+          </button>
           {STATUS_COLUMNS.map((col) => {
             const count = stageCount(col.id)
             const active = activeStage === col.id
@@ -629,11 +682,6 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
               </button>
             )
           })}
-          {activeStage !== "all" && (
-            <button onClick={() => onStageSelect("all")} className="text-xs font-semibold text-zinc-400 hover:text-zinc-600 ml-1">
-              Clear
-            </button>
-          )}
         </motion.div>
 
         {/* ── Source Filter Bar ── */}
@@ -805,13 +853,18 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
                     aiInfo={aiInfoByCandidate[app.candidate_id]}
                     clientDecision={clientDecisions?.[app.id] ?? null}
                     selected={selectedIds.has(app.id)}
+                    isNew={app.status === "applied" && !participantDataByCandidate[app.candidate_id] && !viewedCandidates.has(app.candidate_id)}
+                    fitScore={fitScores[app.candidate_id]}
                     callNowBusy={callNowCandidate === app.candidate_id}
                     nudgeBusy={nudgeBusyCandidate === app.candidate_id}
                     onCallNow={() => callCandidateNow(app.candidate_id)}
                     onNudgeStart={() => setNudgeBusyCandidate(app.candidate_id)}
                     onNudgeEnd={() => { setNudgeBusyCandidate(null); fetchParticipants(); onRefresh() }}
                     onSelect={() => toggleSelect(app.id)}
-                    onViewProfile={onViewProfile}
+                    onViewProfile={(c, app2, part, ai) => {
+                      setViewedCandidates(prev => new Set([...prev, app.candidate_id]))
+                      onViewProfile(c, app2, part, ai)
+                    }}
                     onViewResults={(candidateId) => {
                       const pid = participantIdByCandidate[candidateId]
                       if (pid) setResultParticipantId(pid)
@@ -930,7 +983,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
    CANDIDATE CARD — Premium Redesign
    ═══════════════════════════════════════════════════════════════════ */
 
-function CandidateCard({ application, jobId, callStatus, participant, aiInfo, clientDecision, selected, callNowBusy, nudgeBusy, onCallNow, onNudgeStart, onNudgeEnd, onSelect, onViewProfile, onViewResults, onStageChange, onApplicationUpdated, interviewEntry, interviewDraft, onInterviewUpdate, onInterviewDraftChange }: CandidateCardProps) {
+function CandidateCard({ application, jobId, callStatus, participant, aiInfo, clientDecision, selected, isNew, fitScore, callNowBusy, nudgeBusy, onCallNow, onNudgeStart, onNudgeEnd, onSelect, onViewProfile, onViewResults, onStageChange, onApplicationUpdated, interviewEntry, interviewDraft, onInterviewUpdate, onInterviewDraftChange }: CandidateCardProps) {
   const c = application.candidates
   const { toast } = useToast()
   const [notesDraft, setNotesDraft] = useState<string>(application.notes || "")
@@ -1007,7 +1060,9 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
   return (
     <>
       <Card className={`border shadow-sm hover:shadow-md transition-all duration-200 rounded-2xl overflow-hidden bg-white group ${
-        selected ? "ring-2 ring-cyan-300 border-cyan-300" : "border-zinc-200 hover:border-zinc-300"
+        selected ? "ring-2 ring-cyan-300 border-cyan-300" :
+        isNew ? "ring-2 ring-amber-300 border-amber-300 bg-amber-50/30" :
+        "border-zinc-200 hover:border-zinc-300"
       }`}>
         <CardContent className="p-0">
           <div className="p-5">
@@ -1026,6 +1081,11 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
               <div className="flex-1 min-w-0 space-y-0.5">
                 <div className="flex items-center gap-2">
                   <h3 className="font-bold text-lg text-zinc-900 truncate">{c.name}</h3>
+                  {isNew && (
+                    <Badge className="bg-amber-100 text-amber-700 border-amber-200 text-[10px] font-bold">
+                      New
+                    </Badge>
+                  )}
                   {application.origin && (
                     <button
                       type="button"
@@ -1081,7 +1141,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                   <nextAction.icon className="h-4 w-4 shrink-0 opacity-70" />
                   <span className="text-xs font-medium truncate">{nextAction.label}</span>
                 </div>
-                {nextAction.cta && (
+                {nextAction.action ? (
                   <Button
                     size="sm"
                     variant="outline"
@@ -1090,6 +1150,10 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                   >
                     {nextAction.cta}
                   </Button>
+                ) : (
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/50 border border-current/20">
+                    <Loader2 className="h-3 w-3 animate-spin" /> {nextAction.cta}
+                  </span>
                 )}
               </div>
             )}
@@ -1128,6 +1192,28 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                     </button>
                   </TooltipTrigger>
                   <TooltipContent>{aiScore != null ? "View AI screening analysis" : "View match analysis"}</TooltipContent>
+                </Tooltip>
+              )}
+
+              {/* Fit Score button — JD fit analysis */}
+              {fitScore != null && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      className={`inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border text-xs font-semibold transition-all cursor-pointer ${
+                        fitScore >= 70
+                          ? "border-purple-200 bg-purple-50 text-purple-700 hover:bg-purple-100" :
+                        fitScore >= 40
+                          ? "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100" :
+                        "border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
+                      }`}
+                      onClick={() => onViewProfile(c, application, participant, aiInfo)}
+                    >
+                      <BrainCircuit className="h-3.5 w-3.5" />
+                      {fitScore}%
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>View JD fit analysis</TooltipContent>
                 </Tooltip>
               )}
 
@@ -1227,6 +1313,45 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                       <div>
                         <p className="text-xs text-zinc-400 font-semibold mb-1">Candidate Notes</p>
                         <p className="text-sm text-zinc-500 whitespace-pre-wrap bg-zinc-50/50 p-2 rounded-lg border border-zinc-100">{application.candidate_notes}</p>
+                      </div>
+                    )}
+
+                    {/* AI Screening Context */}
+                    {participant?.screening_context && (
+                      <div className="p-3 rounded-xl bg-blue-50/50 border border-blue-100">
+                        <div className="flex items-center gap-2 mb-2">
+                          <BrainCircuit className="h-4 w-4 text-blue-600" />
+                          <p className="text-xs font-bold text-blue-700">Screening Context</p>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-[11px]">
+                          <div>
+                            <span className="text-zinc-400">Role:</span>
+                            <span className="ml-1 text-zinc-600">{participant.screening_context.jobTitle}</span>
+                          </div>
+                          <div>
+                            <span className="text-zinc-400">Salary:</span>
+                            <span className="ml-1 text-zinc-600">{participant.screening_context.salaryRange || "N/A"}</span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* AI Generated Questions */}
+                    {participant?.generated_questions && (
+                      <div className="p-3 rounded-xl bg-zinc-50 border border-zinc-100">
+                        <p className="text-xs font-bold text-zinc-500 mb-2">Questions AI Will Ask</p>
+                        <ol className="space-y-1">
+                          {participant.generated_questions.split("\n").filter((q: string) => q.trim()).slice(0, 3).map((q: string, i: number) => (
+                            <li key={i} className="text-[11px] text-zinc-600 flex gap-1">
+                              <span className="text-zinc-400">{i + 1}.</span> {q.replace(/^\d+\.\s*/, "")}
+                            </li>
+                          ))}
+                        </ol>
+                        {participant.generated_questions.split("\n").filter((q: string) => q.trim()).length > 3 && (
+                          <button className="text-[10px] text-blue-500 hover:text-blue-600 mt-1" onClick={() => onViewProfile(c, application, participant, aiInfo)}>
+                            View all →
+                          </button>
+                        )}
                       </div>
                     )}
 
