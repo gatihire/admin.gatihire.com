@@ -131,7 +131,8 @@ export async function POST(request: NextRequest) {
         job_id: jobId,
         candidate_id: candidateId,
         status: "applied",
-        notes: coverLetter ? `Cover Letter: ${coverLetter}` : undefined,
+        source: "board-app",
+        candidate_notes: coverLetter || undefined,
         applied_at: new Date().toISOString()
       })
 
