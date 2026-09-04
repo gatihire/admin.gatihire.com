@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { randomBytes } from "node:crypto"
 import { sendInviteEmail } from "@/lib/mailer"
-import { aisensyService } from "@/lib/aisensy"
+import { getWhatsAppService } from "@/lib/whatsapp"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { buildTemplateParams, loadMessageTemplates, renderTemplate } from "@/lib/message-templates"
 import { getBoardAppBaseUrl } from "@/lib/utils"
@@ -246,15 +246,16 @@ async function processSingleInvite({
               invite_link: link
             }
           )
-          const result = await aisensyService.sendWhatsAppMessage({
-            phoneNumber: localPhone as string,
-            candidateName: candidateName || "there",
-            jobTitle,
-            companyName,
-            uniqueLink: link
-          }, {
-            campaignName: inviteWhatsappTemplate?.metadata?.campaignName,
-            templateParams
+          const whatsapp = getWhatsAppService()
+          const result = await whatsapp.sendTemplateMessage({
+            to: localPhone as string,
+            templateName: inviteWhatsappTemplate?.metadata?.campaignName || "talent_outreach",
+            components: [
+              {
+                type: "body",
+                parameters: templateParams.map((p: string) => ({ type: "text" as const, text: p }))
+              }
+            ]
           })
           whatsappSent = result.success
           whatsappError = result.success ? null : result.error || "Failed to send WhatsApp"
@@ -377,15 +378,16 @@ async function processSingleInvite({
         invite_link: link
       }
     )
-    const result = await aisensyService.sendWhatsAppMessage({
-      phoneNumber: localPhone as string,
-      candidateName: candidateName || "there",
-      jobTitle,
-      companyName,
-      uniqueLink: link
-    }, {
-      campaignName: inviteWhatsappTemplate?.metadata?.campaignName,
-      templateParams
+    const whatsapp = getWhatsAppService()
+    const result = await whatsapp.sendTemplateMessage({
+      to: localPhone as string,
+      templateName: inviteWhatsappTemplate?.metadata?.campaignName || "talent_outreach",
+      components: [
+        {
+          type: "body",
+          parameters: templateParams.map((p: string) => ({ type: "text" as const, text: p }))
+        }
+      ]
     })
     whatsappSent = result.success
     whatsappError = result.success ? null : result.error || "Failed to send WhatsApp"

@@ -6,7 +6,7 @@
 
 import { supabaseAdmin } from "@/lib/supabase"
 import { placeBolnaCall } from "@/lib/bolna"
-import { aisensyService } from "@/lib/aisensy"
+import { getWhatsAppService } from "@/lib/whatsapp"
 import { generateJDQuestions } from "@/lib/jd-questions"
 import { scheduleOutreachFollowup, outreachNudgeHours, outreachEscalateHours } from "@/lib/scheduled-call"
 import { getBoardAppBaseUrl } from "@/lib/utils"
@@ -226,17 +226,22 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
     if (whatsappFirst) {
       const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(candidate, job, client, origin, participantId)
       const jobLink = `${getBoardAppBaseUrl()}/board/${job.id}`
-      const outreachResult = await aisensyService.sendOutreachMessage(
-        candidate.phone as string,
-        candidate.name || "",
-        {
-          jobTitle: job.title || "",
-          location: job.city || "",
-          salaryBudget: formatSalaryRange(job),
-          jobLink,
-        },
-        { shortlisted: origin === "inbound" }
-      )
+      const whatsapp = getWhatsAppService()
+      
+      // Send appropriate template based on origin
+      const outreachResult = origin === "inbound"
+        ? await whatsapp.sendInboundScreeningInvite({
+            phoneNumber: candidate.phone as string,
+            candidateName: candidate.name || "",
+            jobTitle: job.title || "",
+            companyName: job.client_name || client?.name || "",
+          })
+        : await whatsapp.sendScreeningInvite({
+            phoneNumber: candidate.phone as string,
+            candidateName: candidate.name || "",
+            jobTitle: job.title || "",
+            companyName: job.client_name || client?.name || "",
+          })
 
       if (outreachResult.success) {
         const history = [{
@@ -303,18 +308,13 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
     // outreach was already sent above.
     let preCallMessageId: string | null = null
     if (!whatsappFirst) {
-      const jobLink = `${getBoardAppBaseUrl()}/board/${job.id}`
-      const preCallResult = await aisensyService.sendOutreachMessage(
-        candidate.phone as string,
-        candidate.name || "",
-        {
-          jobTitle: job.title || "",
-          location: job.city || "",
-          salaryBudget: formatSalaryRange(job),
-          jobLink,
-        },
-        { shortlisted: origin === "inbound" }
-      )
+      const whatsapp = getWhatsAppService()
+      const preCallResult = await whatsapp.sendCallNudge({
+        phoneNumber: candidate.phone as string,
+        candidateName: candidate.name || "",
+        jobTitle: job.title || "",
+        companyName: job.client_name || client?.name || "",
+      })
       if (preCallResult.success) {
         preCallMessageId = preCallResult.messageId || null
         // Track WhatsApp history

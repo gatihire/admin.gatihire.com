@@ -3,7 +3,7 @@ import { supabaseAdmin } from "@/lib/supabase"
 import { logger } from "@/lib/logger"
 import { verifyBolnaWebhook, BOLNA_TERMINAL_STATUSES, type BolnaExecution } from "@/lib/bolna"
 import { evaluateCallQuality } from "@/lib/ai-learning"
-import { aisensyService } from "@/lib/aisensy"
+import { getWhatsAppService } from "@/lib/whatsapp"
 import { scheduleBolnaCall, MAX_CALL_ATTEMPTS } from "@/lib/scheduled-call"
 import { enrichTranscript, type EnrichedSummary } from "@/lib/transcript-enrichment"
 import { logCandidateActivity, type EventType } from "@/lib/activity-logger"
@@ -511,12 +511,13 @@ async function handleFailedExecution(
   if (!participant.whatsapp_missed_nudge_sent && participant.candidates?.phone) {
     const candidate = participant.candidates
     const job = participant.jobs
-    const nudge = await aisensyService.sendMissedCallReschedule(
-      candidate.phone || "",
-      candidate.name || "",
-      job?.title || "",
-      job?.client_name || ""
-    )
+    const whatsapp = getWhatsAppService()
+    const nudge = await whatsapp.sendMissedCallReschedule({
+      phoneNumber: candidate.phone || "",
+      candidateName: candidate.name || "",
+      jobTitle: job?.title || "",
+      companyName: job?.client_name || "",
+    })
     if (nudge.success) {
       // Append to WhatsApp history instead of overwriting
       const history = participant.whatsapp_history || []

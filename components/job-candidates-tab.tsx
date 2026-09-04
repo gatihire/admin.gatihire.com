@@ -804,7 +804,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
                 <div className="flex flex-wrap items-center gap-2">
                   <Button size="sm" className="h-8 text-xs bg-emerald-600 hover:bg-emerald-700 gap-1" onClick={() => setConfirmCallsOpen(true)} disabled={callingStarted || selectedCandidateIds.length === 0}>
                     {callingStarted ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
-                    {callingStarted ? "Starting..." : `Start AI Calls (${selectedCandidateIds.length})`}
+                    {callingStarted ? "Starting..." : `Start Screening (${selectedCandidateIds.length})`}
                   </Button>
                   <Select value={bulkStage} onValueChange={setBulkStage}>
                     <SelectTrigger className="h-8 w-40 text-xs bg-white"><SelectValue /></SelectTrigger>
@@ -933,7 +933,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
         <AlertDialog open={confirmCallsOpen} onOpenChange={setConfirmCallsOpen}>
           <AlertDialogContent>
             <AlertDialogHeader>
-              <AlertDialogTitle>Start AI calls for {selectedApplications.length} candidates?</AlertDialogTitle>
+              <AlertDialogTitle>Start screening for {selectedApplications.length} candidates?</AlertDialogTitle>
               <AlertDialogDescription className="space-y-3">
                 <div className="flex flex-wrap gap-2 pt-1">
                   <Badge className="text-xs font-bold px-3 py-1 rounded-full bg-blue-100 text-blue-700">{inboundCount} Inbound</Badge>
@@ -945,15 +945,15 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
                       type="button" disabled={callingStarted} onClick={() => setCallMode("call_now")}
                       className={`px-3 py-2.5 text-left text-xs transition-all ${callMode === "call_now" ? "bg-emerald-50 text-emerald-800 ring-1 ring-inset ring-emerald-300" : "text-zinc-500 hover:bg-zinc-50"}`}
                     >
-                      <span className="block font-bold text-xs uppercase tracking-wide">Direct call</span>
-                      <span className="text-xs opacity-80 mt-0.5 block">Bolna calls each candidate now</span>
+                      <span className="block font-bold text-xs uppercase tracking-wide">Call Now</span>
+                      <span className="text-xs opacity-80 mt-0.5 block">Bolna calls each candidate immediately</span>
                     </button>
                     <button
                       type="button" disabled={callingStarted} onClick={() => setCallMode("whatsapp_first")}
                       className={`px-3 py-2.5 text-left text-xs transition-all ${callMode === "whatsapp_first" ? "bg-teal-50 text-teal-800 ring-1 ring-inset ring-teal-300" : "text-zinc-500 hover:bg-zinc-50"}`}
                     >
-                      <span className="block font-bold text-xs uppercase tracking-wide">WhatsApp Nudge → Auto Call</span>
-                      <span className="text-xs opacity-80 mt-0.5 block">WhatsApp first, then automated call when they respond</span>
+                      <span className="block font-bold text-xs uppercase tracking-wide">WhatsApp First</span>
+                      <span className="text-xs opacity-80 mt-0.5 block">Send WhatsApp, then AI call when they respond</span>
                     </button>
                   </div>
                 </div>
@@ -963,7 +963,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
               <AlertDialogCancel disabled={callingStarted}>Cancel</AlertDialogCancel>
               <AlertDialogAction onClick={startAiCalls} disabled={callingStarted}>
                 {callingStarted ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <PhoneCall className="h-3.5 w-3.5 mr-1" />}
-                {callingStarted ? "Starting..." : callMode === "call_now" ? "Start direct calls" : "Send WhatsApp Nudges"}
+                {callingStarted ? "Starting..." : callMode === "call_now" ? "Start calls now" : "Send WhatsApp first"}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
@@ -1259,10 +1259,10 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
                   <DropdownMenuItem onClick={() => { setConfirmCallMode("whatsapp_first"); setConfirmCallOpen(true) }}>
-                    <MessageCircle className="h-3.5 w-3.5 mr-2" />WhatsApp Nudge → Auto Call
+                    <MessageCircle className="h-3.5 w-3.5 mr-2" />WhatsApp First
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => { setConfirmCallMode("call_now"); setConfirmCallOpen(true) }}>
-                    <PhoneCall className="h-3.5 w-3.5 mr-2" />Direct Call (Skip WhatsApp)
+                    <PhoneCall className="h-3.5 w-3.5 mr-2" />Call Now (Skip WhatsApp)
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>

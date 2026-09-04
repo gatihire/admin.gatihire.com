@@ -9,7 +9,7 @@ import crypto from "crypto"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { buildTemplateParams, loadMessageTemplates, renderTemplate } from "@/lib/message-templates"
 import { getBoardAppBaseUrl } from "@/lib/utils"
-import { aisensyService } from "@/lib/aisensy"
+import { getWhatsAppService } from "@/lib/whatsapp"
 import { logger } from "@/lib/logger"
 import { sendOutreachEmail } from "@/lib/mailer"
 
@@ -303,19 +303,17 @@ Return ONLY valid JSON:
           if (candidate.phone) {
             try {
               const templateParams = buildTemplateParams(outreachWhatsappTemplate?.metadata?.paramOrder || undefined, variables)
-              const whatsappResult = await aisensyService.sendWhatsAppMessage(
-                {
-                  phoneNumber: candidate.phone,
-                  candidateName: candidate.name,
-                  jobTitle: job.title,
-                  companyName: job.client_name || "Truckinzy",
-                  uniqueLink
-                },
-                {
-                  campaignName: outreachWhatsappTemplate?.metadata?.campaignName,
-                  templateParams
-                }
-              )
+              const whatsapp = getWhatsAppService()
+              const whatsappResult = await whatsapp.sendTemplateMessage({
+                to: candidate.phone,
+                templateName: outreachWhatsappTemplate?.metadata?.campaignName || "talent_outreach",
+                components: [
+                  {
+                    type: "body",
+                    parameters: templateParams.map((p: string) => ({ type: "text" as const, text: p }))
+                  }
+                ]
+              })
 
               logger.info(`WhatsApp attempt for ${candidate.phone}: success=${whatsappResult.success} error=${whatsappResult.error}`, { 
                 candidateId: candidate.id, 

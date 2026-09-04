@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { verifySignatureAppRouter } from "@upstash/qstash/nextjs"
 import { supabaseAdmin } from "@/lib/supabase"
-import { aisensyService } from "@/lib/aisensy"
+import { getWhatsAppService } from "@/lib/whatsapp"
 import { logger } from "@/lib/logger"
 
 export const runtime = "nodejs"
@@ -55,12 +55,14 @@ async function handler(request: NextRequest) {
         return NextResponse.json({ success: false, skipped: true, reason: "No phone" })
       }
 
-      const nudgeResult = await aisensyService.sendReminderNudge(
-        candidate.phone,
-        candidate.name || "",
-        job?.title || "",
-        job?.city || ""
-      )
+      const whatsapp = getWhatsAppService()
+      const nudgeResult = await whatsapp.sendReminderNudge({
+        phoneNumber: candidate.phone,
+        candidateName: candidate.name || "",
+        jobTitle: job?.title || "",
+        companyName: "",
+        location: job?.city || "",
+      })
 
       if (!nudgeResult.success) {
         return NextResponse.json({ error: nudgeResult.error || "Reminder send failed" }, { status: 502 })
