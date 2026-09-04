@@ -11,7 +11,7 @@ import {
   DollarSign, User, Phone as PhoneIcon,
   ExternalLink, ThumbsUp, ThumbsDown, PhoneCall, Play, Pause,
   MessageSquare, BarChart3, Mic, Send, CheckCheck, MessageCircle,
-  ArrowDown, CircleDot, Smartphone, Volume2, Download, Bot
+  ArrowDown, CircleDot, Smartphone, Volume2, Download, Bot, Settings
 } from "lucide-react"
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -174,6 +174,7 @@ const TABS: { id: TabId; label: string; icon: React.ElementType }[] = [
   { id: "recording", label: "Recording", icon: Mic },
   { id: "qa", label: "Q&A", icon: BarChart3 },
   { id: "jd_fit", label: "JD Fit", icon: Target },
+  { id: "agent_config", label: "AI Context", icon: Settings },
 ]
 
 export function PhoneScreeningResultsSheet({

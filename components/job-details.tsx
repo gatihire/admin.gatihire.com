@@ -86,12 +86,22 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
   const [candidateStage, setCandidateStage] = useState<string>("applied")
   const [candidateSubFilter, setCandidateSubFilter] = useState<string>("all")
   const [selectedCandidate, setSelectedCandidate] = useState<any | null>(null)
+  const [selectedApplication, setSelectedApplication] = useState<Application | null>(null)
+  const [selectedParticipant, setSelectedParticipant] = useState<any | null>(null)
+  const [selectedAiInfo, setSelectedAiInfo] = useState<{ recommendation?: string; score?: number } | undefined>(undefined)
   const [client, setClient] = useState<Client | null>(null)
   const [clientOpen, setClientOpen] = useState(false)
   const [shareOpen, setShareOpen] = useState(false)
   const [uploadOpen, setUploadOpen] = useState(false)
   const [clientDecisions, setClientDecisions] = useState<Record<string, string | null>>({})
   const [sourcingView, setSourcingView] = useState<"db_matches" | "juicebox">("db_matches")
+
+  const handleViewProfile = (candidate: any, application?: Application, participant?: any, aiInfo?: { recommendation?: string; score?: number }) => {
+    setSelectedCandidate(candidate)
+    setSelectedApplication(application || null)
+    setSelectedParticipant(participant || null)
+    setSelectedAiInfo(aiInfo || undefined)
+  }
 
   const clientLabel = job.client_name || client?.name || null
   const publicApplyUrl = getBoardJobApplyUrl(job.id)
@@ -194,7 +204,7 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
             onCallSubFilterChange={setCandidateSubFilter}
             onStageChange={updateStatus}
             onApplicationUpdated={updateApplication}
-            onViewProfile={setSelectedCandidate}
+            onViewProfile={handleViewProfile}
             onRefresh={() => fetchApplications({ force: true })}
           />
         )
@@ -205,7 +215,7 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
             jobTitle={job.title}
             view={sourcingView}
             onViewChange={setSourcingView}
-            onViewProfile={setSelectedCandidate}
+            onViewProfile={handleViewProfile}
             onCandidateAdded={() => fetchApplications({ force: true })}
           />
         )
@@ -322,9 +332,17 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
       {selectedCandidate && (
         <CandidateProfileSidebarDynamic
           candidate={selectedCandidate}
+          application={selectedApplication}
           isOpen={!!selectedCandidate}
-          onClose={() => setSelectedCandidate(null)}
+          onClose={() => {
+            setSelectedCandidate(null)
+            setSelectedApplication(null)
+            setSelectedParticipant(null)
+            setSelectedAiInfo(undefined)
+          }}
           jobId={job.id}
+          aiInfo={selectedAiInfo}
+          participant={selectedParticipant}
         />
       )}
 

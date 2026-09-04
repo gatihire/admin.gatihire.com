@@ -83,10 +83,11 @@ interface CandidateProfileSidebarProps {
   onClose: () => void
   jobId?: string
   aiInfo?: { recommendation?: string; score?: number }
+  participant?: any | null
 }
 
 export function CandidateProfileSidebar({
-  candidate: rawCandidate, application, isOpen, onClose, jobId, aiInfo,
+  candidate: rawCandidate, application, isOpen, onClose, jobId, aiInfo, participant,
 }: CandidateProfileSidebarProps) {
   const { toast } = useToast()
   const [activeTab, setActiveTab] = useState("screening")
@@ -96,6 +97,8 @@ export function CandidateProfileSidebar({
   const [previewLoading, setPreviewLoading] = useState(false)
   const [experienceExpanded, setExperienceExpanded] = useState(false)
   const [resumeExpanded, setResumeExpanded] = useState(false)
+  const [questionsEditing, setQuestionsEditing] = useState(false)
+  const [questionsDraft, setQuestionsDraft] = useState<string>(participant?.generated_questions || "")
 
   // Merge raw candidate data with enriched data
   const c = useMemo(() => {
@@ -194,6 +197,29 @@ export function CandidateProfileSidebar({
 
   const aiScore = aiInfo?.score
   const matchScore = application?.match_score
+
+  const saveQuestions = async () => {
+    if (!participant?.id) return
+    try {
+      // Update both generated_questions and call_payload_json.questions
+      const payload: Record<string, any> = { generated_questions: questionsDraft }
+      if (participant.call_payload_json) {
+        payload.call_payload_json = {
+          ...participant.call_payload_json,
+          questions: questionsDraft.split("\n").filter((q: string) => q.trim()).map((q: string, i: number) => `${i + 1}. ${q.replace(/^\d+\.\s*/, "")}`).join("\n")
+        }
+      }
+      await fetch(`/api/phone-screening/participants/${participant.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      })
+      setQuestionsEditing(false)
+      toast({ title: "Questions updated" })
+    } catch {
+      toast({ title: "Failed to save", variant: "destructive" })
+    }
+  }
 
   return (
     <>
@@ -379,13 +405,13 @@ export function CandidateProfileSidebar({
         <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col overflow-hidden">
           <div className="px-7 border-b border-zinc-100 bg-white flex-shrink-0">
             <TabsList className="h-10 bg-transparent gap-0 p-0">
-              {["screening", "profile", "resume", "activity"].map((tab) => (
+              {["screening", "ai_context", "profile", "resume", "activity"].map((tab) => (
                 <TabsTrigger
                   key={tab}
                   value={tab}
                   className="text-xs font-semibold capitalize data-[state=active]:text-zinc-900 data-[state=active]:border-b-2 data-[state=active]:border-zinc-900 data-[state=active]:font-bold rounded-none h-10 px-4 text-zinc-400 border-b-2 border-transparent"
                 >
-                  {tab}
+                  {tab === "ai_context" ? "AI Context" : tab}
                 </TabsTrigger>
               ))}
             </TabsList>
@@ -454,6 +480,131 @@ export function CandidateProfileSidebar({
                     </button>
                   </div>
                 </div>
+              )}
+            </TabsContent>
+
+            {/* ── AI Context Tab ── */}
+            <TabsContent value="ai_context" className="px-7 py-5 space-y-5 mt-0">
+              {/* Screening Context (Job Context sent to AI) */}
+              {participant?.screening_context && (
+                <div>
+                  <SectionLabel text="Job Context Sent to AI" />
+                  <div className="p-4 rounded-xl bg-zinc-50 border border-zinc-100 space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Role</p>
+                        <p className="text-sm font-semibold text-zinc-700">{participant.screening_context.jobTitle}</p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Company</p>
+                        <p className="text-sm font-semibold text-zinc-700">{participant.screening_context.clientName}</p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Salary Range</p>
+                        <p className="text-sm font-semibold text-zinc-700">{participant.screening_context.salaryRange || "Not specified"}</p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Experience</p>
+                        <p className="text-sm font-semibold text-zinc-700">{participant.screening_context.experienceRange || "Not specified"}</p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Location</p>
+                        <p className="text-sm font-semibold text-zinc-700">{participant.screening_context.location || "Not specified"}</p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Origin</p>
+                        <p className="text-sm font-semibold text-zinc-700 capitalize">{participant.origin || "outbound"}</p>
+                      </div>
+                    </div>
+                    {participant.screening_context.mustHaveSkills && (
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">Must-Have Skills</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {participant.screening_context.mustHaveSkills.split(",").map((skill: string, i: number) => (
+                            <Badge key={i} variant="outline" className="text-[10px] bg-blue-50 text-blue-600 border-blue-200">
+                              {skill.trim()}
+                            </Badge>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Generated Questions */}
+              {participant?.generated_questions && (
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <SectionLabel text="AI-Generated Questions" />
+                    {questionsEditing ? (
+                      <div className="flex gap-2">
+                        <button onClick={saveQuestions} className="text-xs font-semibold text-emerald-600 hover:text-emerald-700">
+                          Save
+                        </button>
+                        <button onClick={() => setQuestionsEditing(false)} className="text-xs font-semibold text-zinc-400 hover:text-zinc-600">
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button 
+                        onClick={() => { setQuestionsDraft(participant.generated_questions); setQuestionsEditing(true) }}
+                        className="text-xs font-semibold text-blue-600 hover:text-blue-700"
+                      >
+                        Edit
+                      </button>
+                    )}
+                  </div>
+                  <div className="p-4 rounded-xl bg-zinc-50 border border-zinc-100">
+                    {questionsEditing ? (
+                      <textarea
+                        value={questionsDraft}
+                        onChange={(e) => setQuestionsDraft(e.target.value)}
+                        className="w-full text-sm text-zinc-700 bg-white border border-zinc-200 rounded-lg p-3 min-h-[120px] focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        rows={6}
+                      />
+                    ) : (
+                      <ol className="space-y-2">
+                        {participant.generated_questions.split("\n").filter((q: string) => q.trim()).map((question: string, i: number) => (
+                          <li key={i} className="flex gap-2 text-sm">
+                            <span className="font-mono text-[10px] font-bold text-zinc-400 mt-0.5">{i + 1}.</span>
+                            <span className="text-zinc-700">{question.replace(/^\d+\.\s*/, "")}</span>
+                          </li>
+                        ))}
+                      </ol>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Empty state when no participant data */}
+              {!participant && (
+                <div className="text-center py-12 text-zinc-400">
+                  <BrainCircuit className="h-8 w-8 mx-auto mb-2 text-zinc-300" />
+                  <p className="text-sm font-semibold">No AI context yet</p>
+                  <p className="text-xs mt-1 mb-4">Start a screening call to generate questions</p>
+                  <div className="flex items-center justify-center gap-2">
+                    <button className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 transition-colors">
+                      <Phone className="h-3.5 w-3.5" /> Start AI Call
+                    </button>
+                    <button className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 transition-colors">
+                      <Mail className="h-3.5 w-3.5" /> WhatsApp Nudge
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Full Call Payload (collapsible) */}
+              {participant?.call_payload_json && (
+                <details className="group">
+                  <summary className="flex items-center gap-2 text-xs font-semibold text-zinc-400 hover:text-zinc-600 cursor-pointer">
+                    <ChevronDown className="h-3 w-3 group-open:rotate-180 transition-transform" />
+                    Full Call Payload (Technical)
+                  </summary>
+                  <pre className="mt-2 p-4 rounded-xl bg-zinc-50 border border-zinc-100 text-[10px] text-zinc-500 overflow-auto max-h-64 font-mono">
+                    {JSON.stringify(participant.call_payload_json, null, 2)}
+                  </pre>
+                </details>
               )}
             </TabsContent>
 

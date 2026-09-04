@@ -76,7 +76,7 @@ interface CandidateCardProps {
   onNudgeStart?: () => void
   onNudgeEnd?: () => void
   onSelect: (id: string) => void
-  onViewProfile: (candidate: any) => void
+  onViewProfile: (candidate: any, application?: Application, participant?: any, aiInfo?: { recommendation?: string; score?: number }) => void
   onViewResults?: (candidateId: string) => void
   onStageChange: (applicationId: string, from: string, to: string, candidateName: string) => void
   onApplicationUpdated: (updated: Application) => void
@@ -97,7 +97,7 @@ export interface CandidatesTabProps {
   onCallSubFilterChange?: (sub: string) => void
   onStageChange: (applicationId: string, newStage: string, rejectionReason?: string) => void
   onApplicationUpdated: (updated: Application) => void
-  onViewProfile: (candidate: any) => void
+  onViewProfile: (candidate: any, application?: Application, participant?: any, aiInfo?: { recommendation?: string; score?: number }) => void
   onViewResults?: (candidateId: string) => void
   onRefresh: () => void
 }
@@ -995,7 +995,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
 
   const handleNextAction = () => {
     if (!nextAction) return
-    if (nextAction.action === "view_profile") onViewProfile(c)
+    if (nextAction.action === "view_profile") onViewProfile(c, application, participant, aiInfo)
     else if (nextAction.action === "view_results") onViewResults?.(application.candidate_id)
     else if (nextAction.action === "share") toast({ title: "Use Share Shortlist from job header" })
     else if (nextAction.action === "schedule") toast({ title: "Schedule interview from the interview section" })
@@ -1099,7 +1099,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
               {/* Eye button */}
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <Button variant="outline" size="sm" className="h-8 w-8 p-0 rounded-lg" onClick={() => onViewProfile(c)}>
+                  <Button variant="outline" size="sm" className="h-8 w-8 p-0 rounded-lg" onClick={() => onViewProfile(c, application, participant, aiInfo)}>
                     <Eye className="h-3.5 w-3.5" />
                   </Button>
                 </TooltipTrigger>
