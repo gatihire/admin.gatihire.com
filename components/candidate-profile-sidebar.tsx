@@ -11,7 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import {
   Download, MapPin, Phone, Mail, Building, Award, Globe, FileText,
   BrainCircuit, ChevronDown, ChevronUp, ExternalLink, GraduationCap,
-  Maximize2, Minimize2,
+  Maximize2, Minimize2, CheckCircle, AlertTriangle,
 } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { CandidateActivityTimeline } from "./candidate-activity-timeline"
@@ -99,6 +99,8 @@ export function CandidateProfileSidebar({
   const [resumeExpanded, setResumeExpanded] = useState(false)
   const [questionsEditing, setQuestionsEditing] = useState(false)
   const [questionsDraft, setQuestionsDraft] = useState<string>(participant?.generated_questions || "")
+  const [fitAnalysis, setFitAnalysis] = useState<any>(null)
+  const [fitLoading, setFitLoading] = useState(false)
 
   // Merge raw candidate data with enriched data
   const c = useMemo(() => {
@@ -218,6 +220,26 @@ export function CandidateProfileSidebar({
       toast({ title: "Questions updated" })
     } catch {
       toast({ title: "Failed to save", variant: "destructive" })
+    }
+  }
+
+  const fetchFitAnalysis = async () => {
+    if (!jobId || !c?.id || fitLoading) return
+    setFitLoading(true)
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/fit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidateIds: [c.id] })
+      })
+      const data = await res.json()
+      if (data.fits?.[c.id]) {
+        setFitAnalysis(data.fits[c.id])
+      }
+    } catch {
+      toast({ title: "Failed to analyze", variant: "destructive" })
+    } finally {
+      setFitLoading(false)
     }
   }
 
@@ -457,11 +479,78 @@ export function CandidateProfileSidebar({
                   </div>
                 </>
               ) : (
-                <div className="text-center py-12 text-zinc-400">
-                  <BrainCircuit className="h-8 w-8 mx-auto mb-2 text-zinc-300" />
-                  <p className="text-sm font-semibold">No screening data yet</p>
-                  <p className="text-xs mt-1 mb-4">Start an AI screening call to see results here</p>
-                  <div className="flex items-center justify-center gap-2">
+                <div className="space-y-4">
+                  {/* AI Analysis Section */}
+                  <div className="text-center py-8">
+                    <BrainCircuit className="h-8 w-8 mx-auto mb-2 text-zinc-300" />
+                    <p className="text-sm font-semibold text-zinc-600">AI Profile Analysis</p>
+                    <p className="text-xs text-zinc-400 mt-1 mb-4">Analyze this candidate against the job requirements</p>
+                    
+                    {!fitAnalysis && !fitLoading && (
+                      <button
+                        onClick={fetchFitAnalysis}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold text-white bg-purple-600 hover:bg-purple-700 transition-colors"
+                      >
+                        <BrainCircuit className="h-3.5 w-3.5" /> Analyze Against JD
+                      </button>
+                    )}
+                    
+                    {fitLoading && (
+                      <div className="flex items-center justify-center gap-2 text-xs text-zinc-400">
+                        <BrainCircuit className="h-3.5 w-3.5 animate-pulse" />
+                        Analyzing fit...
+                      </div>
+                    )}
+                    
+                    {fitAnalysis && (
+                      <div className="text-left p-4 rounded-xl bg-purple-50/50 border border-purple-100 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <BrainCircuit className="h-4 w-4 text-purple-600" />
+                            <span className="text-sm font-bold text-purple-700">Fit Score</span>
+                          </div>
+                          <Badge variant="outline" className={`text-xs font-bold ${
+                            fitAnalysis.fit_score >= 70
+                              ? "bg-emerald-100 text-emerald-700 border-emerald-200"
+                              : fitAnalysis.fit_score >= 40
+                              ? "bg-amber-100 text-amber-700 border-amber-200"
+                              : "bg-red-100 text-red-600 border-red-200"
+                          }`}>
+                            {fitAnalysis.fit_score}%
+                          </Badge>
+                        </div>
+                        
+                        {fitAnalysis.summary && (
+                          <p className="text-xs text-zinc-600 leading-relaxed">{fitAnalysis.summary}</p>
+                        )}
+                        
+                        {fitAnalysis.pros?.length > 0 && (
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">Strengths</p>
+                            {fitAnalysis.pros.slice(0, 3).map((pro: string, i: number) => (
+                              <p key={i} className="text-xs text-emerald-600 flex gap-1 mb-0.5">
+                                <CheckCircle className="h-3 w-3 mt-0.5 shrink-0" /> {pro}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+                        
+                        {fitAnalysis.misses?.length > 0 && (
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">Concerns</p>
+                            {fitAnalysis.misses.slice(0, 3).map((miss: string, i: number) => (
+                              <p key={i} className="text-xs text-amber-600 flex gap-1 mb-0.5">
+                                <AlertTriangle className="h-3 w-3 mt-0.5 shrink-0" /> {miss}
+                              </p>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  
+                  {/* Start Call Buttons */}
+                  <div className="flex items-center justify-center gap-2 pt-4 border-t border-zinc-100">
                     <button
                       className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 transition-colors"
                       onClick={() => {
