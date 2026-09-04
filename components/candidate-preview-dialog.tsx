@@ -55,6 +55,8 @@ import {
   Trash,
   BrainCircuit,
   Loader2,
+  Maximize2,
+  Minimize2,
 } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { AssignJobDialog } from "./assign-job-dialog"
@@ -149,6 +151,7 @@ export function CandidatePreviewDialog({
   const [isDeleting, setIsDeleting] = useState(false)
   const [fetchedCandidate, setFetchedCandidate] = useState<CandidateData | null>(null)
   const [assignJobOpen, setAssignJobOpen] = useState(false)
+  const [resumeExpanded, setResumeExpanded] = useState(false)
   
   // AI Analysis state
   const [aiAnalysis, setAiAnalysis] = useState<string>("")
@@ -468,7 +471,9 @@ export function CandidatePreviewDialog({
   return (
     <>
       <Dialog open={isOpen} onOpenChange={onClose}>
-        <DialogContent className="max-w-[95vw] max-h-[95vh] w-full h-full">
+        <DialogContent className={`transition-all duration-300 w-full h-full ${
+          resumeExpanded ? "max-w-[98vw] max-h-[98vh]" : "max-w-[95vw] max-h-[95vh]"
+        }`}>
           <DialogHeader className="pb-4">
             <DialogTitle className="flex items-center justify-between">
               <div className="flex items-center space-x-4">
@@ -515,7 +520,7 @@ export function CandidatePreviewDialog({
             </DialogTitle>
           </DialogHeader>
 
-          <ScrollArea className="flex-1 pr-4">
+          <ScrollArea className={`flex-1 pr-4 ${resumeExpanded ? "h-full" : ""}`}>
             <Tabs defaultValue="overview" className="w-full">
               <TabsList className="w-full flex justify-start overflow-x-auto mb-6">
                 <TabsTrigger value="overview" className="flex items-center gap-2 flex-1 min-w-[100px]">
@@ -1328,9 +1333,9 @@ export function CandidatePreviewDialog({
                 )}
               </TabsContent>
 
-              <TabsContent value="resume" className="space-y-6">
+              <TabsContent value="resume" className={`space-y-6 ${resumeExpanded ? "h-full" : ""}`}>
                 {safeCandidate.fileUrl ? (
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-full">
+                  <div className={resumeExpanded ? "grid grid-cols-1 gap-6 h-full" : "grid grid-cols-1 lg:grid-cols-2 gap-6 h-full"}>
                     <Card className="shadow-md">
                       <CardHeader>
                         <CardTitle className="text-xl flex items-center justify-between">
@@ -1339,6 +1344,24 @@ export function CandidatePreviewDialog({
                             Resume Preview
                           </span>
                           <div className="flex space-x-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setResumeExpanded(!resumeExpanded)}
+                              className="hover:bg-blue-50"
+                            >
+                              {resumeExpanded ? (
+                                <>
+                                  <Minimize2 className="h-4 w-4 mr-2" />
+                                  Collapse
+                                </>
+                              ) : (
+                                <>
+                                  <Maximize2 className="h-4 w-4 mr-2" />
+                                  Extend
+                                </>
+                              )}
+                            </Button>
                             <Button variant="outline" size="sm" asChild className="hover:bg-blue-50">
                               <a href={safeCandidate.fileUrl} target="_blank" rel="noopener noreferrer">
                                 <Eye className="h-4 w-4 mr-2" />
@@ -1352,19 +1375,20 @@ export function CandidatePreviewDialog({
                         <div className="border-2 border-gray-200 rounded-lg overflow-hidden">
                           <iframe
                             src={previewUrl || safeCandidate.fileUrl}
-                            className="w-full h-[500px]"
+                            className={`w-full transition-all duration-300 ${resumeExpanded ? "h-[calc(100vh-280px)]" : "h-[500px]"}`}
                             title="Resume Preview"
                           />
                         </div>
                       </CardContent>
                     </Card>
 
-                    <Card className="shadow-md">
-                      <CardHeader>
-                        <CardTitle className="text-xl flex items-center justify-between">
-                          <span className="text-gray-700">Resume Content</span>
-                          <Button variant="outline" size="sm" onClick={() => copyToClipboard(safeCandidate.resumeText)} className="hover:bg-gray-50">
-                            <Copy className="h-4 w-4 mr-2" />
+                    {!resumeExpanded && (
+                      <Card className="shadow-md">
+                        <CardHeader>
+                          <CardTitle className="text-xl flex items-center justify-between">
+                            <span className="text-gray-700">Resume Content</span>
+                            <Button variant="outline" size="sm" onClick={() => copyToClipboard(safeCandidate.resumeText)} className="hover:bg-gray-50">
+                              <Copy className="h-4 w-4 mr-2" />
                             Copy All
                           </Button>
                         </CardTitle>
@@ -1377,6 +1401,7 @@ export function CandidatePreviewDialog({
                         </ScrollArea>
                       </CardContent>
                     </Card>
+                    )}
                   </div>
                 ) : (
                   <Card className="shadow-md">

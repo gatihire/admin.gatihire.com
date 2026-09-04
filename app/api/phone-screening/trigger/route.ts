@@ -4,6 +4,7 @@ import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { deriveOrigin, type CandidateOrigin } from "@/lib/origin"
 import { orchestrateScreening } from "@/lib/call-orchestrator"
 import { logger } from "@/lib/logger"
+import { logCandidateActivityBatch } from "@/lib/activity-logger"
 
 export const runtime = "nodejs"
 
@@ -88,24 +89,49 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Auto-create pipeline entries (e.g. launching calls directly from DB Matches).
-    if (createApplication) {
-      const now = new Date().toISOString()
-      for (const candidate of candidates || []) {
-        if (appByCandidate.has(candidate.id)) continue
+    // Sync application status to "ai_screen" for all candidates being screened.
+    // This ensures the pipeline counts correctly while calls are active.
+    // Always create an application if one doesn't exist — every screened candidate
+    // must have a pipeline row so stage counts stay accurate.
+    const now = new Date().toISOString()
+    const appIds: string[] = []
+    for (const candidate of candidates || []) {
+      const existing = appByCandidate.get(candidate.id)
+      if (existing) {
+        appIds.push(existing.id)
+      } else {
+        // Auto-create pipeline entry for candidates without an application.
         const origin = fallbackOrigin || deriveOrigin((candidate as any).source)
-        const { error: insErr } = await supabaseAdmin.from("applications").insert({
-          job_id: jobId,
-          candidate_id: candidate.id,
-          status: "ai_screen",
-          source: origin === "outbound" ? "database" : "applied",
-          origin,
-          applied_at: now,
-          updated_at: now,
-        })
+        const { data: newApp, error: insErr } = await supabaseAdmin
+          .from("applications")
+          .insert({
+            job_id: jobId,
+            candidate_id: candidate.id,
+            status: "ai_screen",
+            source: origin === "outbound" ? "database" : "applied",
+            origin,
+            applied_at: now,
+            updated_at: now,
+          })
+          .select("id")
+          .single()
         if (insErr) {
           logger.warn("Auto-create application failed", { candidateId: candidate.id, error: insErr.message })
+        } else if (newApp?.id) {
+          appIds.push(newApp.id)
         }
+      }
+    }
+
+    // Batch-update existing applications to ai_screen (skip if already set)
+    if (appIds.length > 0) {
+      const { error: updateErr } = await supabaseAdmin
+        .from("applications")
+        .update({ status: "ai_screen", updated_at: now })
+        .in("id", appIds)
+        .neq("status", "ai_screen")
+      if (updateErr) {
+        logger.warn("Failed to sync application status to ai_screen", { error: updateErr.message })
       }
     }
 
@@ -118,6 +144,18 @@ export async function POST(request: NextRequest) {
       createdBy: ctx.authUser.id,
       callMode,
     })
+
+    // Log ai_screen_started for all candidates that were triggered
+    logCandidateActivityBatch(
+      (candidates || []).map((c) => ({
+        jobId,
+        candidateId: c.id,
+        applicationId: appByCandidate.get(c.id)?.id || null,
+        eventType: "ai_screen_started" as const,
+        eventData: { call_mode: callMode || "call_now" },
+        actor: ctx.authUser.id,
+      }))
+    )
 
     return NextResponse.json({
       campaignId: result.campaignId,

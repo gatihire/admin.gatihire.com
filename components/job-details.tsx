@@ -5,17 +5,18 @@ import dynamic from "next/dynamic"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { useToast } from "@/components/ui/use-toast"
-import { ArrowLeft, ExternalLink, Link2, MapPin, Building2, Clock, Send, Share2, Upload } from "lucide-react"
+import { ArrowLeft, ExternalLink, Link2, MapPin, Building2, Clock, Send, Share2, Upload, ChevronDown } from "lucide-react"
 import { formatDistanceToNow } from "date-fns"
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet"
 import { cachedFetchJson, getBoardJobApplyUrl, invalidateSessionCache, normalizeExternalUrl } from "@/lib/utils"
 
-const CandidatePreviewDialogDynamic = dynamic(() => import("./candidate-preview-dialog").then(m => m.CandidatePreviewDialog), { ssr: false })
+const CandidateProfileSidebarDynamic = dynamic(() => import("./candidate-profile-sidebar").then(m => m.CandidateProfileSidebar), { ssr: false })
 const CandidatesTab = dynamic(() => import("./job-candidates-tab").then(m => m.CandidatesTab), { ssr: false })
 const SourcingTab = dynamic(() => import("./job-sourcing-tab").then(m => m.SourcingTab), { ssr: false })
-const PhoneScreeningTab = dynamic(() => import("./phone-screening-tab").then(m => m.PhoneScreeningTab), { ssr: false })
-const InterviewsTab = dynamic(() => import("./job-interviews-tab").then(m => m.InterviewsTab), { ssr: false })
 const InvitesTab = dynamic(() => import("./job-invites-tab").then(m => m.InvitesTab), { ssr: false })
 const ShareShortlistDialog = dynamic(() => import("./shortlist-share-dialog").then(m => m.ShareShortlistDialog), { ssr: false })
 const JobUploadDialog = dynamic(() => import("./job-upload-dialog").then(m => m.JobUploadDialog), { ssr: false })
@@ -47,19 +48,17 @@ interface Application {
   candidates: { name: string; email: string; current_role: string; location: string; [key: string]: any }
 }
 
-type TabId = "pipeline" | "sourcing" | "phone_screen" | "interviews" | "invites"
+type TabId = "pipeline" | "sourcing" | "invites"
 
 const PRIMARY_TAB = { id: "pipeline", label: "Pipeline" } as const
 const SECONDARY_TABS = [
   { id: "sourcing", label: "DB Matches" },
-  { id: "phone_screen", label: "AI Screenings" },
-  { id: "interviews", label: "Interviews" },
   { id: "invites", label: "Invites" },
 ] as const
 
 const LEGACY_TAB: Record<string, TabId> = {
   candidates: "pipeline", db_matches: "sourcing", juicebox: "sourcing",
-  sourcing: "sourcing", phone_screen: "phone_screen", interviews: "interviews", invites: "invites",
+  sourcing: "sourcing", invites: "invites",
 }
 
 function parseTab(raw: string | null): TabId | null {
@@ -84,7 +83,7 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
     const t = parseTab(initialTab ?? null)
     return t || "pipeline"
   })
-  const [candidateStage, setCandidateStage] = useState<string>("all")
+  const [candidateStage, setCandidateStage] = useState<string>("applied")
   const [candidateSubFilter, setCandidateSubFilter] = useState<string>("all")
   const [selectedCandidate, setSelectedCandidate] = useState<any | null>(null)
   const [client, setClient] = useState<Client | null>(null)
@@ -169,12 +168,11 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
       if (!res.ok) throw new Error("Failed")
       toast({ title: "Status Updated", description: `Moved to ${newStatus}` })
       invalidateSessionCache(`internal:applications:job:${job.id}`)
-      if (newStatus === "interview") goToTab("interviews")
     } catch {
       toast({ title: "Update failed", variant: "destructive" })
       fetchApplications({ force: true })
     }
-  }, [job.id, toast, goToTab])
+  }, [job.id, toast])
 
   const updateApplication = useCallback((updated: Application) => {
     setApplications((prev) => prev.map((app) => app.id === updated.id ? updated : app))
@@ -211,10 +209,6 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
             onCandidateAdded={() => fetchApplications({ force: true })}
           />
         )
-      case "phone_screen":
-        return <PhoneScreeningTab jobId={job.id} />
-      case "interviews":
-        return <InterviewsTab jobId={job.id} applications={applications} />
       case "invites":
         return <InvitesTab jobId={job.id} />
       default:
@@ -225,14 +219,14 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="bg-white border rounded-2xl shadow-sm overflow-hidden">
+      <div className="bg-white border border-zinc-200 rounded-2xl shadow-sm overflow-hidden">
         <div className="p-6 md:p-8">
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
             <div className="flex items-start gap-4">
               <Button variant="ghost" size="icon" onClick={onBack} className="h-10 w-10 shrink-0 rounded-full border border-zinc-200 bg-white shadow-sm hover:bg-zinc-50 hover:border-zinc-300 transition-all mt-1">
                 <ArrowLeft className="h-5 w-5 text-zinc-600" />
               </Button>
-              <div className="space-y-1">
+              <div className="space-y-1.5">
                 <h2 className="text-2xl md:text-3xl font-extrabold text-zinc-900 tracking-tight leading-tight">{job.title}</h2>
                 <div className="flex flex-wrap items-center gap-y-2 gap-x-4">
                   {clientLabel && (
@@ -247,21 +241,30 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <Button variant="outline" size="sm" className="h-9 px-3 border-zinc-200 shadow-sm bg-white hover:bg-zinc-50 font-bold text-zinc-700 rounded-xl text-xs" onClick={() => setUploadOpen(true)} title="Upload resumes (inbound from job boards or outbound sourced profiles)">
-                <Upload className="mr-1.5 h-3.5 w-3.5 text-emerald-500" />Upload Resume
-              </Button>
-              <Button variant="outline" size="sm" className="h-9 px-3 border-zinc-200 shadow-sm bg-white hover:bg-zinc-50 font-bold text-zinc-700 rounded-xl text-xs" onClick={() => setShareOpen(true)} disabled={applications.filter(a => a.status === "shortlist").length === 0} title="Share shortlisted candidates with your client">
-                <Share2 className="mr-1.5 h-3.5 w-3.5 text-indigo-500" />Share Shortlist
-              </Button>
-              <Button variant="outline" size="sm" className="h-9 px-3 border-zinc-200 shadow-sm bg-white hover:bg-zinc-50 font-bold text-zinc-700 rounded-xl text-xs" onClick={() => { navigator.clipboard.writeText(publicApplyUrl); toast({ title: "Copied", description: "Application link copied" }) }}>
-                <Link2 className="mr-1.5 h-3.5 w-3.5 text-zinc-400" />Copy Link
-              </Button>
-              {!job.is_external_link && (
-                <Button variant="default" size="sm" className="h-9 px-3 bg-zinc-900 hover:bg-zinc-800 text-white shadow-md font-bold rounded-xl text-xs" onClick={() => window.open(`/jobs/${job.id}/outreach`, "_blank")}>
-                  <Send className="mr-1.5 h-3.5 w-3.5" />Outreach
-                </Button>
-              )}
-              <a href={publicApplyUrl} target="_blank" rel="noopener noreferrer" className="h-9 px-3 flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition-all shadow-md shadow-blue-100">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm" className="h-9 px-3 border-zinc-200 shadow-sm bg-white hover:bg-zinc-50 font-bold text-zinc-700 rounded-xl text-xs gap-1.5">
+                    Actions <ChevronDown className="h-3.5 w-3.5" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-48">
+                  <DropdownMenuItem onClick={() => setUploadOpen(true)}>
+                    <Upload className="h-3.5 w-3.5 mr-2" />Upload Resume
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => setShareOpen(true)} disabled={applications.filter(a => a.status === "shortlist").length === 0}>
+                    <Share2 className="h-3.5 w-3.5 mr-2" />Share Shortlist
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => { navigator.clipboard.writeText(publicApplyUrl); toast({ title: "Copied", description: "Application link copied" }) }}>
+                    <Link2 className="h-3.5 w-3.5 mr-2" />Copy Link
+                  </DropdownMenuItem>
+                  {!job.is_external_link && (
+                    <DropdownMenuItem onClick={() => window.open(`/jobs/${job.id}/outreach`, "_blank")}>
+                      <Send className="h-3.5 w-3.5 mr-2" />Outreach
+                    </DropdownMenuItem>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <a href={publicApplyUrl} target="_blank" rel="noopener noreferrer" className="h-9 px-3 flex items-center gap-1.5 bg-zinc-900 hover:bg-zinc-800 text-white rounded-xl text-xs font-bold transition-all shadow-md">
                 <ExternalLink className="h-3.5 w-3.5" />Public Page
               </a>
             </div>
@@ -269,27 +272,43 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
         </div>
         <div className="px-6 py-4 bg-zinc-50/50 border-t border-zinc-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex flex-wrap items-center gap-2">
-            <Badge className={`px-3 py-1 text-[10px] font-black tracking-widest rounded-full ${job.status === 'open' ? 'bg-emerald-500 text-white' : 'bg-zinc-500 text-white'}`}>{job.status.toUpperCase()}</Badge>
-            {job.employment_type && <Badge variant="outline" className="bg-white text-zinc-600 border-zinc-200 px-3 py-1 text-[10px] font-black tracking-widest rounded-full">{String(job.employment_type).replace(/_/g, " ").toUpperCase()}</Badge>}
-            {job.is_external_link && <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200 px-3 py-1 text-[10px] font-black tracking-widest rounded-full">EXTERNAL</Badge>}
-            {job.source && <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200 px-3 py-1 text-[10px] font-black tracking-widest rounded-full">{job.source.toUpperCase()}</Badge>}
+            <Badge className={`px-3 py-1 text-xs font-bold tracking-wide rounded-full ${job.status === 'open' ? 'bg-emerald-500 text-white' : 'bg-zinc-500 text-white'}`}>{job.status.toUpperCase()}</Badge>
+            {job.employment_type && <Badge variant="outline" className="bg-white text-zinc-600 border-zinc-200 px-3 py-1 text-xs font-bold tracking-wide rounded-full">{String(job.employment_type).replace(/_/g, " ").toUpperCase()}</Badge>}
+            {job.is_external_link && <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200 px-3 py-1 text-xs font-bold tracking-wide rounded-full">EXTERNAL</Badge>}
+            {job.source && <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200 px-3 py-1 text-xs font-bold tracking-wide rounded-full">{job.source.toUpperCase()}</Badge>}
           </div>
-          <div className="text-[11px] text-zinc-400 font-bold flex items-center gap-2 uppercase tracking-tight">
+          <div className="text-xs text-zinc-400 font-bold flex items-center gap-2 uppercase tracking-tight">
             <Clock className="h-3.5 w-3.5" />Posted {formatDistanceToNow(new Date(job.created_at), { addSuffix: true })}
           </div>
         </div>
       </div>
 
       {/* Tab bar */}
-      <div className="flex flex-wrap items-center gap-1.5 p-1 bg-zinc-100/80 rounded-2xl border border-zinc-200/80 overflow-x-auto no-scrollbar">
-        <button type="button" className={`px-5 py-2.5 rounded-xl text-[11px] font-black tracking-widest uppercase transition-all whitespace-nowrap ${activeTab === PRIMARY_TAB.id ? "bg-zinc-900 text-white shadow-[0_4px_12px_rgba(0,0,0,0.12)]" : "text-zinc-500 hover:text-zinc-900 hover:bg-white/50"}`} onClick={() => goToTab(PRIMARY_TAB.id)}>
+      <div className="flex flex-wrap items-center gap-1 p-1 bg-white rounded-2xl border border-zinc-200 shadow-sm overflow-x-auto no-scrollbar">
+        <button
+          type="button"
+          className={`px-5 py-2.5 rounded-xl text-xs font-bold tracking-wide transition-all whitespace-nowrap ${
+            activeTab === PRIMARY_TAB.id
+              ? "bg-zinc-900 text-white shadow-md"
+              : "text-zinc-500 hover:text-zinc-900 hover:bg-zinc-50"
+          }`}
+          onClick={() => goToTab(PRIMARY_TAB.id)}
+        >
           {PRIMARY_TAB.label} ({applications.length})
         </button>
-        <div className="h-6 w-px bg-zinc-300 mx-1 hidden sm:block" />
+        <div className="h-6 w-px bg-zinc-200 mx-1 hidden sm:block" />
         {SECONDARY_TABS.map((tab) => {
           const active = activeTab === tab.id
           return (
-            <button key={tab.id} className={`px-5 py-2.5 rounded-xl text-[11px] font-black tracking-widest uppercase transition-all whitespace-nowrap ${active ? "bg-white text-zinc-900 shadow-[0_4px_12px_rgba(0,0,0,0.06)] ring-1 ring-zinc-200/50" : "text-zinc-500 hover:text-zinc-900 hover:bg-white/50"}`} onClick={() => goToTab(tab.id as TabId)}>
+            <button
+              key={tab.id}
+              className={`px-5 py-2.5 rounded-xl text-xs font-bold tracking-wide transition-all whitespace-nowrap ${
+                active
+                  ? "bg-zinc-900 text-white shadow-md"
+                  : "text-zinc-500 hover:text-zinc-900 hover:bg-zinc-50"
+              }`}
+              onClick={() => goToTab(tab.id as TabId)}
+            >
               {tab.label}
             </button>
           )
@@ -301,7 +320,12 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
 
       {/* Dialogs */}
       {selectedCandidate && (
-        <CandidatePreviewDialogDynamic candidate={selectedCandidate} isOpen={!!selectedCandidate} onClose={() => setSelectedCandidate(null)} jobId={job.id} showRelevanceScore={false} />
+        <CandidateProfileSidebarDynamic
+          candidate={selectedCandidate}
+          isOpen={!!selectedCandidate}
+          onClose={() => setSelectedCandidate(null)}
+          jobId={job.id}
+        />
       )}
 
       <ShareShortlistDialog jobId={job.id} jobTitle={job.title} open={shareOpen} onOpenChange={setShareOpen} onDecisionsChanged={() => { fetchClientDecisions(); fetchApplications({ force: true }) }} />

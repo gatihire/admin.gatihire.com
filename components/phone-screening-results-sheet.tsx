@@ -11,7 +11,7 @@ import {
   DollarSign, User, Phone as PhoneIcon,
   ExternalLink, ThumbsUp, ThumbsDown, PhoneCall, Play, Pause,
   MessageSquare, BarChart3, Mic, Send, CheckCheck, MessageCircle,
-  ArrowDown, CircleDot, Smartphone, Volume2, Download
+  ArrowDown, CircleDot, Smartphone, Volume2, Download, Bot
 } from "lucide-react"
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -82,6 +82,17 @@ interface ParticipantDetail {
   whatsapp_reply_text?: string | null
   whatsapp_reply_at?: string | null
   whatsapp_history?: WhatsAppMessage[] | null
+  call_payload_json?: Record<string, unknown> | null
+  generated_questions?: string | null
+  screening_context?: {
+    jobTitle?: string
+    clientName?: string
+    origin?: string
+    salaryRange?: string
+    mustHaveSkills?: string
+    experienceRange?: string
+    location?: string
+  } | null
   candidates: {
     name: string
     email: string
@@ -155,11 +166,11 @@ function formatCost(cents: number | null | undefined): string {
   return `₹${(cents / 100).toFixed(2)}`
 }
 
-type TabId = "whatsapp" | "transcript" | "recording" | "qa" | "jd_fit"
+type TabId = "transcript" | "whatsapp" | "recording" | "qa" | "jd_fit" | "agent_config"
 
 const TABS: { id: TabId; label: string; icon: React.ElementType }[] = [
-  { id: "whatsapp", label: "WhatsApp", icon: MessageCircle },
   { id: "transcript", label: "Transcript", icon: MessageSquare },
+  { id: "whatsapp", label: "WhatsApp", icon: MessageCircle },
   { id: "recording", label: "Recording", icon: Mic },
   { id: "qa", label: "Q&A", icon: BarChart3 },
   { id: "jd_fit", label: "JD Fit", icon: Target },
@@ -178,7 +189,7 @@ export function PhoneScreeningResultsSheet({
   const [data, setData] = useState<ParticipantDetail | null>(null)
   const [approveStage, setApproveStage] = useState("shortlist")
   const [reviewBusy, setReviewBusy] = useState(false)
-  const [activeTab, setActiveTab] = useState<TabId>("whatsapp")
+  const [activeTab, setActiveTab] = useState<TabId>("transcript")
   const [isPlaying, setIsPlaying] = useState(false)
   const [audioProgress, setAudioProgress] = useState(0)
   const [audioDuration, setAudioDuration] = useState(0)
@@ -189,7 +200,7 @@ export function PhoneScreeningResultsSheet({
     if (!open || !participantId) return
     setLoading(true)
     setData(null)
-    setActiveTab("whatsapp")
+    setActiveTab("transcript")
     setIsPlaying(false)
     setAudioProgress(0)
 
@@ -786,6 +797,114 @@ export function PhoneScreeningResultsSheet({
                         </div>
                       )}
                     </div>
+                  )}
+                </div>
+              )}
+
+              {/* Agent Config Tab */}
+              {activeTab === "agent_config" && (
+                <div className="space-y-4">
+                  {/* Screening Context */}
+                  {data.screening_context && (
+                    <div className="p-3 rounded-xl bg-zinc-50 border border-zinc-100">
+                      <p className="text-xs font-bold text-zinc-500 mb-2">Screening Context</p>
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        {data.screening_context.jobTitle && (
+                          <div>
+                            <span className="text-zinc-400">Job Title:</span>
+                            <span className="text-zinc-700 ml-1 font-medium">{data.screening_context.jobTitle}</span>
+                          </div>
+                        )}
+                        {data.screening_context.clientName && (
+                          <div>
+                            <span className="text-zinc-400">Client:</span>
+                            <span className="text-zinc-700 ml-1 font-medium">{data.screening_context.clientName}</span>
+                          </div>
+                        )}
+                        {data.screening_context.location && (
+                          <div>
+                            <span className="text-zinc-400">Location:</span>
+                            <span className="text-zinc-700 ml-1 font-medium">{data.screening_context.location}</span>
+                          </div>
+                        )}
+                        {data.screening_context.experienceRange && (
+                          <div>
+                            <span className="text-zinc-400">Experience:</span>
+                            <span className="text-zinc-700 ml-1 font-medium">{data.screening_context.experienceRange}</span>
+                          </div>
+                        )}
+                        {data.screening_context.salaryRange && (
+                          <div>
+                            <span className="text-zinc-400">Salary:</span>
+                            <span className="text-zinc-700 ml-1 font-medium">{data.screening_context.salaryRange}</span>
+                          </div>
+                        )}
+                        {data.screening_context.origin && (
+                          <div>
+                            <span className="text-zinc-400">Origin:</span>
+                            <Badge variant="outline" className={`ml-1 text-[10px] font-bold ${
+                              data.screening_context.origin === "outbound" ? "bg-violet-100 text-violet-700 border-violet-200" : "bg-blue-100 text-blue-700 border-blue-200"
+                            }`}>
+                              {data.screening_context.origin}
+                            </Badge>
+                          </div>
+                        )}
+                      </div>
+                      {data.screening_context.mustHaveSkills && (
+                        <div className="mt-2">
+                          <span className="text-zinc-400 text-xs">Required Skills:</span>
+                          <div className="flex flex-wrap gap-1 mt-1">
+                            {data.screening_context.mustHaveSkills.split(",").filter(Boolean).map((skill, i) => (
+                              <Badge key={i} variant="outline" className="text-[10px] bg-white text-zinc-600 border-zinc-200">
+                                {skill.trim()}
+                              </Badge>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Generated Questions */}
+                  {data.generated_questions && (
+                    <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-100">
+                      <p className="text-xs font-bold text-emerald-600 mb-2 flex items-center gap-1">
+                        <Bot className="h-3.5 w-3.5" /> AI-Generated Screening Questions
+                      </p>
+                      <ol className="space-y-1.5">
+                        {data.generated_questions.split("\n").filter(Boolean).map((q, i) => (
+                          <li key={i} className="flex gap-2 text-xs text-zinc-700">
+                            <span className="font-bold text-emerald-600 shrink-0">{i + 1}.</span>
+                            <span>{q.replace(/^\d+\.\s*/, "")}</span>
+                          </li>
+                        ))}
+                      </ol>
+                    </div>
+                  )}
+
+                  {/* Full Bolna User Data */}
+                  {data.call_payload_json && Object.keys(data.call_payload_json).length > 0 && (
+                    <div className="p-3 rounded-xl bg-zinc-50 border border-zinc-100">
+                      <p className="text-xs font-bold text-zinc-500 mb-2">Full Bolna Agent User Data</p>
+                      <div className="space-y-2">
+                        {Object.entries(data.call_payload_json).map(([key, value]) => {
+                          if (key === "resume_text" || key === "questions") return null // Skip large fields
+                          const displayValue = typeof value === "object" ? JSON.stringify(value) : String(value || "")
+                          if (!displayValue) return null
+                          return (
+                            <div key={key} className="text-xs">
+                              <span className="text-zinc-400 font-mono">{key}:</span>
+                              <span className="text-zinc-700 ml-2 break-words">{displayValue.slice(0, 200)}{displayValue.length > 200 ? "..." : ""}</span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* No data fallback */}
+                  {!data.screening_context && !data.generated_questions && !data.call_payload_json && (
+                    <p className="text-sm text-zinc-400 text-center py-8">No agent configuration data available for this call</p>
                   )}
                 </div>
               )}

@@ -8,7 +8,7 @@ import {
 import { Checkbox } from "@/components/ui/checkbox"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
-import { Loader2, Search, User, Phone as PhoneIcon } from "lucide-react"
+import { Loader2, Search, User, Phone as PhoneIcon, ChevronDown, ChevronUp, Bot, Briefcase, MapPin, IndianRupee, Clock } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { useToast } from "@/hooks/use-toast"
 
@@ -21,6 +21,16 @@ interface CandidateItem {
   current_company: string
   source: string
   origin?: string
+}
+
+interface QuestionPreview {
+  questions: string[]
+  jobTitle: string
+  clientName: string
+  skillsRequired: string[]
+  experienceRange: string
+  salaryRange: string
+  location: string
 }
 
 interface PhoneScreeningCandidateSelectorProps {
@@ -43,6 +53,9 @@ export function PhoneScreeningCandidateSelector({
   const [searchQuery, setSearchQuery] = useState("")
   const [originFilter, setOriginFilter] = useState<"all" | "inbound" | "outbound">("all")
   const [callMode, setCallMode] = useState<"call_now" | "whatsapp_first">("call_now")
+  const [showPreview, setShowPreview] = useState(false)
+  const [previewData, setPreviewData] = useState<QuestionPreview | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
   const { toast } = useToast()
 
   const fetchCandidates = useCallback(async () => {
@@ -60,11 +73,29 @@ export function PhoneScreeningCandidateSelector({
     }
   }, [jobId])
 
+  const fetchPreview = useCallback(async () => {
+    if (previewData) return // Already loaded
+    setPreviewLoading(true)
+    try {
+      const res = await fetch(`/api/phone-screening/preview-questions?jobId=${jobId}`)
+      if (res.ok) {
+        const data = await res.json()
+        setPreviewData(data)
+      }
+    } catch {
+      /* noop */
+    } finally {
+      setPreviewLoading(false)
+    }
+  }, [jobId, previewData])
+
   useEffect(() => {
     if (!open) return
     setSelectedIds(new Set())
     setSearchQuery("")
     setOriginFilter("all")
+    setShowPreview(false)
+    setPreviewData(null)
     fetchCandidates()
   }, [open, fetchCandidates])
 
@@ -134,11 +165,11 @@ export function PhoneScreeningCandidateSelector({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[600px] max-h-[80vh] flex flex-col">
+      <DialogContent className="sm:max-w-[700px] max-h-[85vh] flex flex-col">
         <DialogHeader>
           <DialogTitle>Start Phone Screening</DialogTitle>
           <DialogDescription>
-            Select candidates to call immediately with the AI screener
+            Select candidates to call with the AI screener. Preview questions below.
           </DialogDescription>
         </DialogHeader>
 
@@ -171,6 +202,98 @@ export function PhoneScreeningCandidateSelector({
             </button>
           ))}
         </div>
+
+        {/* Questions Preview Toggle */}
+        <button
+          type="button"
+          onClick={() => {
+            setShowPreview(!showPreview)
+            if (!showPreview && !previewData) fetchPreview()
+          }}
+          className="flex items-center gap-2 px-3 py-2 rounded-lg bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 transition-colors text-left"
+        >
+          <Bot className="h-4 w-4 text-emerald-600" />
+          <span className="text-xs font-semibold text-zinc-700">
+            {showPreview ? "Hide" : "Show"} AI Agent Config & Questions
+          </span>
+          {showPreview ? (
+            <ChevronUp className="h-3.5 w-3.5 text-zinc-400 ml-auto" />
+          ) : (
+            <ChevronDown className="h-3.5 w-3.5 text-zinc-400 ml-auto" />
+          )}
+        </button>
+
+        {/* Questions Preview Panel */}
+        {showPreview && (
+          <div className="rounded-xl border border-zinc-200 bg-zinc-50/80 p-4 space-y-3 max-h-[280px] overflow-y-auto">
+            {previewLoading ? (
+              <div className="flex items-center justify-center py-4">
+                <Loader2 className="h-4 w-4 animate-spin text-zinc-400" />
+                <span className="text-xs text-zinc-500 ml-2">Generating preview questions...</span>
+              </div>
+            ) : previewData ? (
+              <>
+                {/* Job Summary */}
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="flex items-center gap-1.5 text-zinc-600">
+                    <Briefcase className="h-3.5 w-3.5 text-zinc-400" />
+                    <span className="font-medium">{previewData.jobTitle}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-zinc-600">
+                    <MapPin className="h-3.5 w-3.5 text-zinc-400" />
+                    <span>{previewData.location}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-zinc-600">
+                    <Clock className="h-3.5 w-3.5 text-zinc-400" />
+                    <span>{previewData.experienceRange}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-zinc-600">
+                    <IndianRupee className="h-3.5 w-3.5 text-zinc-400" />
+                    <span>{previewData.salaryRange}</span>
+                  </div>
+                </div>
+
+                {/* Skills */}
+                {previewData.skillsRequired.length > 0 && (
+                  <div>
+                    <p className="text-[10px] font-bold text-zinc-400 uppercase mb-1">Required Skills</p>
+                    <div className="flex flex-wrap gap-1">
+                      {previewData.skillsRequired.map((skill) => (
+                        <Badge key={skill} variant="outline" className="text-[10px] bg-white text-zinc-600 border-zinc-200">
+                          {skill}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Questions */}
+                <div>
+                  <p className="text-[10px] font-bold text-zinc-400 uppercase mb-2">
+                    AI Screening Questions ({previewData.questions.length})
+                  </p>
+                  <ol className="space-y-1.5">
+                    {previewData.questions.map((q, i) => (
+                      <li key={i} className="flex gap-2 text-xs text-zinc-700">
+                        <span className="font-bold text-emerald-600 shrink-0">{i + 1}.</span>
+                        <span>{q}</span>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+
+                {/* Agent Config Note */}
+                <div className="pt-2 border-t border-zinc-200">
+                  <p className="text-[10px] text-zinc-500 leading-relaxed">
+                    <span className="font-semibold">Agent Config:</span> The AI agent will use GPT-4.1-mini for conversation, ElevenLabs (Nila) for voice synthesis, and Deepgram for transcription. Questions are JD-specific and generated per candidate.
+                  </p>
+                </div>
+              </>
+            ) : (
+              <p className="text-xs text-zinc-500 text-center py-4">Failed to load preview</p>
+            )}
+          </div>
+        )}
 
         <div className="flex-1 overflow-y-auto min-h-0 space-y-1">
           {loading ? (

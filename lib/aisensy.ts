@@ -368,6 +368,55 @@ export class AisensyService {
     logger.info(`Bulk WhatsApp messages completed`, { success, failed, total: messages.length })
     return { success, failed, errors }
   }
+
+  /**
+   * Inbound screening invite: casual tone for candidates who applied via board-app.
+   * Includes quick-reply buttons: [Call Now] [In 10 min] [In 30 min] [In 1 hour] [Custom time]
+   */
+  async sendInboundScreeningInvite(
+    phoneNumber: string,
+    candidateName: string,
+    jobTitle: string
+  ): Promise<{ success: boolean; messageId?: string; error?: string }> {
+    const destination = this.normalizePhoneNumber(phoneNumber)
+    if (!destination) return { success: false, error: "Invalid phone number" }
+
+    const campaignName = process.env.AISENSY_SHORTLIST_TEMPLATE
+      || process.env.AISENSY_OUTREACH_TEMPLATE
+      || this.config.campaignName
+
+    return this.sendTemplate(
+      destination,
+      campaignName,
+      [candidateName, jobTitle],
+      ["ai_inbound_screening_invite"]
+    )
+  }
+
+  /**
+   * Tried-calling nudge: sent after a call fails (no-answer/busy) as retry notification.
+   * Includes quick-reply buttons: [Call Now] [In 10 min]
+   */
+  async sendTriedCallingNudge(
+    phoneNumber: string,
+    candidateName: string,
+    jobTitle: string,
+    companyName: string
+  ): Promise<{ success: boolean; messageId?: string; error?: string }> {
+    const destination = this.normalizePhoneNumber(phoneNumber)
+    if (!destination) return { success: false, error: "Invalid phone number" }
+
+    const campaignName = process.env.AISENSY_MISSED_CALL_TEMPLATE
+      || process.env.AISENSY_CALL_NUDGE_TEMPLATE
+      || this.config.campaignName
+
+    return this.sendTemplate(
+      destination,
+      campaignName,
+      [candidateName, jobTitle, companyName],
+      ["ai_tried_calling_nudge"]
+    )
+  }
 }
 
 export const aisensyService = new AisensyService()

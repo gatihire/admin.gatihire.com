@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { triggerOutboundCall } from "@/lib/plivo"
 import { logger } from "@/lib/logger"
+import { logCandidateActivity } from "@/lib/activity-logger"
 
 export const runtime = "nodejs"
 
@@ -36,6 +37,12 @@ export async function POST(request: NextRequest) {
         .from("phone_screening_participants")
         .update({ status: "whatsapp_delivered", updated_at: new Date().toISOString() })
         .eq("id", participant.id)
+      logCandidateActivity({
+        jobId: participant.job_id,
+        candidateId: participant.candidate_id,
+        participantId: participant.id,
+        eventType: "whatsapp_delivered",
+      })
       return NextResponse.json({ status: "ok" })
     }
 
@@ -44,6 +51,12 @@ export async function POST(request: NextRequest) {
         .from("phone_screening_participants")
         .update({ status: "whatsapp_read", updated_at: new Date().toISOString() })
         .eq("id", participant.id)
+      logCandidateActivity({
+        jobId: participant.job_id,
+        candidateId: participant.candidate_id,
+        participantId: participant.id,
+        eventType: "whatsapp_read",
+      })
       return NextResponse.json({ status: "ok" })
     }
 
@@ -65,6 +78,14 @@ export async function POST(request: NextRequest) {
           updated_at: new Date().toISOString(),
         })
         .eq("id", participant.id)
+
+      logCandidateActivity({
+        jobId: participant.job_id,
+        candidateId: participant.candidate_id,
+        participantId: participant.id,
+        eventType: "whatsapp_replied",
+        eventData: { button: "call_me_now" },
+      })
 
       const callResult = await triggerOutboundCall({
         to: candidate.phone,
@@ -118,6 +139,13 @@ export async function POST(request: NextRequest) {
           updated_at: new Date().toISOString(),
         })
         .eq("id", participant.id)
+      logCandidateActivity({
+        jobId: participant.job_id,
+        candidateId: participant.candidate_id,
+        participantId: participant.id,
+        eventType: "whatsapp_replied",
+        eventData: { button: "schedule_call" },
+      })
     } else if (buttonId === "not_interested") {
       await supabaseAdmin
         .from("phone_screening_participants")
@@ -127,6 +155,13 @@ export async function POST(request: NextRequest) {
           updated_at: new Date().toISOString(),
         })
         .eq("id", participant.id)
+      logCandidateActivity({
+        jobId: participant.job_id,
+        candidateId: participant.candidate_id,
+        participantId: participant.id,
+        eventType: "whatsapp_replied",
+        eventData: { button: "not_interested" },
+      })
     }
 
     return NextResponse.json({ status: "ok" })

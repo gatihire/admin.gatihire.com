@@ -395,9 +395,25 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
         .eq("candidate_id", candidate.id)
       triggered++
     } else {
+      // Store call_payload_json even on failure so retries via QStash have full context
       await supabaseAdmin
         .from("phone_screening_participants")
-        .update({ status: "failed", updated_at: new Date().toISOString() })
+        .update({
+          status: "failed",
+          call_payload_json: userData,
+          generated_questions: generatedQuestions.join("\n"),
+          gemini_prompt_used: geminiPromptUsed,
+          screening_context: {
+            jobTitle: job.title,
+            clientName: job.client_name || client?.name || "",
+            origin,
+            salaryRange: formatSalaryRange(job),
+            mustHaveSkills: Array.isArray(job.skills_must_have) ? job.skills_must_have.join(", ") : job.skills_must_have || "",
+            experienceRange: `${job.experience_min_years ?? 0}-${job.experience_max_years ?? "any"}`,
+            location: job.city || "",
+          },
+          updated_at: new Date().toISOString(),
+        })
         .eq("campaign_id", campaign.id)
         .eq("candidate_id", candidate.id)
       failed++

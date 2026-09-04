@@ -3,6 +3,7 @@ import { supabaseAdmin } from "@/lib/supabase"
 import { aisensyService } from "@/lib/aisensy"
 import { scheduleBolnaCall } from "@/lib/scheduled-call"
 import { logger } from "@/lib/logger"
+import { logCandidateActivity } from "@/lib/activity-logger"
 
 export const runtime = "nodejs"
 
@@ -33,7 +34,7 @@ function normalizePhone(phone: string): string {
   return cleaned
 }
 
-type ReplyAction = "not_interested" | "interested" | "call_me_now" | "in_10_min" | "today_evening" | "custom_time" | null
+type ReplyAction = "not_interested" | "interested" | "call_me_now" | "in_10_min" | "in_30_min" | "today_evening" | "custom_time" | null
 
 interface ClassifiedReply {
   action: ReplyAction
@@ -45,12 +46,14 @@ function classifyReply(text: string): ClassifiedReply {
   if (/(not.*interest|interest.*not|not.*needed|no thanks|no thank)/.test(t)) return { action: "not_interested" }
   if (/(interest|interested|yes|ok|okay|call me|callme|sure)/.test(t)) {
     if (/call.*(now|immediately|right now|abhi)/.test(t)) return { action: "call_me_now" }
+    if (/(30|thirty|after 30|in 30|30 min|half hour)/.test(t)) return { action: "in_30_min" }
     if (/(10|ten|after 10|in 10|10 min|few min)/.test(t)) return { action: "in_10_min" }
     if (/(evening|today evening|tonight|6 pm|6pm|5 pm|6:00)/.test(t)) return { action: "today_evening" }
     if (/call/.test(t)) return { action: "call_me_now" }
     return { action: "interested" }
   }
   if (/call/.test(t)) return { action: "call_me_now" }
+  if (/(30|thirty|after 30|in 30|30 min|half hour)/.test(t)) return { action: "in_30_min" }
   if (/(no|nhi|nahi|not now|busy)/.test(t) && !/call/.test(t)) return { action: "not_interested" }
 
   // NLP: try to parse custom time/date from free-text
@@ -215,6 +218,13 @@ async function handleInbound(raw: any) {
   if (reply === "not_interested") {
     baseUpdate.status = "not_interested"
     await supabaseAdmin.from("phone_screening_participants").update(baseUpdate).eq("id", participantId)
+    logCandidateActivity({
+      jobId: participant.job_id || "",
+      candidateId: participant.candidates?.id || "",
+      participantId,
+      eventType: "whatsapp_replied",
+      eventData: { reply_text: rawReplyText.slice(0, 500), action: "not_interested" },
+    })
     return NextResponse.json({ ok: true, action: "not_interested" })
   }
 
@@ -223,10 +233,17 @@ async function handleInbound(raw: any) {
     baseUpdate.interested_at = nowIso
     await supabaseAdmin.from("phone_screening_participants").update(baseUpdate).eq("id", participantId)
     await aisensyService.sendScheduleOptions(participant.candidates?.phone as string, candidateName)
+    logCandidateActivity({
+      jobId: participant.job_id || "",
+      candidateId: participant.candidates?.id || "",
+      participantId,
+      eventType: "whatsapp_replied",
+      eventData: { reply_text: rawReplyText.slice(0, 500), action: "interested" },
+    })
     return NextResponse.json({ ok: true, action: "interested" })
   }
 
-  // Scheduling replies (call_me_now / in_10_min / today_evening / custom_time).
+  // Scheduling replies (call_me_now / in_10_min / in_30_min / today_evening / custom_time).
   let scheduledAt: string
   let delaySec: number
 
@@ -239,6 +256,9 @@ async function handleInbound(raw: any) {
   } else if (reply === "in_10_min") {
     scheduledAt = new Date(Date.now() + 10 * 60 * 1000).toISOString()
     delaySec = 10 * 60
+  } else if (reply === "in_30_min") {
+    scheduledAt = new Date(Date.now() + 30 * 60 * 1000).toISOString()
+    delaySec = 30 * 60
   } else {
     const slot = nextEveningSlot()
     scheduledAt = slot.iso
@@ -260,6 +280,20 @@ async function handleInbound(raw: any) {
   if (!scheduled.scheduled) {
     logger.error("Failed to schedule call from WhatsApp reply", { participantId, reply, error: scheduled.error })
   }
+
+  // Log WhatsApp reply with scheduling action
+  logCandidateActivity({
+    jobId: participant.job_id || "",
+    candidateId: participant.candidates?.id || "",
+    participantId,
+    eventType: "whatsapp_replied",
+    eventData: {
+      reply_text: rawReplyText.slice(0, 500),
+      action: reply,
+      scheduled_at: scheduledAt,
+      call_scheduled: scheduled.scheduled,
+    },
+  })
 
   return NextResponse.json({ ok: true, action: reply, callScheduled: scheduled.scheduled })
 }
@@ -284,11 +318,26 @@ export async function POST(request: NextRequest) {
           updated_at: new Date().toISOString(),
         })
         .eq("whatsapp_message_id", messageId)
-        .select("id")
+        .select("id, candidate_id, job_id")
         .maybeSingle()
 
       if (!data) return NextResponse.json({ ok: true, matched: false })
       logger.info("Aisensy delivery update applied", { messageId, status })
+
+      // Log delivery status event
+      const eventType = status === "delivered" ? "whatsapp_delivered" as const
+        : status === "read" ? "whatsapp_read" as const
+        : null
+      if (eventType) {
+        logCandidateActivity({
+          jobId: data.job_id || "",
+          candidateId: data.candidate_id || "",
+          participantId: data.id,
+          eventType,
+          eventData: { delivery_status: status },
+        })
+      }
+
       return NextResponse.json({ ok: true, matched: true })
     }
 

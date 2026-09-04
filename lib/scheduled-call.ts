@@ -27,7 +27,8 @@ function clampInt(raw: string | undefined, fallback: number, min: number, max: n
 }
 
 // How many failed attempts before we stop auto-retrying a participant.
-export const MAX_CALL_ATTEMPTS = 4
+// Max 2 attempts to avoid candidate frustration.
+export const MAX_CALL_ATTEMPTS = 2
 
 // QStash accepts delays up to 24 hours.
 const MAX_DELAY_SEC = 24 * 60 * 60
@@ -161,10 +162,11 @@ export async function placeCallForParticipant(
 
   if (guard) {
     // No blind calls: only fire when the participant opted in (call_scheduled
-    // with an elapsed time) or a retry window for an already-attempted call has
-    // passed (failed). whatsapp_sent alone NEVER triggers a call.
-    if (row.status === "call_scheduled") {
-      if (!row.scheduled_call_at || new Date(row.scheduled_call_at).getTime() > Date.now()) {
+    // or scheduled with an elapsed time) or a retry window for an already-attempted
+    // call has passed (failed). whatsapp_sent alone NEVER triggers a call.
+    if (row.status === "call_scheduled" || row.status === "scheduled") {
+      const scheduledTime = row.scheduled_call_at || row.next_retry_at
+      if (!scheduledTime || new Date(scheduledTime).getTime() > Date.now()) {
         return { success: false, skipped: true, error: "Callback not due yet" }
       }
     } else if (row.status === "failed") {

@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge"
 import {
   Phone, Loader2, Play, Clock, CheckCircle, XCircle, AlertCircle,
-  PhoneCall, UserCheck, UserX, RefreshCw, Eye, ChevronRight
+  PhoneCall, PhoneOff, UserCheck, UserX, RefreshCw, Eye, ChevronRight
 } from "lucide-react"
 import { PhoneScreeningCandidateSelector } from "./phone-screening-candidate-selector"
 import { PhoneScreeningResultsSheet } from "./phone-screening-results-sheet"
@@ -56,6 +56,10 @@ const STATUS_CONFIG: Record<string, { label: string; color: string; icon: any }>
   call_scheduled: { label: "Call Scheduled", color: "bg-amber-50 text-amber-600 border-amber-200", icon: Clock },
   completed: { label: "Completed", color: "bg-green-50 text-green-600 border-green-200", icon: CheckCircle },
   failed: { label: "Failed", color: "bg-orange-50 text-orange-600 border-orange-200", icon: AlertCircle },
+  no_answer: { label: "No Answer", color: "bg-orange-50 text-orange-600 border-orange-200", icon: PhoneOff },
+  busy: { label: "Busy", color: "bg-orange-50 text-orange-600 border-orange-200", icon: PhoneOff },
+  disconnected: { label: "Disconnected", color: "bg-red-50 text-red-600 border-red-200", icon: PhoneOff },
+  retrying: { label: "Retrying", color: "bg-blue-50 text-blue-600 border-blue-200", icon: RefreshCw },
   not_interested: { label: "Not Interested", color: "bg-red-50 text-red-600 border-red-200", icon: UserX },
   unreachable: { label: "Unreachable", color: "bg-red-50 text-red-600 border-red-200", icon: XCircle },
   needs_manual_followup: { label: "Needs Follow-up", color: "bg-orange-50 text-orange-600 border-orange-200", icon: AlertCircle },

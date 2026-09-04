@@ -4,8 +4,9 @@ import { logger } from "@/lib/logger"
 import { verifyBolnaWebhook, BOLNA_TERMINAL_STATUSES, type BolnaExecution } from "@/lib/bolna"
 import { evaluateCallQuality } from "@/lib/ai-learning"
 import { aisensyService } from "@/lib/aisensy"
-import { scheduleBolnaCall } from "@/lib/scheduled-call"
+import { scheduleBolnaCall, MAX_CALL_ATTEMPTS } from "@/lib/scheduled-call"
 import { enrichTranscript, type EnrichedSummary } from "@/lib/transcript-enrichment"
+import { logCandidateActivity, type EventType } from "@/lib/activity-logger"
 
 export const runtime = "nodejs"
 
@@ -54,21 +55,35 @@ function extractVerdictFromTranscript(transcript: string): ParsedVerdict | null 
 function transcriptToSegments(transcript: string): { speaker: "ai" | "candidate"; text: string }[] {
   if (!transcript) return []
   const segments: { speaker: "ai" | "candidate"; text: string }[] = []
+
+  // Patterns for AI speaker
+  const aiPatterns = /^(assistant|ai|agent|bot|system|hiring manager|recruiter):\s*(.*)$/i
+  // Patterns for candidate/user speaker
+  const candidatePatterns = /^(user|candidate|human|applicant|interviewee|respondent):\s*(.*)$/i
+
   for (const rawLine of transcript.split("\n")) {
     const line = rawLine.trim()
     if (!line) continue
-    const assistantMatch = line.match(/^assistant:\s*(.*)$/i)
-    const userMatch = line.match(/^user:\s*(.*)$/i)
-    if (assistantMatch) {
-      if (assistantMatch[1].trim()) segments.push({ speaker: "ai", text: assistantMatch[1].trim() })
-    } else if (userMatch) {
-      if (userMatch[1].trim()) segments.push({ speaker: "candidate", text: userMatch[1].trim() })
+
+    const aiMatch = line.match(aiPatterns)
+    const candidateMatch = line.match(candidatePatterns)
+
+    if (aiMatch) {
+      if (aiMatch[2].trim()) segments.push({ speaker: "ai", text: aiMatch[2].trim() })
+    } else if (candidateMatch) {
+      if (candidateMatch[2].trim()) segments.push({ speaker: "candidate", text: candidateMatch[2].trim() })
     } else {
       // Continuation of the previous speaker's line.
       const last = segments[segments.length - 1]
       if (last) last.text = `${last.text} ${line}`
     }
   }
+
+  // If no segments were parsed but transcript has content, treat entire thing as AI speech
+  if (segments.length === 0 && transcript.trim()) {
+    segments.push({ speaker: "ai", text: transcript.trim() })
+  }
+
   return segments
 }
 
@@ -250,6 +265,13 @@ async function handleCompletedExecution(
     patch.candidate_timezone = execution.context_details.timezone
   }
 
+  // Resolve job/candidate for activity logging
+  const { data: participantMeta } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .select("candidate_id, job_id")
+    .eq("id", participantId)
+    .single()
+
   if (effectiveVerdict) {
     patch.verdict_json = effectiveVerdict
     patch.ai_summary = JSON.stringify(effectiveVerdict)
@@ -276,52 +298,80 @@ async function handleCompletedExecution(
       }
     }
 
-    // If the candidate was busy and requested a callback, schedule a QStash
-    // delayed publish so the trigger route places the next call at the agreed time.
-    if (effectiveVerdict.callback_requested || effectiveVerdict.callback_preference_text) {
-      const timezone = (execution.context_details?.timezone as string) || undefined
-      const callbackAt = parseCallbackTime(
-        effectiveVerdict.callback_time,
-        timezone || "UTC"
-      )
-      const callbackText =
-        effectiveVerdict.callback_preference_text ||
-        (effectiveVerdict.callback_time ? `Call back at ${effectiveVerdict.callback_time}` : "Call back")
-      const callbackPatch: Record<string, unknown> = {
-        status: callbackAt ? "call_scheduled" : "failed",
-        callback_preference: callbackText,
-        updated_at: now,
-      }
-      if (callbackAt) {
-        callbackPatch.scheduled_call_at = callbackAt
-        callbackPatch.next_retry_at = callbackAt
-        const delaySec = Math.max(
-          0,
-          Math.round((new Date(callbackAt).getTime() - Date.now()) / 1000)
-        )
-        const scheduled = await scheduleBolnaCall(participantId, delaySec)
-        if (!scheduled.scheduled) {
-          logger.error("Failed to schedule callback call", { participantId, error: scheduled.error })
-        }
-      } else {
-        callbackPatch.next_retry_at = new Date(Date.now() + 15 * 60 * 1000).toISOString()
-        callbackPatch.call_attempts = 1
-        const scheduled = await scheduleBolnaCall(participantId, 15 * 60)
-        if (!scheduled.scheduled) {
-          logger.error("Failed to schedule callback retry", { participantId, error: scheduled.error })
-        }
-      }
-      await supabaseAdmin
-        .from("phone_screening_participants")
-        .update(callbackPatch)
-        .eq("id", participantId)
-    }
   }
 
+  // Log call completed event
+  logCandidateActivity({
+    jobId: participantMeta?.job_id || "",
+    candidateId: participantMeta?.candidate_id || "",
+    participantId,
+    eventType: "call_completed",
+    eventData: {
+      duration_sec: rawDuration ? Number(rawDuration) : null,
+      score: effectiveVerdict?.score,
+      recommendation: effectiveVerdict?.recommendation,
+      hangup_reason: execution.telephony_data?.hangup_reason,
+    },
+  })
+
+  // Write the terminal patch first (completed status, transcript, etc.)
   await supabaseAdmin
     .from("phone_screening_participants")
     .update(patch)
     .eq("id", participantId)
+
+  // If the candidate requested a callback, override the status to call_scheduled
+  // and schedule the re-dial via QStash.
+  if (effectiveVerdict?.callback_requested || effectiveVerdict?.callback_preference_text) {
+    const timezone = (execution.context_details?.timezone as string) || undefined
+    const callbackAt = parseCallbackTime(
+      effectiveVerdict.callback_time,
+      timezone || "UTC"
+    )
+    const callbackText =
+      effectiveVerdict.callback_preference_text ||
+      (effectiveVerdict.callback_time ? `Call back at ${effectiveVerdict.callback_time}` : "Call back")
+    const callbackPatch: Record<string, unknown> = {
+      status: callbackAt ? "call_scheduled" : "failed",
+      callback_preference: callbackText,
+      updated_at: now,
+    }
+    if (callbackAt) {
+      callbackPatch.scheduled_call_at = callbackAt
+      callbackPatch.next_retry_at = callbackAt
+      const delaySec = Math.max(
+        0,
+        Math.round((new Date(callbackAt).getTime() - Date.now()) / 1000)
+      )
+      const scheduled = await scheduleBolnaCall(participantId, delaySec)
+      if (!scheduled.scheduled) {
+        logger.error("Failed to schedule callback call", { participantId, error: scheduled.error })
+      }
+    } else {
+      callbackPatch.next_retry_at = new Date(Date.now() + 15 * 60 * 1000).toISOString()
+      callbackPatch.call_attempts = 1
+      const scheduled = await scheduleBolnaCall(participantId, 15 * 60)
+      if (!scheduled.scheduled) {
+        logger.error("Failed to schedule callback retry", { participantId, error: scheduled.error })
+      }
+    }
+    await supabaseAdmin
+      .from("phone_screening_participants")
+      .update(callbackPatch)
+      .eq("id", participantId)
+
+    // Log callback scheduled event
+    logCandidateActivity({
+      jobId: participantMeta?.job_id || "",
+      candidateId: participantMeta?.candidate_id || "",
+      participantId,
+      eventType: "callback_scheduled",
+      eventData: {
+        scheduled_at: callbackAt,
+        preference: callbackText,
+      },
+    })
+  }
 
   evaluateCallQuality(participantId).then(() => {}).catch((err: any) => {
     logger.error("Async call quality evaluation failed", { participantId, error: err?.message })
@@ -379,16 +429,25 @@ async function handleFailedExecution(
   execution: BolnaExecution
 ): Promise<void> {
   const now = new Date().toISOString()
+  const currentRetryCount = (participant.retry_count || 0) + 1
+  const maxRetriesReached = currentRetryCount >= MAX_CALL_ATTEMPTS
+
   const retryMinutes =
     execution.status === "no-answer" || execution.status === "busy" ? 15 : 60
 
   const patch: Record<string, unknown> = {
-    status: "failed",
+    status: maxRetriesReached ? "unreachable" : "failed",
     bolna_status: execution.status || "failed",
     call_ended_at: now,
-    next_retry_at: new Date(Date.now() + retryMinutes * 60 * 1000).toISOString(),
+    retry_count: currentRetryCount,
     updated_at: now,
   }
+
+  // Only set next_retry_at if we haven't reached max retries
+  if (!maxRetriesReached) {
+    patch.next_retry_at = new Date(Date.now() + retryMinutes * 60 * 1000).toISOString()
+  }
+
   if (execution.error_message) {
     patch.callback_preference = `Bolna error: ${execution.error_message}`
   }
@@ -399,15 +458,54 @@ async function handleFailedExecution(
   }
   if (execution.telephony_data?.hangup_reason) {
     patch.call_hangup_reason = execution.telephony_data.hangup_reason
+    patch.call_disconnect_reason = execution.telephony_data.hangup_reason
   }
   if (execution.context_details?.timezone) {
     patch.candidate_timezone = execution.context_details.timezone
+  }
+
+  // Store partial transcript if call disconnected mid-conversation
+  if (execution.transcript && execution.status !== "no-answer" && execution.status !== "busy") {
+    patch.transcript_raw = execution.transcript
+    // Also store partial segments
+    const segments = transcriptToSegments(execution.transcript)
+    if (segments.length > 0) {
+      const rows = segments.map((s) => ({
+        participant_id: participant.id,
+        speaker: s.speaker,
+        text: s.text,
+        is_partial: true,
+      }))
+      await supabaseAdmin.from("call_transcripts").insert(rows)
+    }
   }
 
   await supabaseAdmin
     .from("phone_screening_participants")
     .update(patch)
     .eq("id", participant.id)
+
+  // Log call failed event
+  logCandidateActivity({
+    jobId: participant.jobs?.id || "",
+    candidateId: participant.candidates?.id || "",
+    participantId: participant.id,
+    eventType: execution.status === "no-answer" || execution.status === "busy" ? "call_missed" : "call_failed",
+    eventData: {
+      reason: execution.status || execution.error_message,
+      attempts: currentRetryCount,
+      maxRetriesReached,
+    },
+  })
+
+  // If max retries reached, don't send any more WhatsApp messages
+  if (maxRetriesReached) {
+    logger.info("Max call retries reached, marking as unreachable", {
+      participantId: participant.id,
+      retryCount: currentRetryCount,
+    })
+    return
+  }
 
   // Missed-call reschedule: send WhatsApp with [Call Now] [In 10 min] [In 1 hour] [Tomorrow morning]
   if (!participant.whatsapp_missed_nudge_sent && participant.candidates?.phone) {
@@ -456,6 +554,7 @@ async function handleFailedExecution(
 interface ParticipantRecord {
   id: string
   call_attempts: number
+  retry_count: number
   whatsapp_missed_nudge_sent: boolean
   whatsapp_history: Array<{ messageId: string | null; template: string; sentAt: string; status: string }> | null
   candidates?: { id: string; name?: string | null; phone?: string | null } | null
@@ -463,7 +562,7 @@ interface ParticipantRecord {
 }
 
 const PARTICIPANT_SELECT = `
-  id, call_attempts, whatsapp_missed_nudge_sent, whatsapp_history,
+  id, call_attempts, retry_count, whatsapp_missed_nudge_sent, whatsapp_history,
   candidates: candidate_id (id, name, phone),
   jobs: job_id (id, title, client_name)
 `
@@ -528,8 +627,23 @@ export async function POST(request: NextRequest) {
       if (status === "in-progress") {
         patch.status = "in_progress"
         patch.call_started_at = new Date().toISOString()
+        // Log call connected event
+        logCandidateActivity({
+          jobId: participant.jobs?.id || "",
+          candidateId: participant.candidates?.id || "",
+          participantId: participant.id,
+          eventType: "call_in_progress",
+          eventData: { bolna_status: status },
+        })
       } else if (status === "initiated" || status === "ringing") {
         patch.status = "calling"
+        logCandidateActivity({
+          jobId: participant.jobs?.id || "",
+          candidateId: participant.candidates?.id || "",
+          participantId: participant.id,
+          eventType: "call_attempted",
+          eventData: { bolna_status: status },
+        })
       }
       await supabaseAdmin
         .from("phone_screening_participants")

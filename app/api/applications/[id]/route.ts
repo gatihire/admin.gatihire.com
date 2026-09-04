@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { sendRejectionEmail } from "@/lib/mailer"
+import { logCandidateActivity } from "@/lib/activity-logger"
 
 export async function PUT(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   try {
@@ -50,6 +51,18 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
 
     if (error) {
       return NextResponse.json({ error: error.message }, { status: 500 })
+    }
+
+    // Log stage changed event if status actually changed
+    if (status && currentApp.status !== status) {
+      logCandidateActivity({
+        jobId: currentApp.job_id,
+        candidateId: currentApp.candidate_id,
+        applicationId: id,
+        eventType: "stage_changed",
+        eventData: { from: currentApp.status, to: status },
+        actor: "hr",
+      })
     }
 
     // Send rejection email for inbound/board-app candidates

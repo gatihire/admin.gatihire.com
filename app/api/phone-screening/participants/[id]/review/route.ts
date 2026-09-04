@@ -3,6 +3,7 @@ import { supabaseAdmin } from "@/lib/supabase"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { logger } from "@/lib/logger"
 import { invalidateSessionCache } from "@/lib/utils"
+import { logCandidateActivity } from "@/lib/activity-logger"
 
 export const runtime = "nodejs"
 
@@ -32,7 +33,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
     const { data: participant, error: pErr } = await supabaseAdmin
       .from("phone_screening_participants")
-      .select("id, job_id, candidate_id, status, review_status")
+      .select("id, job_id, candidate_id, status, review_status, ai_score, ai_recommendation")
       .eq("id", id)
       .single()
 
@@ -72,7 +73,34 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         .from("applications")
         .update({ status: targetStatus, updated_at: now })
         .eq("id", app.id)
+
+      // Log stage changed event
+      logCandidateActivity({
+        jobId: participant.job_id,
+        candidateId: participant.candidate_id,
+        applicationId: app.id,
+        participantId: participant.id,
+        eventType: "stage_changed",
+        eventData: { from: participant.status, to: targetStatus },
+        actor: ctx.authUser.id,
+      })
     }
+
+    // Log screening reviewed event
+    logCandidateActivity({
+      jobId: participant.job_id,
+      candidateId: participant.candidate_id,
+      applicationId: app?.id,
+      participantId: participant.id,
+      eventType: "screening_reviewed",
+      eventData: {
+        decision,
+        next_stage: targetStatus,
+        score: participant.ai_score,
+        recommendation: participant.ai_recommendation,
+      },
+      actor: ctx.authUser.id,
+    })
 
     invalidateSessionCache("internal:applications:", { prefix: true })
 

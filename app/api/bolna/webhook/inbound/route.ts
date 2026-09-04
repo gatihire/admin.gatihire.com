@@ -3,6 +3,7 @@ import { supabaseAdmin } from "@/lib/supabase"
 import { logger } from "@/lib/logger"
 import { verifyBolnaWebhook } from "@/lib/bolna"
 import { placeBolnaCall } from "@/lib/bolna"
+import { logCandidateActivity } from "@/lib/activity-logger"
 
 export const runtime = "nodejs"
 
@@ -141,6 +142,15 @@ export async function POST(request: NextRequest) {
       .eq("id", participant.id)
 
     logger.info("Bolna inbound call triggered", { participantId: participant.id, executionId: result.executionId })
+
+    // Log inbound call attempt
+    logCandidateActivity({
+      jobId: participant.jobs?.id || "",
+      candidateId: participant.candidate_id,
+      participantId: participant.id,
+      eventType: "call_attempted",
+      eventData: { direction: "inbound", bolna_execution_id: result.executionId },
+    })
 
     return NextResponse.json({ status: "ok", executionId: result.executionId })
   } catch (error: any) {

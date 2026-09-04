@@ -5,7 +5,7 @@ import { getBolnaExecution, BOLNA_TERMINAL_STATUSES } from "@/lib/bolna"
 
 export const runtime = "nodejs"
 
-const STUCK_AFTER_MINUTES = 30
+const STUCK_AFTER_MINUTES = 3
 
 export async function GET(request: NextRequest) {
   try {
