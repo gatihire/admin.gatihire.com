@@ -362,7 +362,7 @@ export function CandidateProfileSidebar({
         {/* ═══════════════════════════════════════════════════════════════
             AI MATCH ANALYSIS
             ═══════════════════════════════════════════════════════════════ */}
-        {aiInfo && (
+        {(aiInfo?.score != null || aiInfo?.recommendation) && (
           <div className="px-7 py-4 border-b border-zinc-100 bg-white">
             <p className="font-mono text-[10px] font-bold uppercase tracking-[0.1em] text-zinc-400 mb-2">
               AI Match Analysis
@@ -420,7 +420,7 @@ export function CandidateProfileSidebar({
           <ScrollArea className="flex-1">
             {/* ── Screening Tab ── */}
             <TabsContent value="screening" className="px-7 py-5 space-y-5 mt-0">
-              {aiInfo ? (
+              {aiInfo?.score != null || aiInfo?.recommendation ? (
                 <>
                   <div className="grid grid-cols-3 gap-3">
                     <div className="p-3 rounded-xl border border-zinc-200 bg-white text-center">
