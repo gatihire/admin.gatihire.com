@@ -162,26 +162,46 @@ export async function getOrAnalyzeFit(
   console.log(`[getOrAnalyzeFit] Analyzing fit for job=${jobId} candidate=${candidateId} force=${force}`)
   const fit = await analyzeFit(candidate, job)
 
-  // Upsert with error checking - throw if persistence fails
-  const { error: upsertError } = await supabaseAdmin
-    .from("candidate_job_fit")
-    .upsert(
-      {
-        job_id: jobId,
-        candidate_id: candidateId,
-        fit_score: fit.fit_score,
-        fit_json: fit,
-        summary: fit.summary,
-        analyzed_at: new Date().toISOString(),
-      },
-      { onConflict: "job_id,candidate_id" }
-    )
+  // Upsert with retry logic for race conditions
+  let attempt = 0
+  const maxAttempts = 3
+  while (attempt < maxAttempts) {
+    attempt++
+    try {
+      const { error: upsertError } = await supabaseAdmin
+        .from("candidate_job_fit")
+        .upsert(
+          {
+            job_id: jobId,
+            candidate_id: candidateId,
+            fit_score: fit.fit_score,
+            fit_json: fit,
+            summary: fit.summary,
+            analyzed_at: new Date().toISOString(),
+          },
+          { onConflict: "job_id,candidate_id", ignoreDuplicates: false }
+        )
 
-  if (upsertError) {
-    console.error(`[getOrAnalyzeFit] Upsert FAILED for job=${jobId} candidate=${candidateId}:`, upsertError)
-    throw new Error(`Failed to persist fit score: ${upsertError.message}`)
+      if (upsertError) {
+        // If it's a unique constraint violation (race condition), retry
+        if (upsertError.code === "23505" && attempt < maxAttempts) {
+          console.warn(`[getOrAnalyzeFit] Race condition detected, retrying (attempt ${attempt + 1}/${maxAttempts})...`)
+          await new Promise(r => setTimeout(r, 50 * attempt)) // exponential backoff
+          continue
+        }
+        console.error(`[getOrAnalyzeFit] Upsert FAILED for job=${jobId} candidate=${candidateId}:`, upsertError)
+        throw new Error(`Failed to persist fit score: ${upsertError.message}`)
+      }
+
+      console.log(`[getOrAnalyzeFit] Upsert SUCCESS for job=${jobId} candidate=${candidateId} score=${fit.fit_score}`)
+      return fit
+    } catch (err) {
+      if (attempt >= maxAttempts) throw err
+      // For non-unique-constraint errors, don't retry
+      if (err instanceof Error && !err.message.includes("23505")) throw err
+      await new Promise(r => setTimeout(r, 50 * attempt))
+    }
   }
 
-  console.log(`[getOrAnalyzeFit] Upsert SUCCESS for job=${jobId} candidate=${candidateId} score=${fit.fit_score}`)
-  return fit
+  throw new Error("Max retries exceeded")
 }

@@ -150,7 +150,8 @@ export async function POST(request: NextRequest) {
     ])
 
     if (jobRes.data && candidateRes.data) {
-      getOrAnalyzeFit(job_id, candidate_id, candidateRes.data, jobRes.data).catch(() => {})
+      getOrAnalyzeFit(job_id, candidate_id, candidateRes.data, jobRes.data)
+        .catch((err) => console.error(`[applications POST] Fit analysis failed for job=${job_id} candidate=${candidate_id}:`, err?.message || err))
     }
 
     return NextResponse.json(data)

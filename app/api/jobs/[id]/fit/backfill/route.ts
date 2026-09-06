@@ -4,6 +4,36 @@ import { supabaseAdmin } from "@/lib/supabase"
 import { getOrAnalyzeFit } from "@/lib/candidate-fit"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 
+const CONCURRENCY_LIMIT = 5
+
+async function processQueue<T, R>(
+  items: T[],
+  processor: (item: T) => Promise<R>,
+  concurrency: number
+): Promise<{ results: R[]; errors: Array<{ item: T; error: string }> }> {
+  const results: R[] = []
+  const errors: Array<{ item: T; error: string }> = []
+  let index = 0
+
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (true) {
+      const itemIndex = index++
+      if (itemIndex >= items.length) break
+      const item = items[itemIndex]
+      try {
+        const result = await processor(item)
+        results.push(result)
+      } catch (err: unknown) {
+        const errorMessage = err instanceof Error ? err.message : String(err)
+        errors.push({ item, error: errorMessage })
+      }
+    }
+  })
+
+  await Promise.all(workers)
+  return { results, errors }
+}
+
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const ctx = await getInternalAuthContext(request)
   if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
@@ -60,21 +90,18 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       })
     }
 
-    let generated = 0
-    let failed = 0
-    const errors: Array<{ candidateId: string; error: string }> = []
-
-    for (const candidate of candidates) {
-      try {
+    const { results, errors } = await processQueue(
+      candidates,
+      async (candidate) => {
         console.log(`[backfill] Processing candidate ${candidate.id}`)
         await getOrAnalyzeFit(jobId, candidate.id, candidate, jobRes.data)
-        generated++
-      } catch (err: any) {
-        console.error(`[backfill] Failed for candidate ${candidate.id}:`, err?.message || err)
-        failed++
-        errors.push({ candidateId: candidate.id, error: err?.message || String(err) })
-      }
-    }
+        return candidate.id
+      },
+      CONCURRENCY_LIMIT
+    )
+
+    const generated = results.length
+    const failed = errors.length
 
     console.log(`[backfill] Complete: generated=${generated}, failed=${failed}, total=${missingIds.length}`)
     return NextResponse.json({
