@@ -163,9 +163,8 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
     try {
       const res = await fetch(`/api/jobs/${job.id}/fit/backfill`, { method: "POST" })
       const data = await res.json()
-      if (data.generated > 0) {
-        fetchPipeline({ force: true })
-      }
+      // Always refetch pipeline after backfill completes to get updated scores
+      await fetchPipeline({ force: true })
     } catch { /* noop */ }
     setBackfillRunning(false)
   }

@@ -37,6 +37,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
     let generated = 0
     let failed = 0
+    const errors: Array<{ candidateId: string; error: string }> = []
 
     for (const candidate of candidates || []) {
       try {
@@ -45,6 +46,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       } catch (err: any) {
         console.error(`Fit backfill failed for candidate ${candidate.id}:`, err?.message || err)
         failed++
+        errors.push({ candidateId: candidate.id, error: err?.message || String(err) })
       }
     }
 
@@ -53,6 +55,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       generated,
       failed,
       total: missingIds.length,
+      errors: errors.length > 0 ? errors : undefined,
       message: `Generated ${generated} fit scores (${failed} failed) out of ${missingIds.length} missing`,
     })
   } catch (error: any) {
