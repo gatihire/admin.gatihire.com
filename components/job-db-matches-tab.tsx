@@ -301,6 +301,11 @@ export function DbMatchesTab({ jobId, onViewProfile, onCandidateAdded }: DbMatch
   const [insightLoading, setInsightLoading] = useState<Set<string>>(new Set())
   const [outreachBusy, setOutreachBusy] = useState(false)
 
+  // Origin modal state
+  const [originModalOpen, setOriginModalOpen] = useState(false)
+  const [originModalCandidateIds, setOriginModalCandidateIds] = useState<string[]>([])
+  const [selectedOrigin, setSelectedOrigin] = useState<"inbound" | "outbound">("outbound")
+
   const { toast } = useToast()
   const abortControllerRef = useRef<AbortController | null>(null)
   const debounceRef = useRef<NodeJS.Timeout | null>(null)
@@ -501,11 +506,20 @@ export function DbMatchesTab({ jobId, onViewProfile, onCandidateAdded }: DbMatch
   }, [jobId, outreachBusy, toast, fetchMatches])
 
   const addToPipeline = useCallback(async (candidateIds: string[]) => {
+    if (candidateIds.length === 0) return
+    // Open origin modal instead of directly adding
+    setOriginModalCandidateIds(candidateIds)
+    setOriginModalOpen(true)
+  }, [])
+
+  const confirmAddToPipeline = useCallback(async () => {
+    const candidateIds = originModalCandidateIds
+    if (candidateIds.length === 0) return
     try {
       const res = await fetch(`/api/jobs/${jobId}/bulk-action`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ candidateIds, action: "shortlist" }),
+        body: JSON.stringify({ candidateIds, action: "shortlist", origin: selectedOrigin }),
       })
       const data = await res.json()
       if (res.ok) {
@@ -519,8 +533,11 @@ export function DbMatchesTab({ jobId, onViewProfile, onCandidateAdded }: DbMatch
     } catch (err) {
       console.error("Add to pipeline failed:", err)
       toast({ title: "Error", description: "Failed to add to pipeline", variant: "destructive" })
+    } finally {
+      setOriginModalOpen(false)
+      setOriginModalCandidateIds([])
     }
-  }, [jobId, onCandidateAdded, toast, fetchMatches])
+  }, [jobId, onCandidateAdded, toast, fetchMatches, selectedOrigin, originModalCandidateIds])
 
   const rejectCandidates = useCallback(async (candidateIds: string[]) => {
     try {
@@ -1003,6 +1020,46 @@ export function DbMatchesTab({ jobId, onViewProfile, onCandidateAdded }: DbMatch
           </div>
         )}
       </div>
+      {originModalOpen && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+        <div className="bg-white rounded-2xl shadow-xl w-full max-w-md mx-4">
+          <div className="p-6 space-y-4">
+            <h3 className="text-lg font-bold text-zinc-900">Add {originModalCandidateIds.length} candidate{originModalCandidateIds.length > 1 ? "s" : ""} to Pipeline</h3>
+            <p className="text-sm text-zinc-500">Are these candidates <strong>Inbound</strong> (applied to us) or <strong>Outbound</strong> (we sourced them)?</p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setSelectedOrigin("inbound")}
+                className={`flex-1 py-3 rounded-xl border-2 text-sm font-semibold transition-all ${
+                  selectedOrigin === "inbound"
+                    ? "border-blue-500 bg-blue-50 text-blue-700"
+                    : "border-zinc-200 text-zinc-600 hover:border-zinc-300"
+                }`}
+              >
+                <div className="text-xs text-zinc-400 uppercase tracking-wider mb-1">Inbound</div>
+                <div>Applied to us</div>
+                <div className="text-xs text-zinc-400 mt-1">Portal, Board, LinkedIn, etc.</div>
+              </button>
+              <button
+                onClick={() => setSelectedOrigin("outbound")}
+                className={`flex-1 py-3 rounded-xl border-2 text-sm font-semibold transition-all ${
+                  selectedOrigin === "outbound"
+                    ? "border-violet-500 bg-violet-50 text-violet-700"
+                    : "border-zinc-200 text-zinc-600 hover:border-zinc-300"
+                }`}
+              >
+                <div className="text-xs text-zinc-400 uppercase tracking-wider mb-1">Outbound</div>
+                <div>We sourced them</div>
+                <div className="text-xs text-zinc-400 mt-1">DB Match, Recruiter Upload</div>
+              </button>
+            </div>
+            <div className="flex gap-2 pt-2">
+              <Button variant="outline" className="flex-1" onClick={() => setOriginModalOpen(false)}>Cancel</Button>
+              <Button className="flex-1" onClick={confirmAddToPipeline}>Confirm & Add</Button>
+            </div>
+</div>
+      </div>
+    </div>
+    )}
     </div>
   )
 }

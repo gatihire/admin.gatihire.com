@@ -142,32 +142,24 @@ export async function getOrAnalyzeFit(
   force = false
 ): Promise<FitResult> {
   if (!force) {
-    const { data: cached } = await supabaseAdmin
+    const { data: cached, error: cacheError } = await supabaseAdmin
       .from("candidate_job_fit")
       .select("fit_score, fit_json, summary")
       .eq("job_id", jobId)
       .eq("candidate_id", candidateId)
       .maybeSingle()
 
+    if (cacheError) {
+      console.error(`[getOrAnalyzeFit] Cache query error for job=${jobId} candidate=${candidateId}:`, cacheError.message)
+    }
+
     if (cached?.fit_json) {
+      console.log(`[getOrAnalyzeFit] Cache hit for job=${jobId} candidate=${candidateId}`)
       return parseCachedFit(cached)
     }
   }
 
-  // Double-check after first query (race condition guard)
-  if (!force) {
-    const { data: recheck } = await supabaseAdmin
-      .from("candidate_job_fit")
-      .select("fit_score, fit_json, summary")
-      .eq("job_id", jobId)
-      .eq("candidate_id", candidateId)
-      .maybeSingle()
-
-    if (recheck?.fit_json) {
-      return parseCachedFit(recheck)
-    }
-  }
-
+  console.log(`[getOrAnalyzeFit] Analyzing fit for job=${jobId} candidate=${candidateId} force=${force}`)
   const fit = await analyzeFit(candidate, job)
 
   // Upsert with error checking - throw if persistence fails
@@ -186,9 +178,10 @@ export async function getOrAnalyzeFit(
     )
 
   if (upsertError) {
-    console.error("Failed to persist fit score:", upsertError)
+    console.error(`[getOrAnalyzeFit] Upsert FAILED for job=${jobId} candidate=${candidateId}:`, upsertError)
     throw new Error(`Failed to persist fit score: ${upsertError.message}`)
   }
 
+  console.log(`[getOrAnalyzeFit] Upsert SUCCESS for job=${jobId} candidate=${candidateId} score=${fit.fit_score}`)
   return fit
 }

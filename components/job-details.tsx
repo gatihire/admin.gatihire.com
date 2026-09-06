@@ -131,10 +131,15 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
     setApplicationLoading(true)
     try {
       const cacheKey = `internal:pipeline:job:${job.id}`
+      if (opts?.force) {
+        invalidateSessionCache(cacheKey)
+      }
+      console.log(`[fetchPipeline] Fetching pipeline for job=${job.id} force=${opts?.force}`)
       const data = await cachedFetchJson<any>(
         cacheKey, `/api/jobs/${job.id}/pipeline`,
         undefined, { ttlMs: 30_000, force: Boolean(opts?.force) }
       )
+      console.log(`[fetchPipeline] Received data: applications=${data?.applications?.length}, fitScores=${Object.keys(data?.fitScores || {}).length}, missingFitCount=${data?.missingFitCount}`)
       if (data) {
         const newApps = Array.isArray(data.applications) ? data.applications : []
         setApplications(prev => {
@@ -150,7 +155,8 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
           runBackfill()
         }
       }
-    } catch {
+    } catch (err) {
+      console.error("[fetchPipeline] Error:", err)
       toast({ title: "Failed to load candidates", variant: "destructive" })
     } finally {
       setApplicationLoading(false)
@@ -161,11 +167,15 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
     if (backfillRunning) return
     setBackfillRunning(true)
     try {
+      console.log(`[runBackfill] Starting backfill for job=${job.id}`)
       const res = await fetch(`/api/jobs/${job.id}/fit/backfill`, { method: "POST" })
       const data = await res.json()
+      console.log(`[runBackfill] Backfill complete:`, data)
       // Always refetch pipeline after backfill completes to get updated scores
       await fetchPipeline({ force: true })
-    } catch { /* noop */ }
+    } catch (err) {
+      console.error("[runBackfill] Error:", err)
+    }
     setBackfillRunning(false)
   }
 

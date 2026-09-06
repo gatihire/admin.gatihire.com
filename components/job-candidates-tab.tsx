@@ -396,6 +396,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
   } | null>(null)
   const [rejectionReason, setRejectionReason] = useState("")
   const [filter, setFilter] = useState<FilterValue>("all")
+  const [allViewTab, setAllViewTab] = useState<"inbound" | "outbound">("inbound")
   const [callSubFilter, setCallSubFilter] = useState<CallSubFilter>(() =>
     activeCallSubFilter && activeCallSubFilter !== "all" ? (activeCallSubFilter as CallSubFilter) : "all"
   )
@@ -581,6 +582,11 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
 
   const filtered = baseFiltered
     .filter((a) => {
+      if (activeStage === "all") {
+        if (allViewTab === "inbound") return (a.origin || "inbound") === "inbound"
+        if (allViewTab === "outbound") return (a.origin || "inbound") === "outbound"
+        return true
+      }
       if (filter === "all") return true
       if (filter === "inbound") return (a.origin || "inbound") === "inbound"
       if (filter === "outbound") return (a.origin || "inbound") === "outbound"
@@ -792,27 +798,56 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
           })}
         </motion.div>
 
-        {/* ── Source Filter Bar ── */}
-        <div className="flex flex-wrap items-center gap-1.5 px-1">
-          <Filter className="h-3.5 w-3.5 text-zinc-400" />
-          <Select value={filter} onValueChange={(v) => setFilter(v as FilterValue)}>
-            <SelectTrigger className="h-7 w-44 text-xs bg-white rounded-lg border-zinc-200">
-              <SelectValue placeholder="Filter candidates" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All candidates</SelectItem>
-              <SelectItem value="inbound">Inbound · applied to us</SelectItem>
-              <SelectItem value="outbound">Outbound · we sourced</SelectItem>
-              <SelectItem value="database">Database matches</SelectItem>
-              <SelectItem value="board-app">Talent Portal</SelectItem>
-            </SelectContent>
-          </Select>
-          {filter !== "all" && (
-            <button className="text-xs font-semibold text-zinc-400 hover:text-zinc-600 px-1.5 py-1" onClick={() => setFilter("all")}>
-              Clear
+        {/* ── All View: Inbound / Outbound Tabs ── */}
+        {activeStage === "all" && (
+          <div className="flex flex-wrap items-center gap-1.5 px-1">
+            <span className="text-xs font-bold text-zinc-400 uppercase mr-1">View:</span>
+            <button
+              onClick={() => setAllViewTab("inbound")}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold uppercase tracking-wide transition-all ${
+                allViewTab === "inbound"
+                  ? "bg-blue-600 text-white shadow-sm"
+                  : "bg-zinc-100 text-zinc-500 hover:bg-zinc-200"
+              }`}
+            >
+              Inbound <span className="ml-1 text-[10px] opacity-70">(applied to us)</span>
             </button>
-          )}
-        </div>
+            <button
+              onClick={() => setAllViewTab("outbound")}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold uppercase tracking-wide transition-all ${
+                allViewTab === "outbound"
+                  ? "bg-violet-600 text-white shadow-sm"
+                  : "bg-zinc-100 text-zinc-500 hover:bg-zinc-200"
+              }`}
+            >
+              Outbound <span className="ml-1 text-[10px] opacity-70">(we sourced)</span>
+            </button>
+          </div>
+        )}
+
+        {/* ── Source Filter Bar (for non-All stages) ── */}
+        {activeStage !== "all" && (
+          <div className="flex flex-wrap items-center gap-1.5 px-1">
+            <Filter className="h-3.5 w-3.5 text-zinc-400" />
+            <Select value={filter} onValueChange={(v) => setFilter(v as FilterValue)}>
+              <SelectTrigger className="h-7 w-44 text-xs bg-white rounded-lg border-zinc-200">
+                <SelectValue placeholder="Filter candidates" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All candidates</SelectItem>
+                <SelectItem value="inbound">Inbound · applied to us</SelectItem>
+                <SelectItem value="outbound">Outbound · we sourced</SelectItem>
+                <SelectItem value="database">Database matches</SelectItem>
+                <SelectItem value="board-app">Talent Portal</SelectItem>
+              </SelectContent>
+            </Select>
+            {filter !== "all" && (
+              <button className="text-xs font-semibold text-zinc-400 hover:text-zinc-600 px-1.5 py-1" onClick={() => setFilter("all")}>
+                Clear
+              </button>
+            )}
+          </div>
+        )}
 
         {/* ── AI Screen Sub-Filters ── */}
         {activeStage === "ai_screen" && (

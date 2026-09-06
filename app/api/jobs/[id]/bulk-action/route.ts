@@ -6,11 +6,12 @@ import { logger } from "@/lib/logger"
 export const runtime = "nodejs"
 
 const VALID_ACTIONS = new Set(["shortlist", "reject"])
+const VALID_ORIGINS = new Set(["inbound", "outbound"])
 
 /**
  * Bulk pipeline actions from the DB Matches tab.
  * POST /api/jobs/[id]/bulk-action
- * body: { candidateIds: string[], action: "shortlist" | "reject" }
+ * body: { candidateIds: string[], action: "shortlist" | "reject", origin?: "inbound" | "outbound" }
  */
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -26,6 +27,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       ? body.candidateIds.map((v: unknown) => String(v)).filter(Boolean).slice(0, 200)
       : []
     const action = String(body?.action || "")
+    const origin = VALID_ORIGINS.has(body?.origin) ? body.origin : "outbound"
 
     if (candidateIds.length === 0) {
       return NextResponse.json({ error: "candidateIds are required" }, { status: 400 })
@@ -130,7 +132,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         candidate_id: cid,
         status: "shortlist",
         source: "database",
-        origin: "outbound",
+        origin,
         ...(matchScore != null ? { match_score: matchScore } : {}),
       })
       if (insError) errors.push(insError.message)
