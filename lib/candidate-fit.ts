@@ -6,7 +6,6 @@
 
 import { GoogleGenerativeAI } from "@google/generative-ai"
 import { supabaseAdmin } from "@/lib/supabase"
-import crypto from "crypto"
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "")
 const DEFAULT_GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash"
@@ -124,11 +123,6 @@ Guidance:
   }
 }
 
-function advisoryLockKey(jobId: string, candidateId: string): number {
-  const hash = crypto.createHash("md5").update(`${jobId}:${candidateId}`).digest("hex")
-  return parseInt(hash.slice(0, 8), 16) | 0
-}
-
 function parseCachedFit(row: { fit_score: number | null; fit_json: unknown; summary: string | null }): FitResult {
   const parsed = row.fit_json as FitResult
   return {
@@ -160,27 +154,26 @@ export async function getOrAnalyzeFit(
     }
   }
 
-  const lockKey = advisoryLockKey(jobId, candidateId)
+  // Double-check after first query (race condition guard)
+  if (!force) {
+    const { data: recheck } = await supabaseAdmin
+      .from("candidate_job_fit")
+      .select("fit_score, fit_json, summary")
+      .eq("job_id", jobId)
+      .eq("candidate_id", candidateId)
+      .maybeSingle()
 
-  try {
-    await supabaseAdmin.rpc("pg_advisory_lock", { lock_key: lockKey })
-
-    if (!force) {
-      const { data: recheck } = await supabaseAdmin
-        .from("candidate_job_fit")
-        .select("fit_score, fit_json, summary")
-        .eq("job_id", jobId)
-        .eq("candidate_id", candidateId)
-        .maybeSingle()
-
-      if (recheck?.fit_json) {
-        return parseCachedFit(recheck)
-      }
+    if (recheck?.fit_json) {
+      return parseCachedFit(recheck)
     }
+  }
 
-    const fit = await analyzeFit(candidate, job)
+  const fit = await analyzeFit(candidate, job)
 
-    await supabaseAdmin.from("candidate_job_fit").upsert(
+  // Upsert with error checking - throw if persistence fails
+  const { error: upsertError } = await supabaseAdmin
+    .from("candidate_job_fit")
+    .upsert(
       {
         job_id: jobId,
         candidate_id: candidateId,
@@ -192,8 +185,10 @@ export async function getOrAnalyzeFit(
       { onConflict: "job_id,candidate_id" }
     )
 
-    return fit
-  } finally {
-    await supabaseAdmin.rpc("pg_advisory_unlock", { lock_key: lockKey })
+  if (upsertError) {
+    console.error("Failed to persist fit score:", upsertError)
+    throw new Error(`Failed to persist fit score: ${upsertError.message}`)
   }
+
+  return fit
 }
