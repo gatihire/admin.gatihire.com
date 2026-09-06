@@ -63,7 +63,7 @@ as $$
     count(*) filter (where a.status = 'hired') as hired
   from applications a
   left join jobs j on j.id = a.job_id
-  where a.created_at >= from_ts
+  where a.applied_at >= from_ts
     and a.source is not null
     and a.source <> ''
   group by 1, 2

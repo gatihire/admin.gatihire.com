@@ -202,6 +202,28 @@ Return ONLY valid JSON:
         ? jobRow.experience_max_years
         : criteria.max_experience_years ?? null
 
+    // Build mappedCriteria early so we can pass must-have skills to SQL filters
+    const mappedCriteria = {
+      role: jobTitle,
+      location: jobLocation,
+      min_experience_years: jobMinExp,
+      max_experience_years: jobMaxExp,
+      skills: Array.from(new Set([
+        ...(Array.isArray(jobRow?.skills_must_have) ? jobRow.skills_must_have : []),
+        ...(Array.isArray(jobRow?.skills_good_to_have) ? jobRow.skills_good_to_have : []),
+        ...(criteria.required_skills || []),
+        ...(criteria.preferred_skills || []),
+      ].filter(Boolean))),
+      must_have_skills: Array.from(new Set([
+        ...(Array.isArray(jobRow?.skills_must_have) ? jobRow.skills_must_have : []),
+        ...(criteria.required_skills || []),
+      ].filter(Boolean))),
+      good_to_have_skills: Array.from(new Set([
+        ...(Array.isArray(jobRow?.skills_good_to_have) ? jobRow.skills_good_to_have : []),
+        ...(criteria.preferred_skills || []),
+      ].filter(Boolean))),
+    }
+
     // Client parity: role variants first, then skills + keywords
     const roleVariants = expandRoleVariants(jobTitle)
     const allKeyTerms = [...roleVariants, ...(criteria.required_skills || []), ...(criteria.key_keywords || [])].filter(Boolean)
@@ -213,12 +235,20 @@ Return ONLY valid JSON:
     // Step 3: Single hybrid search via the deployed RPC (same engine as the client portal).
     // SOFT RANKING: no hard SQL filters — the JD's city/exp/keyword requirements are
     // weighted by the JS re-scorer below instead of shrinking the candidate pool.
+    // BUT we still pass filters to SQL to reduce the retrieval pool size and improve quality.
+    const p_filters = {
+      currentCity: jobLocation ? [jobLocation] : [],
+      exp_min: jobMinExp ?? null,
+      exp_max: jobMaxExp ?? null,
+      must_kw: mappedCriteria.must_have_skills || [],
+      exclude_kw: [],
+    }
     let rows: any[] = []
     const { data: rpcData, error: rpcError } = await supabaseAdmin.rpc("search_candidates_hybrid", {
       p_query_text: websearchQ,
       p_query_embedding: embedding.length ? embedding : null,
-      p_match_threshold: 0.05,
-      p_filters: {},
+      p_match_threshold: 0.30,
+      p_filters,
       p_limit: 500,
       p_offset: 0,
     })
@@ -235,7 +265,7 @@ Return ONLY valid JSON:
     }
     dbg.rpcRawCount = rows.length
 
-    // Safety net: the RPC's text-match leg can zero out the whole result set
+// Safety net: the RPC's text-match leg can zero out the whole result set
     // (e.g. the JD title becomes one long quoted phrase that matches nothing).
     // The embedding leg is independent and proven — retry pure-vector once.
     if (!rpcError && rows.length === 0 && embedding.length > 0 && websearchQ) {
@@ -243,8 +273,8 @@ Return ONLY valid JSON:
       const { data: vecData, error: vecError } = await supabaseAdmin.rpc("search_candidates_hybrid", {
         p_query_text: "",
         p_query_embedding: embedding,
-      p_match_threshold: 0.05,
-        p_filters: {},
+        p_match_threshold: 0.30,
+        p_filters,
         p_limit: 500,
         p_offset: 0,
       })
@@ -265,27 +295,6 @@ Return ONLY valid JSON:
     // so multiplying it by 100 inflated everyone to 100%. It is used ONLY for
     // retrieval ordering; the displayed/persisted score comes from the JS
     // breakdown formula (role 35 + skills 30 + experience 20 + location 15).
-    const mappedCriteria = {
-      role: jobTitle,
-      location: jobLocation,
-      min_experience_years: jobMinExp,
-      max_experience_years: jobMaxExp,
-      skills: Array.from(new Set([
-        ...(Array.isArray(jobRow?.skills_must_have) ? jobRow.skills_must_have : []),
-        ...(Array.isArray(jobRow?.skills_good_to_have) ? jobRow.skills_good_to_have : []),
-        ...(criteria.required_skills || []),
-        ...(criteria.preferred_skills || []),
-      ].filter(Boolean))),
-      // Phase 3: separate must-have vs good-to-have for weighted scoring
-      must_have_skills: Array.from(new Set([
-        ...(Array.isArray(jobRow?.skills_must_have) ? jobRow.skills_must_have : []),
-        ...(criteria.required_skills || []),
-      ].filter(Boolean))),
-      good_to_have_skills: Array.from(new Set([
-        ...(Array.isArray(jobRow?.skills_good_to_have) ? jobRow.skills_good_to_have : []),
-        ...(criteria.preferred_skills || []),
-      ].filter(Boolean))),
-    }
 
     const keywordPool = mappedCriteria.skills.length > 0 ? mappedCriteria.skills : allKeyTerms
     const scored = rows.map((row: any) => {

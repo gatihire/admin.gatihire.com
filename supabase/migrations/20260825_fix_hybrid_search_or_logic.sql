@@ -84,7 +84,7 @@ BEGIN
       AND (
         (v_has_text_query AND c.search_vector @@ v_tsquery)
         OR
-        (p_query_embedding IS NOT NULL AND 1 - (c.embedding <=> p_query_embedding) >= 0.05)
+        (p_query_embedding IS NOT NULL AND 1 - (c.embedding <=> p_query_embedding) >= 0.30)
         OR
         (NOT v_has_text_query AND p_query_embedding IS NULL)
       )
