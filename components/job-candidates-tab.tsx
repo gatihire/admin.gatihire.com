@@ -24,7 +24,7 @@ import { RootCauseAnalytics } from "./root-cause-analytics"
 import {
   Loader2, User, MapPin, Briefcase, Eye, Sparkles, Mail, Phone, ChevronDown, ChevronUp,
   PhoneCall, PhoneOff, CheckCircle, CheckCheck, Check, Clock, UserX, Play, Save, Filter, MessageCircle, Send,
-  AlertCircle, RefreshCw, BrainCircuit, ShieldCheck, Upload,
+  AlertCircle, RefreshCw, BrainCircuit, ShieldCheck, Upload, Download,
 } from "lucide-react"
 import {
   AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription,
@@ -1067,6 +1067,29 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
                       <SelectItem value="applied">Applied</SelectItem>
                     </SelectContent>
                   </Select>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 text-xs bg-indigo-600 hover:bg-indigo-700 text-white gap-1"
+                        onClick={() => {
+                          const params = new URLSearchParams()
+                          if (activeStage && activeStage !== "all") params.set("stage", activeStage)
+                          if (filter && filter !== "all") params.set("origin", filter)
+                          window.open(`/api/jobs/${jobId}/pipeline/export?${params.toString()}`, "_blank")
+                        }}
+                        disabled={filtered.length === 0}
+                      >
+                        <Download className="h-3.5 w-3.5 mr-1" />
+                        Export Excel
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p className="font-semibold">Export to Excel</p>
+                      <p className="text-xs opacity-80">Download candidate list with name, email, phone, job title, resume link, and pipeline stage.</p>
+                    </TooltipContent>
+                  </Tooltip>
                   <Button variant="outline" size="sm" className="h-8 text-xs" onClick={bulkMove} disabled={bulkBusy}>
                     {bulkBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null} Move to Stage
                   </Button>
