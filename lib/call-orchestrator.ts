@@ -336,25 +336,38 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
       continue
     }
 
-      // Info-first: send detailed info request (7 fields) for both inbound and outbound
+      // Info-first: send detailed info request - use approved template based on origin
     if (infoFirst) {
       console.log("[ORCHESTRATOR] infoFirst branch for candidate:", { candidateId: candidate.id, name: candidate.name, phone: candidate.phone, origin })
       const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(candidate, job, client, origin, participantId)
       const whatsapp = getWhatsAppService()
       
-      // Always use the detailed template (7 fields) for both inbound and outbound
-      const infoResult = await whatsapp.sendDetailedInfoRequest({
-        phoneNumber: candidate.phone as string,
-        candidateName: candidate.name || "",
-        jobTitle: job.title || "",
-        companyName: job.client_name || client?.name || "",
-      })
-      console.log("[ORCHESTRATOR] sendDetailedInfoRequest result:", infoResult)
+      // Use approved template based on origin: inbound_info_request_v2 for inbound, detailed_info_request for outbound
+      const isInbound = origin === "inbound"
+      const templateName = isInbound ? "inbound_info_request_v2" : "detailed_info_request"
+      
+      console.log("[ORCHESTRATOR] Using template:", templateName, "for origin:", origin)
+      
+      const infoResult = isInbound
+        ? await whatsapp.sendInboundInfoRequest({
+            phoneNumber: candidate.phone as string,
+            candidateName: candidate.name || "",
+            jobTitle: job.title || "",
+            companyName: job.client_name || client?.name || "",
+          })
+        : await whatsapp.sendDetailedInfoRequest({
+            phoneNumber: candidate.phone as string,
+            candidateName: candidate.name || "",
+            jobTitle: job.title || "",
+            companyName: job.client_name || client?.name || "",
+          })
+      console.log("[ORCHESTRATOR] send info request result:", infoResult)
 
       if (infoResult.success) {
+        const templateUsed = isInbound ? "inbound_info_request_v2" : "detailed_info_request"
         const history = [{
           messageId: infoResult.messageId || null,
-          template: "detailed_info_request",
+          template: templateUsed,
           sentAt: new Date().toISOString(),
           status: "sent",
         }]
@@ -366,7 +379,7 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
             whatsapp_message_id: infoResult.messageId || null,
             whatsapp_sent_at: new Date().toISOString(),
             whatsapp_delivery_status: "sent",
-            whatsapp_outbound_template: "detailed_info_request",
+            whatsapp_outbound_template: templateUsed,
             whatsapp_history: history,
             call_payload_json: userData,
             generated_questions: generatedQuestions.join("\n"),
@@ -402,7 +415,8 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
           .eq("campaign_id", campaign.id)
           .eq("candidate_id", candidate.id)
         failed++
-        errors.push(`${candidate.name}: info request send failed (${infoResult.error})`)
+        const templateUsed = isInbound ? "inbound_info_request_v2" : "detailed_info_request"
+        errors.push(`${candidate.name}: ${templateUsed} send failed (${infoResult.error})`)
       }
       continue
     }
