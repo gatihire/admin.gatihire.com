@@ -255,7 +255,8 @@ export async function POST(request: NextRequest) {
     if (error?.message === "No candidates with phone numbers found") {
       return NextResponse.json({ error: error.message }, { status: 400 })
     }
-    logger.error("Trigger screening failed", { error: error.message })
-    return NextResponse.json({ error: "Internal Server Error" }, { status: 500 })
+    console.error("[TRIGGER] Error:", error)
+    logger.error("Trigger screening failed", { error: error?.message, stack: error?.stack })
+    return NextResponse.json({ error: "Internal Server Error", details: error?.message }, { status: 500 })
   }
 }
