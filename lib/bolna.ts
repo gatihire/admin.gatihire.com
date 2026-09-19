@@ -48,10 +48,21 @@ export async function placeBolnaCall(params: BolnaCallParams): Promise<BolnaCall
   const { apiKey, agentId, fromNumber } = getConfig()
   const recipient = toE164(params.to)
 
+  logger.info("placeBolnaCall called", { 
+    to: params.to, 
+    recipient, 
+    hasApiKey: !!apiKey, 
+    hasAgentId: !!agentId,
+    hasFromNumber: !!(params.fromNumber || fromNumber),
+    userDataKeys: Object.keys(params.userData || {})
+  })
+
   if (!apiKey || !agentId) {
+    logger.error("Bolna not configured", { hasApiKey: !!apiKey, hasAgentId: !!agentId })
     return { success: false, error: "Bolna not configured (BOLNA_API_KEY / BOLNA_AGENT_ID)" }
   }
   if (!recipient) {
+    logger.error("Invalid phone number", { to: params.to, recipient })
     return { success: false, error: "Invalid phone number" }
   }
 
@@ -68,6 +79,7 @@ export async function placeBolnaCall(params: BolnaCallParams): Promise<BolnaCall
   }
 
   try {
+    logger.info("Calling Bolna API", { recipient, agentId, hasUserData: !!params.userData })
     const res = await fetch(`${BOLNA_API}/call`, {
       method: "POST",
       headers: {
@@ -79,7 +91,7 @@ export async function placeBolnaCall(params: BolnaCallParams): Promise<BolnaCall
 
     const data = await res.json().catch(() => ({}))
     if (!res.ok) {
-      logger.error("Bolna call failed", { status: res.status, error: data })
+      logger.error("Bolna call failed", { status: res.status, error: data, recipient })
       return { success: false, error: data?.message || data?.error || `HTTP ${res.status}` }
     }
 

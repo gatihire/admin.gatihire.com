@@ -15,23 +15,24 @@ async function handler(request: NextRequest) {
       return NextResponse.json({ error: "participantId required" }, { status: 400 })
     }
 
+    logger.info("QStash trigger received", { participantId, body })
+
     const result = await placeCallForParticipant(participantId, { guard: true })
 
     if (result.skipped) {
-      // Participant already advanced (called manually, completed, out of retries).
-      // Treated as a success so QStash does not retry a no-op message.
+      logger.info("Call placement skipped", { participantId, reason: result.error })
       return NextResponse.json({ success: false, skipped: true, reason: result.error })
     }
 
     if (!result.success) {
-      // Placement failed and the participant was left untouched — return an error
-      // so QStash's built-in retries re-attempt the placement.
+      logger.error("Call placement failed", { participantId, error: result.error })
       return NextResponse.json({ error: result.error }, { status: 500 })
     }
 
+    logger.info("Call placed successfully", { participantId })
     return NextResponse.json({ success: true })
   } catch (error: any) {
-    logger.error("Scheduled call trigger failed", { error: error?.message })
+    logger.error("Scheduled call trigger failed", { error: error?.message, stack: error?.stack })
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 })
   }
 }

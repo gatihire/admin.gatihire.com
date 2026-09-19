@@ -159,6 +159,8 @@ export async function placeCallForParticipant(
 ): Promise<PlaceCallResult> {
   const guard = opts?.guard ?? false
 
+  logger.info("placeCallForParticipant called", { participantId, guard })
+
   const { data: participant, error: partError } = await supabaseAdmin
     .from("phone_screening_participants")
     .select(`
@@ -170,11 +172,23 @@ export async function placeCallForParticipant(
     .maybeSingle()
 
   if (partError || !participant) {
+    logger.warn("Participant not found", { participantId, error: partError?.message })
     return { success: false, error: "Participant not found" }
   }
 
   const row = participant as unknown as ParticipantRow
   const candidate = row.candidates
+
+  logger.info("Participant state", { 
+    participantId, 
+    status: row.status, 
+    callAttempts: row.call_attempts,
+    scheduledCallAt: row.scheduled_call_at,
+    nextRetryAt: row.next_retry_at,
+    whatsappSentAt: row.whatsapp_sent_at,
+    candidatePhone: candidate?.phone,
+    candidateName: candidate?.name
+  })
 
   if (guard) {
     // No blind calls: only fire when the participant opted in (call_scheduled

@@ -94,20 +94,57 @@ async function handleIncomingMessage(message: any, contact: any) {
   const messageType = message.type
   
   logger.info("Received WhatsApp message", { phoneNumber, messageType, messageId: message.id })
-
-  // Find participant by phone number
-  const { data: participant, error: findError } = await supabaseAdmin
-    .from("phone_screening_participants")
-    .select("*")
-    .eq("phone_number", phoneNumber)
-    .order("created_at", { ascending: false })
-    .limit(1)
-    .single()
-
-  if (findError || !participant) {
-    logger.warn("No participant found for phone number", { phoneNumber })
+  
+  // Find participant by phone number - need to join with candidates table
+  const normalizedPhone = phoneNumber.replace(/\D/g, "").replace(/^0+/, "")
+  // Handle Indian numbers: 10 digits -> add 91 prefix
+  const searchPhones = [
+    phoneNumber,
+    normalizedPhone,
+    normalizedPhone.startsWith("91") ? normalizedPhone : `91${normalizedPhone}`,
+    `+${normalizedPhone}`,
+    `+91${normalizedPhone.replace(/^91/, "")}`
+  ].filter(Boolean)
+  
+  let participant = null
+  let findError = null
+  
+  // Try to find participant by joining with candidates table
+  for (const searchPhone of searchPhones) {
+    const { data, error } = await supabaseAdmin
+      .from("phone_screening_participants")
+      .select(`
+        *,
+        candidates:candidate_id (id, name, phone, email)
+      `)
+      .eq("candidates.phone", searchPhone)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    
+    if (!error && data) {
+      participant = data
+      break
+    }
+    findError = error
+  }
+  
+  if (!participant) {
+    logger.warn("No participant found for phone number", { phoneNumber, tried: searchPhones })
     return
   }
+  
+  logger.info("Found participant for incoming message", { 
+    participantId: participant.id, 
+    candidateId: participant.candidate_id,
+    candidateName: participant.candidates?.name,
+    candidatePhone: participant.candidates?.phone,
+    status: participant.status,
+    whatsappOutboundTemplate: participant.whatsapp_outbound_template,
+    screeningMode: participant.screening_mode,
+    scheduledCallAt: participant.scheduled_call_at,
+    whatsappSentAt: participant.whatsapp_sent_at
+  })
 
   // Handle different message types
   if (messageType === "interactive") {
@@ -170,6 +207,7 @@ async function handleInteractiveMessage(participant: any, interactive: any) {
         break
 
       case "call_now":
+        logger.info("Received 'call_now' button, scheduling immediate call", { participantId: participant.id })
         // Schedule immediate call
         await scheduleCall(participant, 0)
         break
@@ -274,7 +312,10 @@ async function handleTextMessage(participant: any, text: any) {
 
   logger.info("Received text message", { 
     participantId: participant.id, 
-    message: messageBody 
+    message: messageBody,
+    participantStatus: participant.status,
+    screeningMode: participant.screening_mode,
+    whatsappOutboundTemplate: participant.whatsapp_outbound_template
   })
 
   // Check if this is an info collection reply (contains numbers and possibly LPA, days, etc.)
@@ -321,6 +362,7 @@ async function handleTextMessage(participant: any, text: any) {
 
   // Simple NLP for time parsing
   if (messageBody.includes("interested") || messageBody.includes("yes")) {
+    logger.info("Detected 'interested/yes' keyword, updating status to interested", { participantId: participant.id })
     await supabaseAdmin
       .from("phone_screening_participants")
       .update({ 
@@ -337,6 +379,7 @@ async function handleTextMessage(participant: any, text: any) {
       })
       .eq("id", participant.id)
   } else if (messageBody.includes("call") && messageBody.includes("now")) {
+    logger.info("Detected 'call now' keyword, scheduling immediate call", { participantId: participant.id })
     await scheduleCall(participant, 0)
   } else if (messageBody.includes("10 min") || messageBody.includes("10 minutes")) {
     await scheduleCall(participant, 10 * 60 * 1000)
@@ -365,6 +408,13 @@ async function handleTextMessage(participant: any, text: any) {
 async function scheduleCall(participant: any, delayMs: number) {
   const scheduledTime = new Date(Date.now() + delayMs)
 
+  logger.info("Scheduling call", { 
+    participantId: participant.id, 
+    delayMs, 
+    scheduledTime: scheduledTime.toISOString(),
+    currentStatus: participant.status 
+  })
+
   await supabaseAdmin
     .from("phone_screening_participants")
     .update({
@@ -374,16 +424,19 @@ async function scheduleCall(participant: any, delayMs: number) {
     })
     .eq("id", participant.id)
 
-  logger.info("Call scheduled", { 
+  logger.info("Call scheduled in DB", { 
     participantId: participant.id, 
-    scheduledTime 
+    scheduledTime: scheduledTime.toISOString() 
   })
 
   // Schedule via QStash
   const delaySeconds = Math.max(0, Math.round(delayMs / 1000))
+  logger.info("Scheduling via QStash", { participantId: participant.id, delaySeconds })
   const result = await scheduleBolnaCall(participant.id, delaySeconds)
   if (!result.scheduled) {
     logger.error("Failed to schedule call via QStash", { participantId: participant.id, error: result.error })
+  } else {
+    logger.info("Successfully scheduled via QStash", { participantId: participant.id })
   }
 }
 
