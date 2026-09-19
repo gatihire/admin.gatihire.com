@@ -229,8 +229,9 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
     .select("id, candidate_id")
 
   if (insertError) {
+    console.error("[ORCHESTRATOR] Insert participants error:", insertError)
     await supabaseAdmin.from("phone_screening_campaigns").delete().eq("id", campaign.id)
-    throw new Error("Failed to add participants")
+    throw new Error(`Failed to add participants: ${insertError.message} (code: ${insertError.code})`)
   }
 
   const participantByCandidate = new Map<string, string>()
