@@ -534,9 +534,11 @@ export class WhatsAppService {
     jobTitle: string
     companyName: string
   }): Promise<SendMessageResult> {
+    console.log("[WHATSAPP] sendDetailedInfoRequest called:", { phoneNumber: params.phoneNumber, candidateName: params.candidateName })
     const templateName = process.env.WHATSAPP_TEMPLATE_DETAILED_INFO_REQUEST || "detailed_info_request"
+    console.log("[WHATSAPP] Using template:", templateName)
     
-    return this.sendTemplateMessage({
+    const result = await this.sendTemplateMessage({
       to: params.phoneNumber,
       templateName,
       components: [
@@ -550,6 +552,8 @@ export class WhatsAppService {
         }
       ]
     })
+    console.log("[WHATSAPP] sendDetailedInfoRequest result:", result)
+    return result
   }
 
   // Flow 5: Screening Decision (filtered out)

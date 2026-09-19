@@ -152,6 +152,8 @@ export async function POST(request: NextRequest) {
                       "info_requested", "info_received", "interested", "call_scheduled",
                       "scheduled", "calling", "in_progress"])
 
+    console.log("[TRIGGER] existingParticipants:", existingParticipants?.map(p => ({ candidate_id: p.candidate_id, status: p.status })))
+
     const dedupedCandidateIds = new Set<string>()
     const dedupUpdates: Array<{ candidateId: string; participantId: string }> = []
     for (const ep of existingParticipants || []) {
@@ -191,6 +193,9 @@ export async function POST(request: NextRequest) {
     const freshCandidateIds = candidateIds.filter(id => !dedupedCandidateIds.has(id))
     const freshCandidates = (candidates || []).filter(c => freshCandidateIds.includes(c.id))
 
+    console.log("[TRIGGER] freshCandidateIds:", freshCandidateIds)
+    console.log("[TRIGGER] freshCandidates:", freshCandidates?.map(c => ({ id: c.id, name: c.name, phone: c.phone })))
+
     if (freshCandidateIds.length === 0) {
       // All candidates already have active participants — return dedup info
       return NextResponse.json({
@@ -205,6 +210,13 @@ export async function POST(request: NextRequest) {
       })
     }
 
+    console.log("[TRIGGER] Calling orchestrateScreening with:", {
+      jobId: job.id,
+      callMode,
+      freshCandidateCount: freshCandidates.length,
+      campaignConfig: body.campaignConfig
+    })
+
     const result = await orchestrateScreening({
       job,
       client,
@@ -215,6 +227,8 @@ export async function POST(request: NextRequest) {
       callMode,
       campaignConfig: body.campaignConfig,
     })
+
+    console.log("[TRIGGER] orchestrateScreening result:", result)
 
     // Log ai_screen_started for all candidates that were triggered
     logCandidateActivityBatch(

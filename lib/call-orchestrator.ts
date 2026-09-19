@@ -338,6 +338,7 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
 
       // Info-first: send detailed info request (7 fields) for both inbound and outbound
     if (infoFirst) {
+      console.log("[ORCHESTRATOR] infoFirst branch for candidate:", { candidateId: candidate.id, name: candidate.name, phone: candidate.phone, origin })
       const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(candidate, job, client, origin, participantId)
       const whatsapp = getWhatsAppService()
       
@@ -348,6 +349,7 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
         jobTitle: job.title || "",
         companyName: job.client_name || client?.name || "",
       })
+      console.log("[ORCHESTRATOR] sendDetailedInfoRequest result:", infoResult)
 
       if (infoResult.success) {
         const history = [{
