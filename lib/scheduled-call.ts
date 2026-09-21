@@ -259,3 +259,8 @@ export async function placeCallForParticipant(
 
   return { success: true }
 }
+
+export async function scheduleCall(participant: any, delayMs: number): Promise<void> {
+  const delaySeconds = Math.max(0, Math.round(delayMs / 1000));
+  await scheduleBolnaCall(participant.id, delaySeconds);
+}

@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { logger } from "@/lib/logger"
-import { handleInfoReply, handleDetailedInfoReply, handleRejectionReason, sendInfoRequest } from "@/lib/info-collector"
+import { 
+  handleStepByStepReply,
+  handleIncomingCallNow,
+  handleIncomingSchedule,
+  handleInteractiveButton,
+  initializeInfoCollection,
+  handleRejectionReason
+} from "@/lib/info-collector-v2"
 import { scheduleBolnaCall } from "@/lib/scheduled-call"
 import crypto from "crypto"
 
@@ -143,9 +150,11 @@ async function handleIncomingMessage(message: any, contact: any) {
     whatsappOutboundTemplate: participant.whatsapp_outbound_template,
     screeningMode: participant.screening_mode,
     scheduledCallAt: participant.scheduled_call_at,
-    whatsappSentAt: participant.whatsapp_sent_at
+    whatsappSentAt: participant.whatsapp_sent_at,
+    infoStep: participant.info_step,
+    infoConfirmed: participant.info_confirmed
   })
-
+  
   // Handle different message types
   if (messageType === "interactive") {
     await handleInteractiveMessage(participant, message.interactive)
@@ -158,209 +167,79 @@ async function handleInteractiveMessage(participant: any, interactive: any) {
   if (interactive.type === "button_reply") {
     const buttonId = interactive.button_reply.id
     const buttonTitle = interactive.button_reply.title
-
+    
     logger.info("Received button reply", { 
       participantId: participant.id, 
       buttonId, 
       buttonTitle 
     })
-
-    // Update participant status based on button
-    switch (buttonId) {
-      case "interested":
-        await supabaseAdmin
-          .from("phone_screening_participants")
-          .update({ 
-            status: "interested",
-            updated_at: new Date().toISOString()
-          })
-          .eq("id", participant.id)
-        
-        // Send schedule options
-        {
-          const { getWhatsAppService } = await import("@/lib/whatsapp")
-          const whatsapp = getWhatsAppService()
-          const candidate = participant.candidates
-          if (candidate?.phone) {
-            await whatsapp.sendScheduleOptions({
-              phoneNumber: candidate.phone,
-              candidateName: candidate.name || "",
-              jobTitle: participant.jobs?.title || "",
-            })
-          }
-        }
-        break
-
-      case "not_interested":
-        // Send rejection reason template (6 buttons) to capture why
-        const { getWhatsAppService } = await import("@/lib/whatsapp")
-        const whatsapp = getWhatsAppService()
-        const candidate = participant.candidates
-        if (candidate?.phone) {
-          await whatsapp.sendNotInterestedReason({
-            phoneNumber: candidate.phone,
-            candidateName: candidate.name || "",
-          })
-        }
-        // Keep status as interested temporarily while waiting for reason
-        // The reason buttons will set it to not_interested with rejection_reason
-        break
-
-      case "call_now":
-        logger.info("Received 'call_now' button, scheduling immediate call", { participantId: participant.id })
-        // Schedule immediate call
-        await scheduleCall(participant, 0)
-        break
-
-      case "in_10_min":
-        await scheduleCall(participant, 10 * 60 * 1000)
-        break
-
-      case "in_30_min":
-        await scheduleCall(participant, 30 * 60 * 1000)
-        break
-
-      case "today_evening":
-        // Schedule at 18:00 IST
-        const now = new Date()
-        const evening = new Date(now)
-        evening.setUTCHours(12, 30, 0, 0) // 18:00 IST = 12:30 UTC
-        if (evening <= now) {
-          evening.setDate(evening.getDate() + 1)
-        }
-        const delay = evening.getTime() - now.getTime()
-        await scheduleCall(participant, delay)
-        break
-
-      case "tomorrow_morning":
-        // Schedule at 09:00 IST
-        const tomorrow = new Date()
-        tomorrow.setDate(tomorrow.getDate() + 1)
-        tomorrow.setUTCHours(3, 30, 0, 0) // 09:00 IST = 03:30 UTC
-        const tomorrowDelay = tomorrow.getTime() - Date.now()
-        await scheduleCall(participant, tomorrowDelay)
-        break
-
-      case "provide_details":
-        // Candidate clicked "Provide Details" - they will reply with text
-        await supabaseAdmin
-          .from("phone_screening_participants")
-          .update({ 
-            status: "info_requested",
-            updated_at: new Date().toISOString()
-          })
-          .eq("id", participant.id)
-        break
-
-      case "skip_schedule_call":
-        // Candidate skipped info collection - schedule call directly
-        await supabaseAdmin
-          .from("phone_screening_participants")
-          .update({ 
-            status: "whatsapp_sent",
-            updated_at: new Date().toISOString()
-          })
-          .eq("id", participant.id)
-        // Send schedule options
-        {
-          const { getWhatsAppService } = await import("@/lib/whatsapp")
-          const whatsapp = getWhatsAppService()
-          const candidate = participant.candidates
-          if (candidate?.phone) {
-            await whatsapp.sendScheduleOptions({
-              phoneNumber: candidate.phone,
-              candidateName: candidate.name || "",
-              jobTitle: participant.jobs?.title || "",
-            })
-          }
-        }
-        break
-
-      // Rejection reason buttons (from not_interested_reason template)
-      case "reject_not_looking":
-        await handleRejectionReason(participant.id, "not_looking_to_switch")
-        break
-
-      case "reject_comp_mismatch":
-        await handleRejectionReason(participant.id, "comp_mismatch")
-        break
-
-      case "reject_location":
-        await handleRejectionReason(participant.id, "location_mismatch")
-        break
-
-      case "reject_placed":
-        await handleRejectionReason(participant.id, "already_placed")
-        break
-
-      case "reject_role_not_relevant":
-        await handleRejectionReason(participant.id, "role_not_relevant")
-        break
-
-      case "reject_other":
-        await handleRejectionReason(participant.id, "other")
-        break
-
-      default:
-        logger.info("Unknown button reply", { buttonId })
-    }
+    
+    const { handleInteractiveButton } = await import('@/lib/info-collector-v2')
+    await handleInteractiveButton(participant.id, buttonId, buttonTitle)
   }
 }
 
 async function handleTextMessage(participant: any, text: any) {
   const messageBody = text.body?.toLowerCase() || ""
-
+  
   logger.info("Received text message", { 
     participantId: participant.id, 
     message: messageBody,
     participantStatus: participant.status,
     screeningMode: participant.screening_mode,
-    whatsappOutboundTemplate: participant.whatsapp_outbound_template
+    whatsappOutboundTemplate: participant.whatsapp_outbound_template,
+    infoStep: participant.info_step,
+    infoConfirmed: participant.info_confirmed
   })
-
-  // Check if this is an info collection reply (contains numbers and possibly LPA, days, etc.)
-  if (participant.status === "info_requested") {
-    // Route based on screening_mode, not template name
-    const screeningMode = participant.screening_mode
-
-    if (screeningMode === "extended_screening" || screeningMode === "info_first") {
-      // Both modes use detailed info reply handler (with 7-field parsing + pre-screen for extended)
-      const infoResult = await handleDetailedInfoReply(participant.id, text.body)
-      if (infoResult.success) {
-        logger.info("Detailed info reply parsed and saved", { 
-          participantId: participant.id,
-          decision: infoResult.prescreen?.decision,
-          screeningMode
-        })
-        return
-      }
-    } else {
-      // Legacy: check template name for backward compatibility
-      const screeningContext = participant.screening_context
-      const isExtended = screeningContext && participant.whatsapp_outbound_template === "detailed_info_request"
-      
-      if (isExtended) {
-        const infoResult = await handleDetailedInfoReply(participant.id, text.body)
-        if (infoResult.success) {
-          logger.info("Detailed info reply parsed and saved", { 
-            participantId: participant.id,
-            decision: infoResult.prescreen?.decision 
-          })
-          return
-        }
-      } else {
-        // Simple info reply (backward compatible)
-        const infoResult = await handleInfoReply(participant.id, text.body)
-        if (infoResult.success) {
-          logger.info("Info reply parsed and saved", { participantId: participant.id })
-          return
-        }
-      }
-    }
-    // If parsing failed, continue with normal text handling
+  
+  // Handle "Call Now" text
+  if (messageBody.includes("call") && messageBody.includes("now")) {
+    logger.info("Detected 'call now' keyword, scheduling immediate call", { participantId: participant.id })
+    await scheduleCall(participant, 0)
+    return
   }
-
-  // Simple NLP for time parsing
+  
+  // Handle "Call Now" button text variants
+  if (messageBody.includes("call now") || messageBody === "call now" || messageBody === "call") {
+    logger.info("Detected 'call now' keyword, scheduling immediate call", { participantId: participant.id })
+    await scheduleCall(participant, 0)
+    return
+  }
+  
+  // Handle time-based scheduling keywords
+  if (messageBody.includes("10 min") || messageBody.includes("10 minutes")) {
+    await scheduleCall(participant, 10 * 60 * 1000)
+    return
+  }
+  if (messageBody.includes("30 min") || messageBody.includes("30 minutes")) {
+    await scheduleCall(participant, 30 * 60 * 1000)
+    return
+  }
+  if (messageBody.includes("1 hour") || messageBody.includes("one hour")) {
+    await scheduleCall(participant, 60 * 60 * 1000)
+    return
+  }
+  if (messageBody.includes("tomorrow")) {
+    const tomorrow = new Date()
+    tomorrow.setDate(tomorrow.getDate() + 1)
+    tomorrow.setUTCHours(3, 30, 0, 0) // 09:00 IST
+    const delay = tomorrow.getTime() - Date.now()
+    await scheduleCall(participant, delay)
+    return
+  }
+  if (messageBody.includes("evening")) {
+    const now = new Date()
+    const evening = new Date(now)
+    evening.setUTCHours(12, 30, 0, 0) // 18:00 IST
+    if (evening <= now) {
+      evening.setDate(evening.getDate() + 1)
+    }
+    const delay = evening.getTime() - now.getTime()
+    await scheduleCall(participant, delay)
+    return
+  }
+  
+  // Handle "interested/yes" 
   if (messageBody.includes("interested") || messageBody.includes("yes")) {
     logger.info("Detected 'interested/yes' keyword, updating status to interested", { participantId: participant.id })
     await supabaseAdmin
@@ -370,7 +249,11 @@ async function handleTextMessage(participant: any, text: any) {
         updated_at: new Date().toISOString()
       })
       .eq("id", participant.id)
-  } else if (messageBody.includes("not interested") || messageBody.includes("no")) {
+    return
+  }
+  
+  // Handle "not interested/no"
+  if (messageBody.includes("not interested") || messageBody.includes("no")) {
     await supabaseAdmin
       .from("phone_screening_participants")
       .update({ 
@@ -378,22 +261,60 @@ async function handleTextMessage(participant: any, text: any) {
         updated_at: new Date().toISOString()
       })
       .eq("id", participant.id)
-  } else if (messageBody.includes("call") && messageBody.includes("now")) {
+    return
+  }
+  
+  // Handle info collection replies using step-by-step handler
+  if (participant.info_step && participant.status === 'info_requested') {
+    const { handleStepByStepReply } = await import('@/lib/info-collector-v2')
+    const result = await handleStepByStepReply(participant.id, text.body)
+    logger.info("Step-by-step reply handled", { participantId: participant.id, result })
+    return
+  }
+  
+  // Handle "edit" command
+  if (messageBody.includes("edit")) {
+    const { handleStepByStepReply } = await import('@/lib/info-collector-v2')
+    const result = await handleStepByStepReply(participant.id, "edit")
+    return
+  }
+  
+  // Handle "confirm" command
+  if (messageBody.includes("confirm")) {
+    const { handleStepByStepReply } = await import('@/lib/info-collector-v2')
+    const result = await handleStepByStepReply(participant.id, "confirm")
+    return
+  }
+  
+  // Handle "call now" text variations
+  if (messageBody.includes("call now") || messageBody === "call now" || messageBody === "call") {
     logger.info("Detected 'call now' keyword, scheduling immediate call", { participantId: participant.id })
     await scheduleCall(participant, 0)
-  } else if (messageBody.includes("10 min") || messageBody.includes("10 minutes")) {
+    return
+  }
+  
+  // Schedule options via text
+  if (messageBody.includes("10 min") || messageBody.includes("10 minutes")) {
     await scheduleCall(participant, 10 * 60 * 1000)
-  } else if (messageBody.includes("30 min") || messageBody.includes("30 minutes")) {
+    return
+  }
+  if (messageBody.includes("30 min") || messageBody.includes("30 minutes")) {
     await scheduleCall(participant, 30 * 60 * 1000)
-  } else if (messageBody.includes("1 hour") || messageBody.includes("one hour")) {
+    return
+  }
+  if (messageBody.includes("1 hour") || messageBody.includes("one hour")) {
     await scheduleCall(participant, 60 * 60 * 1000)
-  } else if (messageBody.includes("tomorrow")) {
+    return
+  }
+  if (messageBody.includes("tomorrow")) {
     const tomorrow = new Date()
     tomorrow.setDate(tomorrow.getDate() + 1)
     tomorrow.setUTCHours(3, 30, 0, 0) // 09:00 IST
     const delay = tomorrow.getTime() - Date.now()
     await scheduleCall(participant, delay)
-  } else if (messageBody.includes("evening")) {
+    return
+  }
+  if (messageBody.includes("evening")) {
     const now = new Date()
     const evening = new Date(now)
     evening.setUTCHours(12, 30, 0, 0) // 18:00 IST
@@ -402,6 +323,7 @@ async function handleTextMessage(participant: any, text: any) {
     }
     const delay = evening.getTime() - now.getTime()
     await scheduleCall(participant, delay)
+    return
   }
 }
 
