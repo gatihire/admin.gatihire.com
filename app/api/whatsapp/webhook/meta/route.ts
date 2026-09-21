@@ -180,151 +180,109 @@ async function handleInteractiveMessage(participant: any, interactive: any) {
 }
 
 async function handleTextMessage(participant: any, text: any) {
-  const messageBody = text.body?.toLowerCase() || ""
+  const messageBody = text.body?.trim() || ""
+  const lower = messageBody.toLowerCase()
   
   logger.info("Received text message", { 
     participantId: participant.id, 
-    message: messageBody,
+    message: messageBody.substring(0, 100),
     participantStatus: participant.status,
     screeningMode: participant.screening_mode,
-    whatsappOutboundTemplate: participant.whatsapp_outbound_template,
     infoStep: participant.info_step,
     infoConfirmed: participant.info_confirmed
   })
   
-  // Handle "Call Now" text
-  if (messageBody.includes("call") && messageBody.includes("now")) {
-    logger.info("Detected 'call now' keyword, scheduling immediate call", { participantId: participant.id })
-    await scheduleCall(participant, 0)
-    return
-  }
+  // 1. If participant is actively in info collection flow, route to step-by-step handler
+  const isInInfoFlow = participant.status === 'info_requested' && 
+    participant.info_step && 
+    participant.info_step !== 'confirmed' &&
+    !participant.info_confirmed
   
-  // Handle "Call Now" button text variants
-  if (messageBody.includes("call now") || messageBody === "call now" || messageBody === "call") {
-    logger.info("Detected 'call now' keyword, scheduling immediate call", { participantId: participant.id })
-    await scheduleCall(participant, 0)
-    return
-  }
-  
-  // Handle time-based scheduling keywords
-  if (messageBody.includes("10 min") || messageBody.includes("10 minutes")) {
-    await scheduleCall(participant, 10 * 60 * 1000)
-    return
-  }
-  if (messageBody.includes("30 min") || messageBody.includes("30 minutes")) {
-    await scheduleCall(participant, 30 * 60 * 1000)
-    return
-  }
-  if (messageBody.includes("1 hour") || messageBody.includes("one hour")) {
-    await scheduleCall(participant, 60 * 60 * 1000)
-    return
-  }
-  if (messageBody.includes("tomorrow")) {
-    const tomorrow = new Date()
-    tomorrow.setDate(tomorrow.getDate() + 1)
-    tomorrow.setUTCHours(3, 30, 0, 0) // 09:00 IST
-    const delay = tomorrow.getTime() - Date.now()
-    await scheduleCall(participant, delay)
-    return
-  }
-  if (messageBody.includes("evening")) {
-    const now = new Date()
-    const evening = new Date(now)
-    evening.setUTCHours(12, 30, 0, 0) // 18:00 IST
-    if (evening <= now) {
-      evening.setDate(evening.getDate() + 1)
-    }
-    const delay = evening.getTime() - now.getTime()
-    await scheduleCall(participant, delay)
-    return
-  }
-  
-  // Handle "interested/yes" 
-  if (messageBody.includes("interested") || messageBody.includes("yes")) {
-    logger.info("Detected 'interested/yes' keyword, updating status to interested", { participantId: participant.id })
-    await supabaseAdmin
-      .from("phone_screening_participants")
-      .update({ 
-        status: "interested",
-        updated_at: new Date().toISOString()
-      })
-      .eq("id", participant.id)
-    return
-  }
-  
-  // Handle "not interested/no"
-  if (messageBody.includes("not interested") || messageBody.includes("no")) {
-    await supabaseAdmin
-      .from("phone_screening_participants")
-      .update({ 
-        status: "not_interested",
-        updated_at: new Date().toISOString()
-      })
-      .eq("id", participant.id)
-    return
-  }
-  
-  // Handle info collection replies using step-by-step handler
-  if (participant.info_step && participant.status === 'info_requested') {
+  if (isInInfoFlow) {
+    logger.info("Routing to info collection step-by-step handler", { 
+      participantId: participant.id, 
+      infoStep: participant.info_step 
+    })
     const { handleStepByStepReply } = await import('@/lib/info-collector-v2')
-    const result = await handleStepByStepReply(participant.id, text.body)
+    const result = await handleStepByStepReply(participant.id, messageBody)
     logger.info("Step-by-step reply handled", { participantId: participant.id, result })
     return
   }
   
-  // Handle "edit" command
-  if (messageBody.includes("edit")) {
+  // 2. If participant has confirmed info and replies "confirm" again, re-send confirmation
+  if (participant.info_confirmed && participant.info_step === 'confirmed' && lower === 'confirm') {
     const { handleStepByStepReply } = await import('@/lib/info-collector-v2')
-    const result = await handleStepByStepReply(participant.id, "edit")
+    await handleStepByStepReply(participant.id, messageBody)
     return
   }
   
-  // Handle "confirm" command
-  if (messageBody.includes("confirm")) {
+  // 3. If participant has confirmed and wants to edit
+  if (participant.info_confirmed && participant.info_step === 'confirmed' && lower === 'edit') {
     const { handleStepByStepReply } = await import('@/lib/info-collector-v2')
-    const result = await handleStepByStepReply(participant.id, "confirm")
+    await handleStepByStepReply(participant.id, "edit")
     return
   }
   
-  // Handle "call now" text variations
-  if (messageBody.includes("call now") || messageBody === "call now" || messageBody === "call") {
-    logger.info("Detected 'call now' keyword, scheduling immediate call", { participantId: participant.id })
+  // 4. For outreach participants (not in info collection), handle scheduling keywords
+  // Only match exact or near-exact phrases, not loose includes
+  
+  // "call now" - exact phrase
+  if (lower === 'call now' || lower === 'call' || lower === 'callnow') {
+    logger.info("Detected exact 'call now'", { participantId: participant.id })
     await scheduleCall(participant, 0)
     return
   }
   
-  // Schedule options via text
-  if (messageBody.includes("10 min") || messageBody.includes("10 minutes")) {
+  // Time scheduling - exact phrases
+  if (lower === '10 min' || lower === '10 minutes' || lower === 'in 10 min' || lower === 'in 10 minutes') {
     await scheduleCall(participant, 10 * 60 * 1000)
     return
   }
-  if (messageBody.includes("30 min") || messageBody.includes("30 minutes")) {
+  if (lower === '30 min' || lower === '30 minutes' || lower === 'in 30 min' || lower === 'in 30 minutes') {
     await scheduleCall(participant, 30 * 60 * 1000)
     return
   }
-  if (messageBody.includes("1 hour") || messageBody.includes("one hour")) {
+  if (lower === '1 hour' || lower === 'one hour' || lower === 'in 1 hour') {
     await scheduleCall(participant, 60 * 60 * 1000)
     return
   }
-  if (messageBody.includes("tomorrow")) {
+  if (lower === 'tomorrow' || lower === 'tomorrow morning') {
     const tomorrow = new Date()
     tomorrow.setDate(tomorrow.getDate() + 1)
-    tomorrow.setUTCHours(3, 30, 0, 0) // 09:00 IST
+    tomorrow.setUTCHours(3, 30, 0, 0)
     const delay = tomorrow.getTime() - Date.now()
     await scheduleCall(participant, delay)
     return
   }
-  if (messageBody.includes("evening")) {
+  if (lower === 'evening' || lower === 'this evening' || lower === 'today evening') {
     const now = new Date()
     const evening = new Date(now)
-    evening.setUTCHours(12, 30, 0, 0) // 18:00 IST
-    if (evening <= now) {
-      evening.setDate(evening.getDate() + 1)
-    }
+    evening.setUTCHours(12, 30, 0, 0)
+    if (evening <= now) evening.setDate(evening.getDate() + 1)
     const delay = evening.getTime() - now.getTime()
     await scheduleCall(participant, delay)
     return
   }
+  
+  // "interested" / "not interested" - exact phrases only
+  if (lower === 'interested' || lower === 'yes interested' || lower === 'yes i am interested') {
+    logger.info("Detected exact 'interested'", { participantId: participant.id })
+    await supabaseAdmin
+      .from("phone_screening_participants")
+      .update({ status: "interested", updated_at: new Date().toISOString() })
+      .eq("id", participant.id)
+    return
+  }
+  if (lower === 'not interested' || lower === 'no not interested' || lower === 'no thanks') {
+    await supabaseAdmin
+      .from("phone_screening_participants")
+      .update({ status: "not_interested", updated_at: new Date().toISOString() })
+      .eq("id", participant.id)
+    return
+  }
+  
+  // If no keyword matched, just log it - don't auto-respond or schedule anything
+  logger.info("No keyword matched, ignoring message", { participantId: participant.id, message: lower })
 }
 
 async function scheduleCall(participant: any, delayMs: number) {
