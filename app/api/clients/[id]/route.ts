@@ -41,7 +41,9 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
     "primary_contact_phone",
     "additional_contacts",
     "about_generated_at",
-    "about_source_url"
+    "about_source_url",
+    "job_post_credits",
+    "profile_unlock_credits"
   ]
   for (const k of allowed) {
     if (k in body) patch[k] = body[k]
