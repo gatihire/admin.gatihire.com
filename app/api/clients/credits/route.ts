@@ -2,6 +2,71 @@ import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 
+export async function GET(request: NextRequest) {
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "jobs.view") && !hasPermission(ctx, "jobs.edit") && !hasPermission(ctx, "jobs.post")) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  }
+
+  const { searchParams } = new URL(request.url)
+  const search = searchParams.get("search") || ""
+  const page = parseInt(searchParams.get("page") || "1")
+  const limit = parseInt(searchParams.get("limit") || "50")
+  const offset = (page - 1) * limit
+
+  let clientQuery = supabaseAdmin
+    .from("clients")
+    .select("id, name, slug, primary_contact_email, primary_contact_name, contact_phone, contact_name, industry, employee_count, hiring_for, created_at, updated_at", { count: "exact" })
+    .order("name", { ascending: true })
+    .range(offset, offset + limit - 1)
+
+  if (search) {
+    const searchTerm = `%${search.toLowerCase()}%`
+    clientQuery = clientQuery.or(`name.ilike.${searchTerm},primary_contact_email.ilike.${searchTerm},primary_contact_name.ilike.${searchTerm},slug.ilike.${searchTerm}`)
+  }
+
+  const { data: clients, error: clientsError, count } = await clientQuery
+
+  if (clientsError) {
+    console.error("[clients/credits GET]", clientsError)
+    return NextResponse.json({ error: "Failed to fetch clients" }, { status: 500 })
+  }
+
+  const clientIds = (clients || []).map(c => c.id)
+  let creditsMap: Record<string, { job_post_credits: number; profile_unlock_credits: number }> = {}
+
+  if (clientIds.length > 0) {
+    const { data: credits } = await supabaseAdmin
+      .from("client_credits")
+      .select("client_id, job_post_credits, profile_unlock_credits")
+      .in("client_id", clientIds)
+
+    if (credits) {
+      for (const c of credits) {
+        creditsMap[c.client_id] = {
+          job_post_credits: c.job_post_credits || 0,
+          profile_unlock_credits: c.profile_unlock_credits || 0
+        }
+      }
+    }
+  }
+
+  const clientsWithCredits = (clients || []).map(client => ({
+    ...client,
+    job_post_credits: creditsMap[client.id]?.job_post_credits || 0,
+    profile_unlock_credits: creditsMap[client.id]?.profile_unlock_credits || 0
+  }))
+
+  return NextResponse.json({
+    clients: clientsWithCredits,
+    total: count || 0,
+    page,
+    limit,
+    totalPages: Math.ceil((count || 0) / limit)
+  })
+}
+
 async function sendCreditsEmail(
   clientName: string,
   clientEmail: string,
