@@ -18,7 +18,8 @@ import {
   getValidationError 
 } from './validators';
 import { 
-  extractStepValue 
+  extractStepValue,
+  extractAllFieldsFromReply
 } from './extractor';
 import {
   sendFirstQuestion,
@@ -218,7 +219,73 @@ async function handleStepByStepReply(participantId: string, replyText: string): 
     const currentStep = participant.info_step;
     const currentStepKey = participant.info_step as any;
     
-    // Extract value using LLM + regex fallback
+    // NEW: Detect multi-field reply (CTC + notice period + experience in one message)
+    // If user provides multiple fields at once, parse all and jump to confirmation
+    const lowerReply = replyText.toLowerCase();
+    const hasMultipleFields = (
+      (lowerReply.match(/\d+\s*(?:lpa|l|k)/gi) || []).length >= 1 &&  // CTC pattern
+      (lowerReply.includes('day') || lowerReply.includes('month') || lowerReply.includes('week') || lowerReply.includes('immediate') || lowerReply.includes('asap') || lowerReply.match(/\b\d+\b/))  // notice period pattern
+    );
+    
+    // Also check for experience pattern
+    const hasExperience = /(\d+(?:\.\d+)?)\s*(?:years?|yrs?|yoe)/i.test(replyText) || /\d+\s*months?/i.test(replyText);
+    
+    // If we're at first step (current_ctc) and user provided multiple fields, parse all at once
+    if (currentStep === 'current_ctc' && (hasMultipleFields || hasExperience)) {
+      logger.info('Detected multi-field reply, extracting all fields', { 
+        participantId, 
+        replyText: replyText.substring(0, 100),
+        currentStep 
+      });
+      
+      const allFields = await extractAllFieldsFromReply(replyText, participant.info_data || {});
+      logger.info('Multi-field extraction result', { participantId, allFields });
+      
+      // Merge with existing info_data
+      const mergedInfoData = { ...participant.info_data, ...allFields } as Record<string, any>;
+      
+      // Check if all required fields are now filled
+      const missingRequired = REQUIRED_STEPS.filter(key => !mergedInfoData[key]);
+      
+      if (missingRequired.length === 0) {
+        // All required fields filled - go to confirmation
+        await supabaseAdmin
+          .from('phone_screening_participants')
+          .update({
+            info_data: mergedInfoData,
+            info_step: 'confirm',
+            info_confirmed: false,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', participantId);
+        
+        const refreshed = await getParticipantWithExtras(participantId);
+        if (refreshed) {
+          await sendConfirmationAndScheduleCall(refreshed, participant.job_title, participant.company_name);
+        }
+        return { success: true, action: 'confirmed' };
+      } else {
+        // Some fields still missing - update what we have and ask for next missing
+        const nextMissing = missingRequired[0];
+        await supabaseAdmin
+          .from('phone_screening_participants')
+          .update({
+            info_data: mergedInfoData,
+            info_step: nextMissing,
+            info_confirmed: false,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', participantId);
+        
+        const refreshed = await getParticipantWithExtras(participantId);
+        if (refreshed) {
+          await sendStepQuestion(refreshed, nextMissing, participant.job_title, participant.company_name);
+        }
+        return { success: true, action: 'next_step' };
+      }
+    }
+    
+    // Extract value using LLM + regex fallback (original single-field logic)
     const step = getStep(currentStepKey);
     const question = getStepQuestion(currentStepKey, participant.candidate_name, participant.job_title, participant.company_name);
     

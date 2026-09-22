@@ -341,15 +341,15 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
       continue
     }
 
-      // Info-first: send detailed info request - use approved template based on origin
+// Info-first: send detailed info request - use approved template based on origin
     if (infoFirst) {
       console.log("[ORCHESTRATOR] infoFirst branch for candidate:", { candidateId: candidate.id, name: candidate.name, phone: candidate.phone, origin })
       const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(candidate, job, client, origin, participantId)
       const whatsapp = getWhatsAppService()
       
-      // Use approved template based on origin: inbound_info_request_v2 for inbound, detailed_info_request for outbound
+      // Use approved template based on origin: inbound_info_request (with buttons) for inbound, outbound_info_request (with buttons) for outbound
       const isInbound = origin === "inbound"
-      const templateName = isInbound ? "inbound_info_request_v2" : "detailed_info_request"
+      const templateName = isInbound ? "inbound_info_request" : "outbound_info_request"
       
       console.log("[ORCHESTRATOR] Using template:", templateName, "for origin:", origin)
       
@@ -360,16 +360,16 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
             jobTitle: job.title || "",
             companyName: job.client_name || client?.name || "",
           })
-        : await whatsapp.sendDetailedInfoRequest({
+        : await whatsapp.sendOutboundInfoRequest({
             phoneNumber: candidate.phone as string,
             candidateName: candidate.name || "",
             jobTitle: job.title || "",
             companyName: job.client_name || client?.name || "",
           })
       console.log("[ORCHESTRATOR] send info request result:", infoResult)
-
+      
       if (infoResult.success) {
-        const templateUsed = isInbound ? "inbound_info_request_v2" : "detailed_info_request"
+        const templateUsed = isInbound ? "inbound_info_request" : "outbound_info_request"
         const history = [{
           messageId: infoResult.messageId || null,
           template: templateUsed,

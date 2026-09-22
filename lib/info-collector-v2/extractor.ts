@@ -195,6 +195,141 @@ export async function extractStepValue(
   }
 }
 
+// NEW: Extract all fields from a single multi-field reply
+export async function extractAllFieldsFromReply(
+  userReply: string,
+  infoData: Record<string, any>
+): Promise<{
+  current_ctc?: string;
+  expected_ctc?: string;
+  notice_period?: string;
+  total_experience?: string;
+  location?: string;
+  willing_to_relocate?: string;
+  reason_for_switching?: string;
+}> {
+  if (!process.env.GEMINI_API_KEY) {
+    return fallbackExtractAllFields(userReply);
+  }
+
+  try {
+    const model = genAI.getGenerativeModel({ 
+      model: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 500,
+        responseMimeType: 'application/json',
+      }
+    });
+
+    const prompt = `Extract ALL screening fields from the candidate's SINGLE reply.
+Candidate reply: "${userReply}"
+
+Fields to extract (return null if not mentioned):
+- current_ctc: Current CTC (e.g., "8 LPA", "800000")
+- expected_ctc: Expected CTC (e.g., "12 LPA", "1500000")
+- notice_period: Notice period (e.g., "30 days", "1 month", "Immediate")
+- total_experience: Total experience (e.g., "4 years", "48 months")
+- location: Current city (e.g., "Mumbai", "Bangalore")
+- willing_to_relocate: "yes" or "no"
+- reason_for_switching: Free text reason
+
+Return ONLY valid JSON:
+{
+  "current_ctc": "8 LPA" or null,
+  "expected_ctc": "12 LPA" or null,
+  "notice_period": "30 days" or null,
+  "total_experience": "4 years" or null,
+  "location": "Mumbai" or null,
+  "willing_to_relocate": "yes" or null,
+  "reason_for_switching": "Better growth" or null
+}`;
+
+    const result = await model.generateContent(prompt);
+    const text = result.response.text();
+    const parsed = JSON.parse(text);
+    
+    // Normalize each field
+    const normalized: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (value && typeof value === 'string') {
+        // Use existing single-field extraction to normalize
+        const single = await extractStepValue(key as any, value, '', infoData);
+        if (single.is_valid && single.normalized_value) {
+          normalized[key] = single.normalized_value;
+        } else {
+          normalized[key] = value;
+        }
+      }
+    }
+    return normalized;
+  } catch (error) {
+    logger.warn('LLM multi-field extraction failed, falling back to regex', { error: String(error) });
+    return fallbackExtractAllFields(userReply);
+  }
+}
+
+function fallbackExtractAllFields(userReply: string): {
+  current_ctc?: string;
+  expected_ctc?: string;
+  notice_period?: string;
+  total_experience?: string;
+  location?: string;
+  willing_to_relocate?: string;
+  reason_for_switching?: string;
+} {
+  const result: Record<string, string> = {};
+  const lower = userReply.toLowerCase();
+  
+  // Extract CTC values (current and expected)
+  const ctcMatches = userReply.match(/(\d+(?:\.\d+)?)\s*(?:lpa|l|k|kpa)?/gi);
+  if (ctcMatches && ctcMatches.length >= 1) {
+    const first = extractCtcNumber(ctcMatches[0]);
+    if (first) result.current_ctc = `${first} LPA`;
+  }
+  if (ctcMatches && ctcMatches.length >= 2) {
+    const second = extractCtcNumber(ctcMatches[1]);
+    if (second) result.expected_ctc = `${second} LPA`;
+  }
+  
+  // Extract notice period
+  const notice = extractNoticePeriod(userReply);
+  if (notice) result.notice_period = notice;
+  
+  // Extract experience
+  const expMatch = userReply.match(/(\d+(?:\.\d+)?)\s*(?:years?|yrs?|yoe)/i);
+  if (expMatch) {
+    result.total_experience = `${parseFloat(expMatch[1])} years`;
+  } else {
+    const monthMatch = userReply.match(/(\d+)\s*months?/i);
+    if (monthMatch) {
+      result.total_experience = `${parseInt(monthMatch[1]) / 12} years`;
+    }
+  }
+  
+  // Extract location (common Indian cities)
+  const cities = ['mumbai', 'bangalore', 'delhi', 'chennai', 'hyderabad', 'pune', 'kolkata', 'gurgaon', 'noida', 'faridabad', 'ghaziabad'];
+  for (const city of cities) {
+    if (lower.includes(city)) {
+      result.location = city.charAt(0).toUpperCase() + city.slice(1);
+      break;
+    }
+  }
+  
+  // Extract willing to relocate
+  if (/yes|y|sure|willing|can relocate/i.test(lower)) result.willing_to_relocate = 'yes';
+  else if (/no|n|nope|not willing|cannot/i.test(lower)) result.willing_to_relocate = 'no';
+  
+  // Extract reason (remaining text after known patterns)
+  // Simple approach: if long enough text, use as reason
+  if (userReply.trim().length > 20 && !result.reason_for_switching) {
+    const reason = userReply.trim();
+    if (reason.length > 3) result.reason_for_switching = reason;
+  }
+  
+  return result;
+}
+
 function fallbackExtract(stepKey: string, userInput: string): {
   extracted_value: string | null;
   confidence: number;
