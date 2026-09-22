@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Building2, Mail, Phone, Users, Briefcase, Calendar, CheckCircle2, XCircle, Clock, Edit, Package, ShoppingCart } from "lucide-react"
+import { Building2, Mail, Phone, Users, Briefcase, Calendar, CheckCircle2, XCircle, Clock, Edit, Package, ShoppingCart, Search, Save, X, CreditCard, AlertCircle, Loader2, Send } from "lucide-react"
 import { cachedFetchJson } from "@/lib/utils"
 
 type ClientInfo = {
@@ -115,6 +115,20 @@ export function CreditRequestsDashboard() {
   const [reviewAmount, setReviewAmount] = useState<number>(0)
   const [adminNote, setAdminNote] = useState("")
 
+  // Credits tab state
+  const [creditsTab, setCreditsTab] = useState<"clients" | "history">("clients")
+  const [clients, setClients] = useState<any[]>([])
+  const [clientsLoading, setClientsLoading] = useState(true)
+  const [clientsSearch, setClientsSearch] = useState("")
+  const [clientsPage, setClientsPage] = useState(1)
+  const [clientsTotal, setClientsTotal] = useState(0)
+  const [clientsTotalPages, setClientsTotalPages] = useState(0)
+  const [editingClient, setEditingClient] = useState<string | null>(null)
+  const [editJobCredits, setEditJobCredits] = useState<number>(0)
+  const [editUnlockCredits, setEditUnlockCredits] = useState<number>(0)
+  const [editNote, setEditNote] = useState("")
+  const [savingClient, setSavingClient] = useState<string | null>(null)
+
   const fetchRequests = useCallback(async (opts?: { force?: boolean }) => {
     setLoading(true)
     try {
@@ -150,10 +164,75 @@ export function CreditRequestsDashboard() {
 
   useEffect(() => { fetchRequests() }, [fetchRequests])
 
-  const handleOpenReview = (req: CreditRequest, isEdit = false) => {
-    setReviewRequest({ req, isEdit })
-    setReviewAmount(req.requested_amount)
-    setAdminNote(parseAdminNote(req.message))
+  const fetchClients = useCallback(async (opts?: { force?: boolean }) => {
+    setClientsLoading(true)
+    try {
+      const url = `/api/clients/credits?search=${encodeURIComponent(clientsSearch)}&page=${clientsPage}&limit=50`
+      const data = await cachedFetchJson<{ clients: any[], total: number, totalPages: number }>(
+        `internal:clients-credits:${url}`,
+        url,
+        undefined,
+        {
+          ttlMs: 5 * 60_000,
+          force: Boolean(opts?.force),
+          swr: true,
+          onData: (freshData) => {
+            setClients(freshData.clients || [])
+            setClientsTotal(freshData.total || 0)
+            setClientsTotalPages(freshData.totalPages || 0)
+          }
+        }
+      )
+      setClients(data.clients || [])
+      setClientsTotal(data.total || 0)
+      setClientsTotalPages(data.totalPages || 0)
+    } catch {
+      console.error("Failed to load clients")
+    } finally {
+      setClientsLoading(false)
+    }
+  }, [clientsSearch, clientsPage])
+
+  useEffect(() => { fetchClients() }, [fetchClients])
+
+  const handleOpenEdit = (client: any) => {
+    setEditingClient(client.id)
+    setEditJobCredits(client.job_post_credits || 0)
+    setEditUnlockCredits(client.profile_unlock_credits || 0)
+    setEditNote("")
+  }
+
+  const saveClientCredits = async () => {
+    if (!editingClient) return
+    setSavingClient(editingClient)
+    try {
+      const res = await fetch("/api/clients/credits", {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_id: editingClient,
+          job_post_credits: editJobCredits,
+          profile_unlock_credits: editUnlockCredits,
+          admin_note: editNote,
+          send_email: true
+        }),
+      })
+      if (!res.ok) throw new Error("Failed to save")
+      await fetchClients({ force: true })
+      setEditingClient(null)
+    } catch (e: any) {
+      alert("Error: " + e.message)
+    } finally {
+      setSavingClient(null)
+    }
+  }
+
+  const getCreditStatus = (job: number, unlock: number) => {
+    const total = job + unlock
+    if (total === 0) return { label: "Empty", color: "bg-red-100 text-red-800" }
+    if (total < 10) return { label: "Low", color: "bg-yellow-100 text-yellow-800" }
+    return { label: "OK", color: "bg-green-100 text-green-800" }
   }
 
   const submitReview = async (action: "approve" | "reject" | "edit") => {
@@ -211,6 +290,7 @@ export function CreditRequestsDashboard() {
           </div>
           <TabsList>
             <TabsTrigger value="requests">Requests {pendingCount > 0 && <Badge variant="destructive" className="ml-2">{pendingCount}</Badge>}</TabsTrigger>
+            <TabsTrigger value="credits">Client Credits</TabsTrigger>
             <TabsTrigger value="analytics">Analytics</TabsTrigger>
           </TabsList>
         </div>
@@ -392,6 +472,199 @@ export function CreditRequestsDashboard() {
               })}
             </div>
           )}
+        </TabsContent>
+
+        {/* Client Credits Tab */}
+        <TabsContent value="credits" className="space-y-6">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div className="flex items-center gap-2">
+              <CreditCard className="w-5 h-5 text-primary" />
+              <h2 className="text-xl font-semibold">All Clients Credit Overview</h2>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                <Input
+                  placeholder="Search by name, email, phone, slug, ID..."
+                  value={clientsSearch}
+                  onChange={e => { setClientsSearch(e.target.value); setClientsPage(1); }}
+                  className="pl-10 w-72"
+                />
+              </div>
+              <Button variant="outline" onClick={() => fetchClients({ force: true })} disabled={clientsLoading}>
+                <Loader2 className={`w-4 h-4 ${clientsLoading ? 'animate-spin' : ''}`} />
+              </Button>
+            </div>
+          </div>
+
+          {/* Summary Stats */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="p-4 bg-card border rounded-lg">
+              <p className="text-sm text-muted-foreground">Total Clients</p>
+              <p className="text-2xl font-bold">{clientsTotal}</p>
+            </div>
+            <div className="p-4 bg-card border rounded-lg">
+              <p className="text-sm text-muted-foreground">Total Job Credits</p>
+              <p className="text-2xl font-bold text-blue-600">
+                {clients.reduce((sum, c) => sum + (c.job_post_credits || 0), 0)}
+              </p>
+            </div>
+            <div className="p-4 bg-card border rounded-lg">
+              <p className="text-sm text-muted-foreground">Total Unlock Credits</p>
+              <p className="text-2xl font-bold text-purple-600">
+                {clients.reduce((sum, c) => sum + (c.profile_unlock_credits || 0), 0)}
+              </p>
+            </div>
+            <div className="p-4 bg-card border rounded-lg">
+              <p className="text-sm text-muted-foreground">Clients with Zero Credits</p>
+              <p className="text-2xl font-bold text-red-600">
+                {clients.filter(c => (c.job_post_credits || 0) + (c.profile_unlock_credits || 0) === 0).length}
+              </p>
+            </div>
+          </div>
+
+          {/* Clients Table */}
+          <div className="border rounded-lg overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead className="bg-muted/50">
+                  <tr>
+                    <th className="p-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">Client</th>
+                    <th className="p-3 text-left text-xs font-semibold text-muted-foreground uppercase tracking-wider">Contact</th>
+                    <th className="p-3 text-right text-xs font-semibold text-muted-foreground uppercase tracking-wider">Job Post Credits</th>
+                    <th className="p-3 text-right text-xs font-semibold text-muted-foreground uppercase tracking-wider">Profile Unlock Credits</th>
+                    <th className="p-3 text-center text-xs font-semibold text-muted-foreground uppercase tracking-wider">Status</th>
+                    <th className="p-3 text-center text-xs font-semibold text-muted-foreground uppercase tracking-wider">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {clientsLoading ? (
+                    <tr>
+                      <td colSpan={6} className="p-8 text-center text-muted-foreground">
+                        <Loader2 className="w-6 h-6 animate-spin mx-auto mb-2" />
+                        Loading clients...
+                      </td>
+                    </tr>
+                  ) : clients.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="p-8 text-center text-muted-foreground">No clients found</td>
+                    </tr>
+                  ) : (
+                    clients.map((client) => {
+                      const isEditing = editingClient === client.id
+                      const status = getCreditStatus(client.job_post_credits || 0, client.profile_unlock_credits || 0)
+                      return (
+                        <tr key={client.id} className={isEditing ? "bg-blue-50" : "hover:bg-muted/30"}>
+                          <td className="p-3">
+                            {isEditing ? (
+                              <Input
+                                value={client.name}
+                                onChange={e => {}}
+                                disabled
+                                className="font-medium"
+                              />
+                            ) : (
+                              <div>
+                                <p className="font-medium">{client.name}</p>
+                                <p className="text-xs text-muted-foreground">{client.slug}</p>
+                              </div>
+                            )}
+                          </td>
+                          <td className="p-3">
+                            <div className="text-sm">
+                              {client.primary_contact_email && (
+                                <p className="flex items-center gap-1"><Mail className="w-3 h-3" /> {client.primary_contact_email}</p>
+                              )}
+                              {client.contact_phone && (
+                                <p className="flex items-center gap-1"><Phone className="w-3 h-3" /> {client.contact_phone}</p>
+                              )}
+                              {client.primary_contact_name && (
+                                <p className="text-xs text-muted-foreground">{client.primary_contact_name}</p>
+                              )}
+                            </div>
+                          </td>
+                          <td className="p-3 text-right">
+                            {isEditing ? (
+                              <Input
+                                type="number"
+                                value={editJobCredits}
+                                onChange={e => setEditJobCredits(Math.max(0, Number(e.target.value)))}
+                                className="w-24 text-right"
+                                min={0}
+                              />
+                            ) : (
+                              <span className="font-mono font-semibold text-blue-600">{client.job_post_credits || 0}</span>
+                            )}
+                          </td>
+                          <td className="p-3 text-right">
+                            {isEditing ? (
+                              <Input
+                                type="number"
+                                value={editUnlockCredits}
+                                onChange={e => setEditUnlockCredits(Math.max(0, Number(e.target.value)))}
+                                className="w-24 text-right"
+                                min={0}
+                              />
+                            ) : (
+                              <span className="font-mono font-semibold text-purple-600">{client.profile_unlock_credits || 0}</span>
+                            )}
+                          </td>
+                          <td className="p-3 text-center">
+                            <Badge variant="secondary" className={status.color}>
+                              {status.label}
+                            </Badge>
+                          </td>
+                          <td className="p-3 text-center">
+                            {isEditing ? (
+                              <div className="flex items-center justify-center gap-1">
+                                <Button size="sm" onClick={saveClientCredits} disabled={savingClient === client.id}>
+                                  {savingClient === client.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                                </Button>
+                                <Button size="sm" variant="ghost" onClick={() => setEditingClient(null)}>
+                                  <X className="w-4 h-4" />
+                                </Button>
+                              </div>
+                            ) : (
+                              <Button size="sm" variant="outline" onClick={() => handleOpenEdit(client)}>
+                                <Edit className="w-4 h-4 mr-1" /> Edit
+                              </Button>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Pagination */}
+            {clientsTotalPages > 1 && (
+              <div className="p-4 border-t flex items-center justify-between">
+                <p className="text-sm text-muted-foreground">
+                  Showing {((clientsPage - 1) * 50) + 1} to {Math.min(clientsPage * 50, clientsTotal)} of {clientsTotal} clients
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setClientsPage(p => Math.max(1, p - 1))}
+                    disabled={clientsPage === 1}
+                  >
+                    Previous
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setClientsPage(p => Math.min(clientsTotalPages, p + 1))}
+                    disabled={clientsPage === clientsTotalPages}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
         </TabsContent>
 
         <TabsContent value="analytics">
