@@ -210,6 +210,7 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
 
   const participantRows = validCandidates.map((c) => {
     const origin = originByCandidate.get(c.id) || fallbackOrigin || "inbound"
+    const isInfoCollection = infoFirst || extendedScreening
     return {
       campaign_id: campaign.id,
       candidate_id: c.id,
@@ -218,8 +219,11 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
       // (4.1 outbound / 4.2 shortlisted inbound). call_now bypasses WhatsApp.
       // Info-first: collect basic info (CTC, notice period) before calling.
       // Extended-screening: collect full details + pre-screen before calling.
-      status: (infoFirst || extendedScreening) ? "info_requested" : whatsappFirst ? "whatsapp_sent" : "calling",
+      status: isInfoCollection ? "info_requested" : whatsappFirst ? "whatsapp_sent" : "calling",
       origin,
+      info_step: isInfoCollection ? "current_ctc" : null,
+      info_data: isInfoCollection ? {} : null,
+      info_confirmed: isInfoCollection ? false : null,
     }
   })
 

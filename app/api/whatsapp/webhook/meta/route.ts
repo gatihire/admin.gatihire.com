@@ -194,6 +194,24 @@ async function handleTextMessage(participant: any, text: any) {
     infoConfirmed: participant.info_confirmed
   })
   
+  // Auto-initialize info collection if participant is in info_requested but info_step is missing
+  // This handles legacy participants or cases where orchestrator didn't set it
+  if (participant.status === 'info_requested' && !participant.info_step) {
+    logger.info("Auto-initializing info collection for participant", { 
+      participantId: participant.id 
+    })
+    await initializeInfoCollection(participant)
+    // Re-fetch participant to get updated info_step
+    const { data: refreshed } = await supabaseAdmin
+      .from('phone_screening_participants')
+      .select('*')
+      .eq('id', participant.id)
+      .single()
+    if (refreshed) {
+      participant = { ...participant, ...refreshed }
+    }
+  }
+  
   // 1. If participant is actively in info collection flow, route to step-by-step handler
   const isInInfoFlow = participant.status === 'info_requested' && 
     participant.info_step && 

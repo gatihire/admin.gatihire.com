@@ -175,5 +175,16 @@ function fallbackClassify(message: string): IntentClassification {
     return { intent: 'provide_details', confidence: 0.8, delay_minutes: null, reasoning: 'fallback: keyword match' };
   }
 
+  // Detect CTC + notice period patterns (e.g., "8 LPA, 12 LPA, 30 days" or "8LPA 12LPA 30days")
+  const ctcPattern = /\d+\s*(?:lpa|l|k|kpa)?/i;
+  const noticePattern = /\d+\s*(?:days?|months?|weeks?|immediate|asap)/i;
+  if (ctcPattern.test(lower) && noticePattern.test(lower)) {
+    return { intent: 'provide_details', confidence: 0.85, delay_minutes: null, reasoning: 'fallback: ctc+notice pattern' };
+  }
+  // Detect standalone CTC pattern
+  if (ctcPattern.test(lower) && (lower.includes('lpa') || lower.includes(' l ') || lower.match(/\d+l$/i) || lower.match(/\d+k$/i))) {
+    return { intent: 'provide_details', confidence: 0.75, delay_minutes: null, reasoning: 'fallback: ctc pattern' };
+  }
+
   return { intent: 'unclear', confidence: 0.3, delay_minutes: null, reasoning: 'fallback: no match' };
 }
