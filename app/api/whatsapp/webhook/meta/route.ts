@@ -10,6 +10,8 @@ import {
   handleRejectionReason
 } from "@/lib/info-collector-v2"
 import { scheduleBolnaCall } from "@/lib/scheduled-call"
+import { classifyIntent } from "@/lib/ai-intent-classifier"
+import { getWhatsAppService } from "@/lib/whatsapp"
 import crypto from "crypto"
 
 // Verify Meta webhook signature
@@ -203,86 +205,133 @@ async function handleTextMessage(participant: any, text: any) {
       participantId: participant.id, 
       infoStep: participant.info_step 
     })
-    const { handleStepByStepReply } = await import('@/lib/info-collector-v2')
     const result = await handleStepByStepReply(participant.id, messageBody)
     logger.info("Step-by-step reply handled", { participantId: participant.id, result })
     return
   }
   
-  // 2. If participant has confirmed info and replies "confirm" again, re-send confirmation
-  if (participant.info_confirmed && participant.info_step === 'confirmed' && lower === 'confirm') {
-    const { handleStepByStepReply } = await import('@/lib/info-collector-v2')
-    await handleStepByStepReply(participant.id, messageBody)
+  // 2. If participant has confirmed info and replies "confirm" or "edit", handle it
+  if (participant.info_confirmed && participant.info_step === 'confirmed') {
+    if (lower === 'confirm' || lower === 'edit') {
+      await handleStepByStepReply(participant.id, messageBody)
+      return
+    }
+  }
+  
+  // 3. AI intent classification for outreach/general messages
+  const classification = await classifyIntent(messageBody, {
+    candidate_name: participant.candidates?.name || 'Candidate',
+    job_title: participant.jobs?.title || participant.job_title || 'the role',
+    company_name: participant.jobs?.client_name || participant.company_name || 'the company',
+    status: participant.status,
+    screening_mode: participant.screening_mode,
+    whatsapp_sent_at: participant.whatsapp_sent_at,
+  })
+  
+  logger.info("AI intent classified", {
+    participantId: participant.id,
+    intent: classification.intent,
+    confidence: classification.confidence,
+    reasoning: classification.reasoning,
+    message: messageBody.substring(0, 100),
+  })
+  
+  // 4. Dispatch based on intent + confidence threshold
+  if (classification.confidence < 0.7) {
+    logger.info("Low confidence classification, ignoring", {
+      participantId: participant.id,
+      intent: classification.intent,
+      confidence: classification.confidence,
+    })
     return
   }
   
-  // 3. If participant has confirmed and wants to edit
-  if (participant.info_confirmed && participant.info_step === 'confirmed' && lower === 'edit') {
-    const { handleStepByStepReply } = await import('@/lib/info-collector-v2')
-    await handleStepByStepReply(participant.id, "edit")
-    return
-  }
+  await dispatchIntent(participant, classification)
+}
+
+async function dispatchIntent(participant: any, classification: { intent: string; delay_minutes: number | null }) {
+  const { intent, delay_minutes } = classification
   
-  // 4. For outreach participants (not in info collection), handle scheduling keywords
-  // Only match exact or near-exact phrases, not loose includes
-  
-  // "call now" - exact phrase
-  if (lower === 'call now' || lower === 'call' || lower === 'callnow') {
-    logger.info("Detected exact 'call now'", { participantId: participant.id })
-    await scheduleCall(participant, 0)
-    return
+  switch (intent) {
+    case 'schedule_call_now': {
+      logger.info("AI: scheduling immediate call", { participantId: participant.id })
+      await scheduleCall(participant, 0)
+      break
+    }
+    
+    case 'schedule_call_later': {
+      const delayMs = (delay_minutes || 10) * 60 * 1000
+      logger.info("AI: scheduling delayed call", { participantId: participant.id, delayMinutes: delay_minutes })
+      await scheduleCall(participant, delayMs)
+      break
+    }
+    
+    case 'interested': {
+      logger.info("AI: marking interested", { participantId: participant.id })
+      await supabaseAdmin
+        .from("phone_screening_participants")
+        .update({ status: "interested", updated_at: new Date().toISOString() })
+        .eq("id", participant.id)
+      
+      // Send schedule options if we have their phone
+      if (participant.candidates?.phone) {
+        try {
+          const whatsapp = getWhatsAppService()
+          await whatsapp.sendScheduleOptions({
+            phoneNumber: participant.candidates.phone,
+            candidateName: participant.candidates?.name || 'Candidate',
+            jobTitle: participant.jobs?.title || 'the role',
+          })
+        } catch (err: any) {
+          logger.error("Failed to send schedule options", { participantId: participant.id, error: err.message })
+        }
+      }
+      break
+    }
+    
+    case 'not_interested': {
+      logger.info("AI: marking not interested", { participantId: participant.id })
+      await supabaseAdmin
+        .from("phone_screening_participants")
+        .update({ status: "not_interested", updated_at: new Date().toISOString() })
+        .eq("id", participant.id)
+      break
+    }
+    
+    case 'provide_details': {
+      logger.info("AI: starting info collection", { participantId: participant.id })
+      await initializeInfoCollection(participant)
+      
+      const { sendFirstQuestion } = await import('@/lib/info-collector-v2')
+      await sendFirstQuestion(
+        {
+          id: participant.id,
+          candidate_id: participant.candidate_id,
+          phone_number: participant.candidates?.phone || '',
+          candidate_name: participant.candidates?.name || 'Candidate',
+          job_title: participant.jobs?.title || '',
+          company_name: participant.jobs?.client_name || '',
+          status: participant.status,
+          info_step: 'current_ctc',
+          info_data: {},
+          info_confirmed: false,
+          origin: participant.origin,
+          whatsapp_message_id: null,
+          screening_context: participant.screening_context || {},
+        },
+        participant.jobs?.title || '',
+        participant.jobs?.client_name || ''
+      )
+      break
+    }
+    
+    case 'question':
+    case 'unclear':
+    default: {
+      logger.info("AI: no action needed", { participantId: participant.id, intent })
+      break
+    }
   }
-  
-  // Time scheduling - exact phrases
-  if (lower === '10 min' || lower === '10 minutes' || lower === 'in 10 min' || lower === 'in 10 minutes') {
-    await scheduleCall(participant, 10 * 60 * 1000)
-    return
-  }
-  if (lower === '30 min' || lower === '30 minutes' || lower === 'in 30 min' || lower === 'in 30 minutes') {
-    await scheduleCall(participant, 30 * 60 * 1000)
-    return
-  }
-  if (lower === '1 hour' || lower === 'one hour' || lower === 'in 1 hour') {
-    await scheduleCall(participant, 60 * 60 * 1000)
-    return
-  }
-  if (lower === 'tomorrow' || lower === 'tomorrow morning') {
-    const tomorrow = new Date()
-    tomorrow.setDate(tomorrow.getDate() + 1)
-    tomorrow.setUTCHours(3, 30, 0, 0)
-    const delay = tomorrow.getTime() - Date.now()
-    await scheduleCall(participant, delay)
-    return
-  }
-  if (lower === 'evening' || lower === 'this evening' || lower === 'today evening') {
-    const now = new Date()
-    const evening = new Date(now)
-    evening.setUTCHours(12, 30, 0, 0)
-    if (evening <= now) evening.setDate(evening.getDate() + 1)
-    const delay = evening.getTime() - now.getTime()
-    await scheduleCall(participant, delay)
-    return
-  }
-  
-  // "interested" / "not interested" - exact phrases only
-  if (lower === 'interested' || lower === 'yes interested' || lower === 'yes i am interested') {
-    logger.info("Detected exact 'interested'", { participantId: participant.id })
-    await supabaseAdmin
-      .from("phone_screening_participants")
-      .update({ status: "interested", updated_at: new Date().toISOString() })
-      .eq("id", participant.id)
-    return
-  }
-  if (lower === 'not interested' || lower === 'no not interested' || lower === 'no thanks') {
-    await supabaseAdmin
-      .from("phone_screening_participants")
-      .update({ status: "not_interested", updated_at: new Date().toISOString() })
-      .eq("id", participant.id)
-    return
-  }
-  
-  // If no keyword matched, just log it - don't auto-respond or schedule anything
-  logger.info("No keyword matched, ignoring message", { participantId: participant.id, message: lower })
 }
 
 async function scheduleCall(participant: any, delayMs: number) {
