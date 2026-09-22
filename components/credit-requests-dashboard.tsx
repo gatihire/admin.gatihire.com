@@ -631,9 +631,8 @@ export function CreditRequestsDashboard() {
                             )}
                           </td>
                         </tr>
-                      )
-                    })}
-                  )}
+)
+                    )}
                 </tbody>
               </table>
             </div>
