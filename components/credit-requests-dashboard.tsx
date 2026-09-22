@@ -195,6 +195,12 @@ export function CreditRequestsDashboard() {
 
   useEffect(() => { fetchClients() }, [fetchClients])
 
+  const handleOpenReview = (req: CreditRequest, isEdit = false) => {
+    setReviewRequest({ req, isEdit })
+    setReviewAmount(req.requested_amount)
+    setAdminNote(parseAdminNote(req.message))
+  }
+
   const handleOpenEdit = (client: any) => {
     setEditingClient(client.id)
     setEditJobCredits(client.job_post_credits || 0)
@@ -630,9 +636,11 @@ export function CreditRequestsDashboard() {
                               </Button>
                             )}
                           </td>
-                        </tr>
+</tr>
                       )
-                    })}
+                    })
+                  )
+                }
                 </tbody>
               </table>
             </div>
