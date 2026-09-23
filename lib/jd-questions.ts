@@ -2,7 +2,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai"
 import { logger } from "@/lib/logger"
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "")
-const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash"
+const MODEL = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite-preview"
 
 export interface JobContext {
   id: string

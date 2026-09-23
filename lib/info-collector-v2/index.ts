@@ -23,7 +23,8 @@ export {
 export type { ValidationResult, ValidationContext } from './validators';
 
 export {
-  extractStepValue
+  extractStepValue,
+  extractAllFieldsFromReply
 } from './extractor';
 
 export {

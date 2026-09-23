@@ -180,7 +180,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     originByCandidate,
     fallbackOrigin: "outbound",
     createdBy: ctx.authUser.id,
-    callMode: "whatsapp_first",
+    callMode: "quick_screen",
   })
 
   return NextResponse.json({

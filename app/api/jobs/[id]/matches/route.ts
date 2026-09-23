@@ -154,7 +154,7 @@ async function runEnhancedMatchmaking(jobId: string, jd: string, bypassCache = f
     if (!criteriaResult) {
       // gemini-1.5-flash-latest was retired by Google (404) and silently killed
       // criteria extraction — pin to a live model, env-overridable.
-      const model = genAI.getGenerativeModel({ model: process.env.GEMINI_MODEL || "gemini-2.5-flash" })
+      const model = genAI.getGenerativeModel({ model: process.env.GEMINI_MODEL || "gemini-3.1-flash-lite-preview" })
       const prompt = `Analyze this job description and extract key hiring criteria for candidate matching.
 JD: """${jd.slice(0, 3000)}"""
 Return ONLY valid JSON:

@@ -5,9 +5,8 @@ export const runtime = "nodejs"
 
 const GEMINI_MODEL_CANDIDATES = [
   "models/gemini-3.1-flash-lite-preview",
-  "models/gemini-2.5-flash",
-  "models/gemini-2.0-flash",
-  process.env.GEMINI_MODEL || "gemini-2.5-flash",
+  "models/gemini-3-flash-preview",
+  process.env.GEMINI_MODEL || "gemini-3.1-flash-lite-preview",
 ] as const
 
 function stripHtml(html: string) {

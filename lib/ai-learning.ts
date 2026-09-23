@@ -3,7 +3,7 @@ import { supabaseAdmin } from "@/lib/supabase"
 import { logger } from "@/lib/logger"
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "")
-const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash"
+const MODEL = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite-preview"
 
 const REQUIRED_ANSWER_KEYS = [
   "current_salary",

@@ -13,7 +13,7 @@ interface TriggerRequest {
   candidateIds: string[]
   origin?: CandidateOrigin
   createApplication?: boolean
-  callMode?: "call_now" | "whatsapp_first" | "info_first" | "extended_screening"
+  callMode?: "call_now" | "quick_screen" | "collect_info_first"
   /** Per-job campaign config */
   campaignConfig?: {
     nudgeHours?: number

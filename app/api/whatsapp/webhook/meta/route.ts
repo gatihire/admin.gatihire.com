@@ -7,11 +7,14 @@ import {
   handleIncomingSchedule,
   handleInteractiveButton,
   initializeInfoCollection,
-  handleRejectionReason
+  handleRejectionReason,
+  extractAllFieldsFromReply,
+  sendSessionMessage
 } from "@/lib/info-collector-v2"
+import { evaluatePreScreenWithAI } from "@/lib/pre-screen"
+import { getWhatsAppService } from "@/lib/whatsapp"
 import { scheduleBolnaCall } from "@/lib/scheduled-call"
 import { classifyIntent } from "@/lib/ai-intent-classifier"
-import { getWhatsAppService } from "@/lib/whatsapp"
 import crypto from "crypto"
 
 // Verify Meta webhook signature
@@ -212,10 +215,22 @@ async function handleTextMessage(participant: any, text: any) {
     }
   }
   
-  // 1. If participant is actively in info collection flow, route to step-by-step handler
+  // 1. If participant is in collect_info_first mode with collect_all step (single-message parsing)
+  if (participant.status === 'info_requested' && 
+      participant.screening_mode === 'collect_info_first' &&
+      participant.info_step === 'collect_all') {
+    logger.info("Handling collect_all step for collect_info_first mode", { 
+      participantId: participant.id 
+    })
+    await handleCollectAllReply(participant, messageBody)
+    return
+  }
+  
+  // 2. If participant is actively in info collection flow (legacy step-by-step), route to step-by-step handler
   const isInInfoFlow = participant.status === 'info_requested' && 
     participant.info_step && 
     participant.info_step !== 'confirmed' &&
+    participant.info_step !== 'collect_all' &&
     !participant.info_confirmed
   
   if (isInInfoFlow) {
@@ -417,6 +432,142 @@ async function handleStatusUpdate(status: any) {
         .from("phone_screening_participants")
         .update(updates)
         .eq("id", participant.id)
+    }
+  }
+}
+
+async function handleCollectAllReply(participant: any, messageBody: string) {
+  const candidateName = participant.candidates?.name || 'Candidate'
+  const jobTitle = participant.jobs?.title || ''
+  const companyName = participant.jobs?.client_name || ''
+  const phoneNumber = participant.candidates?.phone
+
+  try {
+    // Parse all fields from the single message
+    const allFields = await extractAllFieldsFromReply(messageBody, participant.info_data || {})
+    
+    logger.info("Extracted all fields from collect_all reply", { 
+      participantId: participant.id, 
+      allFields 
+    })
+
+    // Merge with existing info_data
+    const mergedInfoData = { ...participant.info_data, ...allFields }
+
+    // Get job requirements for pre-screen
+    const jobRequirements = {
+      salaryMinLpa: participant.jobs?.salary_min,
+      salaryMaxLpa: participant.jobs?.salary_max,
+      experienceMinYears: participant.jobs?.experience_min_years,
+      experienceMaxYears: participant.jobs?.experience_max_years,
+      city: participant.jobs?.city,
+      location: participant.jobs?.location,
+      title: participant.jobs?.title,
+    }
+
+    // Get pre-screen config from screening_context
+    const preScreenConfig = participant.screening_context?.preScreenConfig || {
+      salaryTolerancePercent: 40,
+      experienceMinPercent: 50,
+      experienceMaxPercent: 200,
+      maxNoticePeriodDays: 120,
+    }
+
+    // Run AI pre-screen evaluation
+    const preScreenResult = await evaluatePreScreenWithAI(mergedInfoData, jobRequirements, preScreenConfig)
+
+    logger.info("Pre-screen evaluation result", { 
+      participantId: participant.id, 
+      decision: preScreenResult.decision,
+      summary: preScreenResult.summary,
+      reasons: preScreenResult.reasons
+    })
+
+    // Update participant with collected info and pre-screen result
+    await supabaseAdmin
+      .from("phone_screening_participants")
+      .update({
+        info_data: mergedInfoData,
+        info_step: 'confirm',
+        info_confirmed: false,
+        screening_context: {
+          ...participant.screening_context,
+          preScreenResult: {
+            decision: preScreenResult.decision,
+            reasons: preScreenResult.reasons,
+            summary: preScreenResult.summary,
+            evaluatedAt: new Date().toISOString(),
+          }
+        },
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", participant.id)
+
+    // Branch based on pre-screen decision
+    switch (preScreenResult.decision) {
+      case 'proceed': {
+        // Schedule AI call after 60 seconds
+        await supabaseAdmin
+          .from("phone_screening_participants")
+          .update({ status: "call_scheduled", updated_at: new Date().toISOString() })
+          .eq("id", participant.id)
+
+        await sendSessionMessage(phoneNumber, "✅ Thanks for sharing your details! Your profile looks like a good fit. Our AI recruiter will call you in about a minute to conduct the screening.")
+
+        // Schedule call via QStash (60 seconds delay)
+        const { scheduleBolnaCall } = await import('@/lib/scheduled-call')
+        await scheduleBolnaCall(participant.id, 60)
+        break
+      }
+
+      case 'needs_review': {
+        // Mark for HR review
+        await supabaseAdmin
+          .from("phone_screening_participants")
+          .update({ status: "pre_screen_review", updated_at: new Date().toISOString() })
+          .eq("id", participant.id)
+
+        await sendSessionMessage(phoneNumber, "Thanks for sharing your details! Our team will review your profile and get back to you within 24 hours.")
+        break
+      }
+
+      case 'filtered_out': {
+        // Inform candidate they don't match
+        await supabaseAdmin
+          .from("phone_screening_participants")
+          .update({ status: "pre_screen_filtered_out", updated_at: new Date().toISOString() })
+          .eq("id", participant.id)
+
+        await sendSessionMessage(phoneNumber, "Thank you for your interest! Based on the details you shared, this role may not be the best match for your profile at this time. We'll keep your details on file for future opportunities.")
+        break
+      }
+    }
+
+  } catch (error: any) {
+    logger.error("Error handling collect_all reply", { 
+      participantId: participant.id, 
+      error: error.message 
+    })
+
+    // Fallback: ask for details step-by-step
+    await supabaseAdmin
+      .from("phone_screening_participants")
+      .update({ info_step: 'current_ctc', updated_at: new Date().toISOString() })
+      .eq("id", participant.id)
+
+    const { sendFirstQuestion } = await import('@/lib/info-collector-v2')
+    const refreshed = await supabaseAdmin
+      .from('phone_screening_participants')
+      .select('*')
+      .eq('id', participant.id)
+      .single()
+
+    if (refreshed.data) {
+      await sendFirstQuestion(
+        refreshed.data,
+        jobTitle,
+        companyName
+      )
     }
   }
 }

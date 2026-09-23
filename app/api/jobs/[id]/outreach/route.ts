@@ -136,7 +136,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       }
 
       if (!criteriaResult) {
-        const model = genAI.getGenerativeModel({ model: process.env.GEMINI_MODEL || "gemini-2.5-flash" })
+        const model = genAI.getGenerativeModel({ model: process.env.GEMINI_MODEL || "gemini-3.1-flash-lite-preview" })
         const prompt = `Analyze this job description and extract key hiring criteria for candidate matching.
 JD: """${(job.description || "").slice(0, 3000)}"""
 Return ONLY valid JSON:
