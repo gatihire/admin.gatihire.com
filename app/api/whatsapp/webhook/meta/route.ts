@@ -444,31 +444,56 @@ async function handleStatusUpdate(status: any) {
 
   logger.info("WhatsApp status update", { messageId, status: statusType })
 
-  // Update participant if we have a mapping
-  if (status.id) {
-    // Try to find participant by message ID
-    const { data: participant } = await supabaseAdmin
-      .from("phone_screening_participants")
-      .select("id")
-      .eq("whatsapp_message_id", messageId)
-      .single()
+  if (!status.id) return
 
-    if (participant) {
-      const updates: any = { updated_at: new Date().toISOString() }
-      
-      if (statusType === "delivered") {
-        updates.whatsapp_delivered_at = new Date().toISOString()
-      } else if (statusType === "read") {
-        updates.whatsapp_read_at = new Date().toISOString()
-      } else if (statusType === "failed") {
-        updates.whatsapp_error = status.errors?.[0]?.message || "Delivery failed"
-      }
+  // Try to find participant by message ID (outbound template + interactive sends)
+  const { data: participant, error: findError } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .select("id, whatsapp_history")
+    .eq("whatsapp_message_id", messageId)
+    .maybeSingle()
 
-      await supabaseAdmin
-        .from("phone_screening_participants")
-        .update(updates)
-        .eq("id", participant.id)
-    }
+  if (findError) {
+    logger.warn("Status update: participant lookup failed", { messageId, error: findError.message })
+    return
+  }
+
+  if (!participant) {
+    logger.info("Status update: no participant mapped to message id", { messageId, status: statusType })
+    return
+  }
+
+  // Note: whatsapp_delivery_status is the only delivery-state column that exists on
+  // phone_screening_participants (whatsapp_delivered_at/read_at/error do NOT exist and
+  // previously caused silent update failures). Delivery timestamps are appended to
+  // whatsapp_history so the UI can still show them.
+  const updates: any = {
+    whatsapp_delivery_status: statusType,
+    updated_at: new Date().toISOString(),
+  }
+
+  const history = Array.isArray(participant.whatsapp_history) ? [...participant.whatsapp_history] : []
+  const historyEntry: Record<string, any> = { messageId, status: statusType, at: new Date().toISOString() }
+
+  if (statusType === "failed") {
+    const errMsg = status.errors?.[0]?.message || "Delivery failed"
+    logger.warn("WhatsApp message delivery failed", { participantId: participant.id, messageId, error: errMsg })
+    historyEntry.error = errMsg
+    updates.whatsapp_response = errMsg
+  }
+
+  history.push(historyEntry)
+  updates.whatsapp_history = history
+
+  const { error: updateError } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .update(updates)
+    .eq("id", participant.id)
+
+  if (updateError) {
+    logger.warn("Failed to persist status update", { participantId: participant.id, status: statusType, error: updateError.message })
+  } else {
+    logger.info("Status update persisted", { participantId: participant.id, status: statusType })
   }
 }
 
@@ -520,12 +545,16 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
     })
 
     // Update participant with collected info and pre-screen result
+    const now = new Date().toISOString()
     await supabaseAdmin
       .from("phone_screening_participants")
       .update({
         info_data: mergedInfoData,
         info_step: 'confirm',
         info_confirmed: false,
+        whatsapp_reply_text: messageBody.slice(0, 500),
+        whatsapp_reply_at: now,
+        info_received_at: now,
         screening_context: {
           ...participant.screening_context,
           preScreenResult: {
@@ -535,7 +564,7 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
             evaluatedAt: new Date().toISOString(),
           }
         },
-        updated_at: new Date().toISOString()
+        updated_at: now
       })
       .eq("id", participant.id)
 
@@ -549,7 +578,7 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
           .eq("id", participant.id)
 
         const { getWhatsAppService } = await import('@/lib/whatsapp')
-        await getWhatsAppService().sendInteractiveButtons({
+        const sendResult = await getWhatsAppService().sendInteractiveButtons({
           phoneNumber,
           body: "✅ Thanks for sharing your details! Your profile looks like a good fit.\n\nWhen should our AI recruiter call you for the quick screening?",
           footer: "Reply 'call now' or pick a slot",
@@ -559,6 +588,18 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
             { id: "in_30_min", title: "In 30 min" },
           ],
         })
+
+        if (!sendResult.success) {
+          logger.warn("Failed to send schedule buttons after proceed", {
+            participantId: participant.id,
+            error: sendResult.error,
+          })
+        } else {
+          logger.info("Schedule buttons sent after proceed", {
+            participantId: participant.id,
+            messageId: sendResult.messageId,
+          })
+        }
         break
       }
 
