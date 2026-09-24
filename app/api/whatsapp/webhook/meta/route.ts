@@ -497,6 +497,41 @@ async function handleStatusUpdate(status: any) {
   }
 }
 
+async function appendToHistory(participantId: string, entry: Record<string, any>) {
+  const { data: participant, error: findError } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .select("whatsapp_history")
+    .eq("id", participantId)
+    .maybeSingle()
+
+  if (findError || !participant) {
+    logger.warn("appendToHistory: participant lookup failed", { participantId, error: findError?.message })
+    return
+  }
+
+  const history = Array.isArray(participant.whatsapp_history) ? [...participant.whatsapp_history] : []
+  history.push(entry)
+
+  const { error: updateError } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .update({ whatsapp_history: history, updated_at: new Date().toISOString() })
+    .eq("id", participantId)
+
+  if (updateError) {
+    logger.warn("appendToHistory: persist failed", { participantId, error: updateError.message })
+  }
+}
+
+async function assertSet(participantId: string, fields: Record<string, any>) {
+  const { error } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .update({ ...fields, updated_at: new Date().toISOString() })
+    .eq("id", participantId)
+  if (error) {
+    logger.warn("assertSet failed", { participantId, error: error.message })
+  }
+}
+
 async function handleCollectAllReply(participant: any, messageBody: string) {
   const candidateName = participant.candidates?.name || 'Candidate'
   const jobTitle = participant.jobs?.title || ''
@@ -594,10 +629,26 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
             participantId: participant.id,
             error: sendResult.error,
           })
+          await appendToHistory(participant.id, {
+            at: new Date().toISOString(),
+            kind: "schedule_buttons",
+            status: "failed",
+            error: sendResult.error,
+          })
         } else {
           logger.info("Schedule buttons sent after proceed", {
             participantId: participant.id,
             messageId: sendResult.messageId,
+          })
+          await appendToHistory(participant.id, {
+            at: new Date().toISOString(),
+            kind: "schedule_buttons",
+            status: "sent",
+            messageId: sendResult.messageId,
+          })
+          await assertSet(participant.id, {
+            whatsapp_delivery_status: "sent",
+            whatsapp_message_id: sendResult.messageId,
           })
         }
         break
