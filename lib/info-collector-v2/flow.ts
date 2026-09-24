@@ -352,14 +352,30 @@ if (nextStep === null) {
   }
 }
 
+async function markScheduledAndFire(participantId: string, scheduledAt: Date): Promise<{ success: boolean; error?: string }> {
+  const scheduledAtISO = scheduledAt.toISOString();
+  const { error: updateError } = await supabaseAdmin
+    .from('phone_screening_participants')
+    .update({
+      status: 'call_scheduled',
+      scheduled_call_at: scheduledAtISO,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', participantId);
+
+  if (updateError) {
+    logger.error('Failed to mark participant scheduled', { participantId, error: updateError.message });
+    return { success: false, error: updateError.message };
+  }
+
+  const delayMs = Math.max(0, scheduledAt.getTime() - Date.now());
+  await scheduleCall({ id: participantId }, delayMs);
+  return { success: true };
+}
+
 async function handleIncomingCallNow(participantId: string): Promise<{ success: boolean; error?: string }> {
   try {
-    const participant = await getParticipantWithExtras(participantId);
-    if (!participant) return { success: false, error: 'Participant not found' };
-    
-    // Schedule immediate call
-    await scheduleCall(participant, 0);
-    return { success: true };
+    return await markScheduledAndFire(participantId, new Date());
   } catch (error: any) {
     return { success: false, error: error.message };
   }
@@ -367,11 +383,7 @@ async function handleIncomingCallNow(participantId: string): Promise<{ success: 
 
 async function handleIncomingSchedule(participantId: string, delayMs: number): Promise<{ success: boolean; error?: string }> {
   try {
-    const participant = await getParticipantWithExtras(participantId);
-    if (!participant) return { success: false, error: 'Participant not found' };
-    
-    await scheduleCall(participant, delayMs);
-    return { success: true };
+    return await markScheduledAndFire(participantId, new Date(Date.now() + delayMs));
   } catch (error: any) {
     return { success: false, error: error.message };
   }
@@ -417,15 +429,15 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
       }
         
       case 'call_now':
-        await scheduleCall(participant, 0);
+        await markScheduledAndFire(participant.id, new Date());
         break;
         
       case 'in_10_min':
-        await scheduleCall(participant, 10 * 60 * 1000);
+        await markScheduledAndFire(participant.id, new Date(Date.now() + 10 * 60 * 1000));
         break;
         
       case 'in_30_min':
-        await scheduleCall(participant, 30 * 60 * 1000);
+        await markScheduledAndFire(participant.id, new Date(Date.now() + 30 * 60 * 1000));
         break;
         
       case 'today_evening':
@@ -433,14 +445,14 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
         const evening = new Date(now);
         evening.setUTCHours(12, 30, 0, 0);
         if (evening <= now) evening.setDate(evening.getDate() + 1);
-        await scheduleCall(participant, evening.getTime() - now.getTime());
+        await markScheduledAndFire(participant.id, evening);
         break;
         
       case 'tomorrow_morning':
         const tomorrow = new Date();
         tomorrow.setDate(tomorrow.getDate() + 1);
         tomorrow.setUTCHours(3, 30, 0, 0);
-        await scheduleCall(participant, tomorrow.getTime() - Date.now());
+        await markScheduledAndFire(participant.id, tomorrow);
         break;
         
       case 'provide_details': {
