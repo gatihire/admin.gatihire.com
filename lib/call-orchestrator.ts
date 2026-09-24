@@ -210,8 +210,6 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
       nudge_hours: nudgeH,
       escalate_hours: escalateH,
       max_call_attempts: maxAttempts,
-      screening_mode: callMode,
-      pre_screen_config: isCollectInfoFirst ? preScreenConfig : null,
     })
     .select()
     .single()
