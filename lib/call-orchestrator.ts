@@ -9,12 +9,8 @@ import { placeBolnaCall } from "@/lib/bolna"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { generateJDQuestions } from "@/lib/jd-questions"
 import { scheduleOutreachFollowup, scheduleBolnaCall, outreachNudgeHours, outreachEscalateHours } from "@/lib/scheduled-call"
-import { getBoardAppBaseUrl } from "@/lib/utils"
 import { type CandidateOrigin } from "@/lib/origin"
 import { logger } from "@/lib/logger"
-
-/** Delay before placing a call after the pre-call WhatsApp context (ms). */
-const PRE_CALL_DELAY_MS = Number(process.env.SCREENING_PRE_CALL_DELAY_MS) || 60_000
 
 /** Batch size for WhatsApp sends — delay between batches to avoid rate limits. */
 const WHATSAPP_BATCH_SIZE = 50
@@ -178,7 +174,6 @@ export interface OrchestrateScreeningResult {
 export async function orchestrateScreening(input: OrchestrateScreeningInput): Promise<OrchestrateScreeningResult> {
   const { job, client, candidates, originByCandidate, fallbackOrigin, createdBy } = input
   const callMode: "call_now" | "quick_screen" | "collect_info_first" = input.callMode || "call_now"
-  const isCallNow = callMode === "call_now"
   const isQuickScreen = callMode === "quick_screen"
   const isCollectInfoFirst = callMode === "collect_info_first"
 
@@ -426,59 +421,8 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
     }
 
     // ==================== CALL NOW MODE ====================
-    // Place AI call immediately with pre-call WhatsApp context
+    // Place AI call immediately with no WhatsApp pre-message
     const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(candidate, job, client, origin, participantId)
-
-    // Pre-call WhatsApp: send context so the candidate expects the call
-    let preCallMessageId: string | null = null
-    const whatsapp = getWhatsAppService()
-    const preCallResult = await whatsapp.sendCallNudge({
-      phoneNumber: candidate.phone as string,
-      candidateName: candidate.name || "",
-      jobTitle: job.title || "",
-      companyName: job.client_name || client?.name || "",
-    })
-    if (preCallResult.success) {
-      preCallMessageId = preCallResult.messageId || null
-      // Track WhatsApp history
-      const history = [{
-        messageId: preCallMessageId,
-        template: "pre_call_context",
-        sentAt: new Date().toISOString(),
-        status: "sent",
-      }]
-      await supabaseAdmin
-        .from("phone_screening_participants")
-        .update({
-          whatsapp_outbound_template: "pre_call_context",
-          whatsapp_outbound_params: { jobTitle: job.title, location: job.city },
-          whatsapp_sent_at: new Date().toISOString(),
-          whatsapp_delivery_status: "sent",
-          whatsapp_history: history,
-          generated_questions: generatedQuestions.join("\n"),
-          gemini_prompt_used: geminiPromptUsed,
-          screening_context: {
-            jobTitle: job.title,
-            clientName: job.client_name || client?.name || "",
-            origin,
-            salaryRange: formatSalaryRange(job),
-            mustHaveSkills: Array.isArray(job.skills_must_have) ? job.skills_must_have.join(", ") : job.skills_must_have || "",
-            experienceRange: `${job.experience_min_years ?? 0}-${job.experience_max_years ?? "any"}`,
-            location: job.city || "",
-          },
-          updated_at: new Date().toISOString(),
-        })
-        .eq("campaign_id", campaign.id)
-        .eq("candidate_id", candidate.id)
-      logger.info(`Pre-call WhatsApp sent to ${candidate.name}`, { messageId: preCallMessageId })
-    } else {
-      logger.warn(`Pre-call WhatsApp failed for ${candidate.name}, proceeding with call anyway`, { error: preCallResult.error })
-    }
-
-    // Wait for the candidate to see the message before calling
-    if (preCallResult.success && PRE_CALL_DELAY_MS > 0) {
-      await new Promise((resolve) => setTimeout(resolve, PRE_CALL_DELAY_MS))
-    }
 
     const result = await placeBolnaCall({
       to: candidate.phone as string,
@@ -486,9 +430,6 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
     })
 
     if (result.success && result.executionId) {
-      const history = preCallMessageId
-        ? [{ messageId: preCallMessageId, template: "pre_call_context", sentAt: new Date().toISOString(), status: "sent" }]
-        : []
       await supabaseAdmin
         .from("phone_screening_participants")
         .update({
@@ -509,8 +450,6 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
             experienceRange: `${job.experience_min_years ?? 0}-${job.experience_max_years ?? "any"}`,
             location: job.city || "",
           },
-          whatsapp_message_id: preCallMessageId,
-          whatsapp_history: history,
           updated_at: new Date().toISOString(),
         })
         .eq("campaign_id", campaign.id)

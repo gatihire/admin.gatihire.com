@@ -10,10 +10,11 @@ interface LoggerOptions {
   level: LogLevel;
 }
 
-// Default configuration - disable logs in production
+// Default configuration - logs enabled at info level for observability in all
+// environments (webhook reply debugging needs visibility in production).
 const defaultOptions: LoggerOptions = {
-  enabled: process.env.NODE_ENV !== 'production',
-  level: 'info'
+  enabled: true,
+  level: process.env.LOG_LEVEL === 'debug' ? 'debug' : 'info'
 };
 
 // Logger instance with configuration

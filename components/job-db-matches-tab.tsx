@@ -465,7 +465,7 @@ export function DbMatchesTab({ jobId, onViewProfile, onCandidateAdded }: DbMatch
     }
   }, [jobId, insights, insightLoading, toast])
 
-  const triggerOutreach = useCallback(async (candidateIds: string[], callMode: "whatsapp_first" | "call_now") => {
+  const triggerOutreach = useCallback(async (candidateIds: string[], callMode: "collect_info_first" | "call_now") => {
     if (candidateIds.length === 0 || outreachBusy) return
     setOutreachBusy(true)
     try {
@@ -689,7 +689,7 @@ export function DbMatchesTab({ jobId, onViewProfile, onCandidateAdded }: DbMatch
                   size="sm"
                   className="rounded-r-none bg-green-600 hover:bg-green-700 h-8 border-r border-green-700"
                   disabled={outreachBusy}
-                  onClick={() => triggerOutreach(Array.from(selectedIds), "whatsapp_first")}
+                  onClick={() => triggerOutreach(Array.from(selectedIds), "collect_info_first")}
                 >
                   {outreachBusy ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <MessageCircle className="h-3.5 w-3.5 mr-1.5" />}
                   WhatsApp Selected
@@ -705,7 +705,7 @@ export function DbMatchesTab({ jobId, onViewProfile, onCandidateAdded }: DbMatch
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
-                    <DropdownMenuItem onClick={() => triggerOutreach(Array.from(selectedIds), "whatsapp_first")}>
+                    <DropdownMenuItem onClick={() => triggerOutreach(Array.from(selectedIds), "collect_info_first")}>
                       <MessageCircle className="h-3.5 w-3.5 mr-2" />
                       WhatsApp Nudge First
                     </DropdownMenuItem>
@@ -892,7 +892,7 @@ export function DbMatchesTab({ jobId, onViewProfile, onCandidateAdded }: DbMatch
                                   size="sm"
                                   className="h-8 rounded-r-none bg-green-600 hover:bg-green-700 border-r border-green-700"
                                   disabled={outreachDisabled || outreachBusy}
-                                  onClick={() => triggerOutreach([candidateId], "whatsapp_first")}
+                                  onClick={() => triggerOutreach([candidateId], "collect_info_first")}
                                 >
                                   {outreachBusy ? (
                                     <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
@@ -912,7 +912,7 @@ export function DbMatchesTab({ jobId, onViewProfile, onCandidateAdded }: DbMatch
                                     </Button>
                                   </DropdownMenuTrigger>
                                   <DropdownMenuContent align="end">
-                                    <DropdownMenuItem onClick={() => triggerOutreach([candidateId], "whatsapp_first")}>
+                                    <DropdownMenuItem onClick={() => triggerOutreach([candidateId], "collect_info_first")}>
                                       <MessageCircle className="h-3.5 w-3.5 mr-2" />
                                       WhatsApp Nudge First
                                     </DropdownMenuItem>

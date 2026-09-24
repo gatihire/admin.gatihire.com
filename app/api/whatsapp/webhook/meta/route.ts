@@ -127,7 +127,8 @@ async function handleIncomingMessage(message: any, contact: any) {
       .from("phone_screening_participants")
       .select(`
         *,
-        candidates:candidate_id (id, name, phone, email)
+        candidates:candidate_id (id, name, phone, email),
+        jobs:job_id (id, title, client_name, city, location, salary_min, salary_max, experience_min_years, experience_max_years)
       `)
       .eq("candidates.phone", searchPhone)
       .order("created_at", { ascending: false })
@@ -271,15 +272,31 @@ async function handleTextMessage(participant: any, text: any) {
   
   // 4. Dispatch based on intent + confidence threshold
   if (classification.confidence < 0.7) {
-    logger.info("Low confidence classification, ignoring", {
+    logger.info("Low confidence classification, sending fallback prompt", {
       participantId: participant.id,
       intent: classification.intent,
       confidence: classification.confidence,
     })
+    await sendReplyFallbackPrompt(participant)
     return
   }
   
   await dispatchIntent(participant, classification)
+}
+
+async function sendReplyFallbackPrompt(participant: any) {
+  const { sendSessionMessage } = await import('@/lib/info-collector-v2')
+  const phoneNumber = participant.candidates?.phone
+  if (!phoneNumber) return
+
+  await sendSessionMessage(
+    phoneNumber,
+    "Thanks for replying! To help us move forward faster, please pick one:\n\n" +
+    "• Interested — we'll schedule your screening call\n" +
+    "• Call now — we'll call you right away\n" +
+    "• Not interested\n" +
+    "• Or share your details: Current CTC, Expected CTC, Total experience, Notice period, City, Willing to relocate, Reason for switching (in one message)"
+  )
 }
 
 async function dispatchIntent(participant: any, classification: { intent: string; delay_minutes: number | null }) {
@@ -358,10 +375,29 @@ async function dispatchIntent(participant: any, classification: { intent: string
       break
     }
     
-    case 'question':
+    case 'question': {
+      logger.info("AI: answering candidate question", { participantId: participant.id })
+      const { sendSessionMessage } = await import('@/lib/info-collector-v2')
+      const phoneNumber = participant.candidates?.phone
+      const role = participant.jobs?.title || "the role"
+      const company = participant.jobs?.client_name || "our client"
+      const city = participant.jobs?.city || participant.jobs?.location || ""
+      const salary = participant.jobs?.salary_min != null && participant.jobs?.salary_max != null
+        ? `Rs ${participant.jobs.salary_min} - ${participant.jobs.salary_max}`
+        : "competitive"
+      if (phoneNumber) {
+        await sendSessionMessage(
+          phoneNumber,
+          `Thanks for asking! Quick details on the ${role} role at ${company}:${city ? `\n• Location: ${city}` : ""}\n• Salary: ${salary}\n• Screening: a quick 5-10 minute call with our AI recruiter.\n\nWould you like to schedule it? Reply "call now", or share your CTC / notice period / experience and we'll proceed.`
+        )
+      }
+      break
+    }
+    
     case 'unclear':
     default: {
-      logger.info("AI: no action needed", { participantId: participant.id, intent })
+      logger.info("AI: unclear intent, sending fallback prompt", { participantId: participant.id, intent })
+      await sendReplyFallbackPrompt(participant)
       break
     }
   }
@@ -506,17 +542,23 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
     // Branch based on pre-screen decision
     switch (preScreenResult.decision) {
       case 'proceed': {
-        // Schedule AI call after 60 seconds
+        // Mark as passed pre-screen; let candidate pick a call slot via session buttons
         await supabaseAdmin
           .from("phone_screening_participants")
-          .update({ status: "call_scheduled", updated_at: new Date().toISOString() })
+          .update({ status: "info_received", updated_at: new Date().toISOString() })
           .eq("id", participant.id)
 
-        await sendSessionMessage(phoneNumber, "✅ Thanks for sharing your details! Your profile looks like a good fit. Our AI recruiter will call you in about a minute to conduct the screening.")
-
-        // Schedule call via QStash (60 seconds delay)
-        const { scheduleBolnaCall } = await import('@/lib/scheduled-call')
-        await scheduleBolnaCall(participant.id, 60)
+        const { getWhatsAppService } = await import('@/lib/whatsapp')
+        await getWhatsAppService().sendInteractiveButtons({
+          phoneNumber,
+          body: "✅ Thanks for sharing your details! Your profile looks like a good fit.\n\nWhen should our AI recruiter call you for the quick screening?",
+          footer: "Reply 'call now' or pick a slot",
+          buttons: [
+            { id: "call_now", title: "Call Now" },
+            { id: "in_10_min", title: "In 10 min" },
+            { id: "in_30_min", title: "In 30 min" },
+          ],
+        })
         break
       }
 

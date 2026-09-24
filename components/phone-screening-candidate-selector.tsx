@@ -52,7 +52,7 @@ export function PhoneScreeningCandidateSelector({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [searchQuery, setSearchQuery] = useState("")
   const [originFilter, setOriginFilter] = useState<"all" | "inbound" | "outbound">("all")
-  const [callMode, setCallMode] = useState<"call_now" | "whatsapp_first">("call_now")
+  const [callMode, setCallMode] = useState<"call_now" | "collect_info_first">("call_now")
   const [showPreview, setShowPreview] = useState(false)
   const [previewData, setPreviewData] = useState<QuestionPreview | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
@@ -375,10 +375,10 @@ export function PhoneScreeningCandidateSelector({
             </button>
             <button
               type="button"
-              onClick={() => setCallMode("whatsapp_first")}
-              className={`px-3 py-2 ${callMode === "whatsapp_first" ? "bg-teal-600 text-white" : "bg-white text-zinc-500 hover:bg-zinc-50"}`}
+              onClick={() => setCallMode("collect_info_first")}
+              className={`px-3 py-2 ${callMode === "collect_info_first" ? "bg-teal-600 text-white" : "bg-white text-zinc-500 hover:bg-zinc-50"}`}
             >
-              WhatsApp nudge
+              WhatsApp collect
             </button>
           </div>
           <div className="flex items-center gap-2">

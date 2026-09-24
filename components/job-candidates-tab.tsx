@@ -403,11 +403,10 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [callNowCandidate, setCallNowCandidate] = useState<string | null>(null)
   const [nudgeBusyCandidate, setNudgeBusyCandidate] = useState<string | null>(null)
-  const [callMode, setCallMode] = useState<"call_now" | "whatsapp_first" | "info_first" | "extended_screening">("call_now")
   const [callingStarted, setCallingStarted] = useState(false)
   const [bulkStage, setBulkStage] = useState("ai_screen")
   const [bulkBusy, setBulkBusy] = useState(false)
-  const [bulkNudgeMode, setBulkNudgeMode] = useState<"call_now" | "whatsapp_first" | "info_first" | "extended_screening">("whatsapp_first")
+  const [bulkNudgeMode, setBulkNudgeMode] = useState<"call_now" | "collect_info_first">("collect_info_first")
   const [resultParticipantId, setResultParticipantId] = useState<string | null>(null)
 
   // Prescreen review state
@@ -657,15 +656,11 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
       let description = ""
       if (bulkNudgeMode === "call_now") {
         description = `${triggered} calls placed`; if (failed > 0) description += `, ${failed} failed`; if (skipped > 0) description += `, ${skipped} skipped (no phone)`
-      } else if (bulkNudgeMode === "info_first") {
-        description = `${nudged} info requests sent`; if (skipped > 0) description += `, ${skipped} skipped (no phone)`
-      } else if (bulkNudgeMode === "extended_screening") {
-        description = `${nudged} extended screening requests sent`; if (skipped > 0) description += `, ${skipped} skipped (no phone)`
       } else {
-        description = `${nudged} WhatsApp nudges sent`; if (skipped > 0) description += `, ${skipped} skipped (no phone)`
+        description = `${nudged} info requests sent`; if (skipped > 0) description += `, ${skipped} skipped (no phone)`
       }
       if (deduped > 0) description += ` (${deduped} updated existing)`
-      const title = bulkNudgeMode === "call_now" ? "AI calls started" : bulkNudgeMode === "info_first" ? "Info requests sent" : bulkNudgeMode === "extended_screening" ? "Extended screening started" : "WhatsApp outreach started"
+      const title = bulkNudgeMode === "call_now" ? "AI calls started" : "WhatsApp info requests sent"
       toast({ title, description, variant: failed > 0 && triggered === 0 ? "destructive" : "default" })
       setSelectedIds(new Set()); setConfirmCallsOpen(false)
       invalidateSessionCache(`internal:applications:job:${jobId}`); onRefresh(); fetchParticipants()
@@ -962,34 +957,16 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
                       <Button
                         size="sm"
                         className="h-8 text-xs bg-teal-600 hover:bg-teal-700 text-white gap-1"
-                        onClick={() => { setBulkNudgeMode("whatsapp_first"); setConfirmCallsOpen(true) }}
+                        onClick={() => { setBulkNudgeMode("collect_info_first"); setConfirmCallsOpen(true) }}
                         disabled={callingStarted || selectedCandidateIds.length === 0}
                       >
                         {callingStarted ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MessageCircle className="h-3.5 w-3.5" />}
-                        WhatsApp First
+                        WhatsApp Collect Info
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent className="max-w-xs">
-                      <p className="font-semibold">WhatsApp First</p>
-                      <p className="text-xs opacity-80">Send a WhatsApp context message to each candidate. AI calls them when they respond. Best for cold outreach.</p>
-                    </TooltipContent>
-                  </Tooltip>
-
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        size="sm"
-                        className="h-8 text-xs bg-amber-600 hover:bg-amber-700 text-white gap-1"
-                        onClick={() => { setBulkNudgeMode("info_first"); setConfirmCallsOpen(true) }}
-                        disabled={callingStarted || selectedCandidateIds.length === 0}
-                      >
-                        {callingStarted ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-                        Collect Info
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent className="max-w-xs">
-                      <p className="font-semibold">Collect Info First</p>
-                      <p className="text-xs opacity-80">Ask candidates for CTC, notice period via WhatsApp before scheduling the AI call. Filters unqualified candidates early.</p>
+                      <p className="font-semibold">WhatsApp Collect Info &amp; Schedule</p>
+                      <p className="text-xs opacity-80">Send the info-request template. Candidates reply with CTC, notice period, etc. in one message, get pre-screened, then pick a call slot.</p>
                     </TooltipContent>
                   </Tooltip>
 
@@ -1007,7 +984,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
                     </TooltipTrigger>
                     <TooltipContent className="max-w-xs">
                       <p className="font-semibold">Call Now (Skip WhatsApp)</p>
-                      <p className="text-xs opacity-80">Bolna AI calls each candidate immediately. No WhatsApp pre-nudge. Use when you have confirmed availability.</p>
+                      <p className="text-xs opacity-80">Bolna AI calls each candidate immediately. No WhatsApp pre-nudge.</p>
                     </TooltipContent>
                   </Tooltip>
 
@@ -1262,20 +1239,13 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
                   <Badge className="text-xs font-bold px-3 py-1 rounded-full bg-violet-100 text-violet-700">{outboundCount} Outbound</Badge>
                 </div>
                 <div className="rounded-xl border border-zinc-200 overflow-hidden">
-                  <div className="grid grid-cols-3">
+                  <div className="grid grid-cols-2">
                     <button
-                      type="button" disabled={callingStarted} onClick={() => setBulkNudgeMode("whatsapp_first")}
-                      className={`px-3 py-2.5 text-left text-xs transition-all ${bulkNudgeMode === "whatsapp_first" ? "bg-teal-50 text-teal-800 ring-1 ring-inset ring-teal-300" : "text-zinc-500 hover:bg-zinc-50"}`}
+                      type="button" disabled={callingStarted} onClick={() => setBulkNudgeMode("collect_info_first")}
+                      className={`px-3 py-2.5 text-left text-xs transition-all ${bulkNudgeMode === "collect_info_first" ? "bg-teal-50 text-teal-800 ring-1 ring-inset ring-teal-300" : "text-zinc-500 hover:bg-zinc-50"}`}
                     >
-                      <span className="block font-bold text-xs uppercase tracking-wide">WhatsApp First</span>
-                      <span className="text-xs opacity-80 mt-0.5 block">Send WhatsApp context, AI calls when they reply</span>
-                    </button>
-                    <button
-                      type="button" disabled={callingStarted} onClick={() => setBulkNudgeMode("info_first")}
-                      className={`px-3 py-2.5 text-left text-xs transition-all ${bulkNudgeMode === "info_first" ? "bg-amber-50 text-amber-800 ring-1 ring-inset ring-amber-300" : "text-zinc-500 hover:bg-zinc-50"}`}
-                    >
-                      <span className="block font-bold text-xs uppercase tracking-wide">Collect Info First</span>
-                      <span className="text-xs opacity-80 mt-0.5 block">Ask CTC, notice period before scheduling call</span>
+                      <span className="block font-bold text-xs uppercase tracking-wide">WhatsApp Collect Info &amp; Schedule</span>
+                      <span className="text-xs opacity-80 mt-0.5 block">Send info template, pre-screen replies, then call</span>
                     </button>
                     <button
                       type="button" disabled={callingStarted} onClick={() => setBulkNudgeMode("call_now")}
@@ -1292,7 +1262,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
               <AlertDialogCancel disabled={callingStarted}>Cancel</AlertDialogCancel>
               <AlertDialogAction onClick={startAiCalls} disabled={callingStarted}>
                 {callingStarted ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <PhoneCall className="h-3.5 w-3.5 mr-1" />}
-                {callingStarted ? "Starting..." : bulkNudgeMode === "call_now" ? "Start calls now" : bulkNudgeMode === "whatsapp_first" ? "Send WhatsApp first" : "Send info request"}
+                {callingStarted ? "Starting..." : bulkNudgeMode === "call_now" ? "Start calls now" : "Send WhatsApp info request"}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
@@ -1331,7 +1301,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
   const [notesSaving, setNotesSaving] = useState(false)
   const [retagBusy, setRetagBusy] = useState(false)
   const [confirmCallOpen, setConfirmCallOpen] = useState(false)
-  const [confirmCallMode, setConfirmCallMode] = useState<"call_now" | "whatsapp_first" | "info_first" | "extended_screening">("call_now")
+  const [confirmCallMode, setConfirmCallMode] = useState<"call_now" | "collect_info_first">("call_now")
   const [detailsExpanded, setDetailsExpanded] = useState(false)
 
   const nextAction = useMemo(() => getActionForCard(application, callStatus, participant), [application.status, callStatus, participant])
@@ -1368,7 +1338,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
     finally { setRetagBusy(false) }
   }
 
-  const sendWhatsAppNudge = async (mode: "call_now" | "whatsapp_first" | "info_first" | "extended_screening") => {
+  const sendWhatsAppNudge = async (mode: "call_now" | "collect_info_first") => {
     onNudgeStart?.()
     try {
       const res = await fetch("/api/phone-screening/trigger", {
@@ -1384,8 +1354,8 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || "Failed to start screening")
-      const title = mode === "call_now" ? "AI call started" : mode === "info_first" ? "Info request sent" : mode === "extended_screening" ? "Extended screening started" : "WhatsApp nudge sent"
-      const desc = mode === "call_now" ? `Direct call triggered for ${c.name}` : mode === "info_first" ? `Info request sent to ${c.name}` : mode === "extended_screening" ? `Extended screening request sent to ${c.name}` : `WhatsApp nudge sent to ${c.name}`
+      const title = mode === "call_now" ? "AI call started" : "Info request sent"
+      const desc = mode === "call_now" ? `Direct call triggered for ${c.name}` : `WhatsApp info request sent to ${c.name}`
       toast({ title, description: desc })
       onApplicationUpdated({ ...application, status: "ai_screen" })
     } catch (err: any) { toast({ title: "Failed", description: err.message, variant: "destructive" }) }
@@ -1653,13 +1623,9 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-56">
-                  <DropdownMenuItem onClick={() => { setConfirmCallMode("whatsapp_first"); setConfirmCallOpen(true) }} className="flex flex-col items-start gap-0.5 py-2">
-                    <span className="flex items-center gap-2 font-semibold text-xs"><MessageCircle className="h-3.5 w-3.5 text-teal-500" /> WhatsApp First</span>
-                    <span className="text-[11px] text-zinc-400 leading-snug">Send context via WhatsApp. AI calls when they respond.</span>
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => { setConfirmCallMode("info_first"); setConfirmCallOpen(true) }} className="flex flex-col items-start gap-0.5 py-2">
-                    <span className="flex items-center gap-2 font-semibold text-xs"><Send className="h-3.5 w-3.5 text-amber-500" /> Collect Info First</span>
-                    <span className="text-[11px] text-zinc-400 leading-snug">Ask CTC, notice period via WhatsApp before scheduling.</span>
+                  <DropdownMenuItem onClick={() => { setConfirmCallMode("collect_info_first"); setConfirmCallOpen(true) }} className="flex flex-col items-start gap-0.5 py-2">
+                    <span className="flex items-center gap-2 font-semibold text-xs"><MessageCircle className="h-3.5 w-3.5 text-teal-500" /> WhatsApp Collect Info &amp; Schedule</span>
+                    <span className="text-[11px] text-zinc-400 leading-snug">Send info request, pre-screen reply, then call.</span>
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => { setConfirmCallMode("call_now"); setConfirmCallOpen(true) }} className="flex flex-col items-start gap-0.5 py-2">
                     <span className="flex items-center gap-2 font-semibold text-xs"><PhoneCall className="h-3.5 w-3.5 text-emerald-500" /> Call Now</span>
@@ -1863,21 +1829,17 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
       <AlertDialog open={confirmCallOpen} onOpenChange={setConfirmCallOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{confirmCallMode === "call_now" ? "Start AI call?" : confirmCallMode === "info_first" ? "Collect candidate info?" : confirmCallMode === "extended_screening" ? "Start extended screening?" : "Send WhatsApp nudge?"}</AlertDialogTitle>
+            <AlertDialogTitle>{confirmCallMode === "call_now" ? "Start AI call?" : "Collect candidate info?"}</AlertDialogTitle>
             <AlertDialogDescription>
               {confirmCallMode === "call_now"
                 ? `Bolna will directly call ${c.name}. The AI agent will screen them for this role.`
-                : confirmCallMode === "info_first"
-                ? `Send an info request to ${c.name}. They will share CTC and notice period before scheduling the call.`
-                : confirmCallMode === "extended_screening"
-                ? `Send extended screening request to ${c.name}. They will share full details (CTC, experience, location, relocation, reason for switching) and we'll pre-screen before the AI call.`
-                : `Send a WhatsApp context message to ${c.name}. An automated call will follow when they respond.`}
+                : `Send the info-request template to ${c.name}. They reply with CTC, experience, notice period, relocation & reason for switching. We pre-screen before scheduling the AI call.`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={() => { setConfirmCallOpen(false); sendWhatsAppNudge(confirmCallMode) }}>
-              {confirmCallMode === "call_now" ? "Call Now" : confirmCallMode === "info_first" ? "Send Info Request" : confirmCallMode === "extended_screening" ? "Start Extended Screening" : "Send Nudge"}
+              {confirmCallMode === "call_now" ? "Call Now" : "Send Info Request"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

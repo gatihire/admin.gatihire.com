@@ -186,6 +186,65 @@ export class WhatsAppService {
     }
   }
 
+  /**
+   * Session interactive message with quick-reply buttons.
+   * Allowed within the 24-hour customer service window after any user reply —
+   * does NOT require an approved template.
+   */
+  async sendInteractiveButtons(params: {
+    phoneNumber: string
+    body: string
+    buttons: Array<{ id: string; title: string }>
+    footer?: string
+  }): Promise<SendMessageResult> {
+    const destination = this.normalizePhoneNumber(params.phoneNumber)
+    if (!this.isMetaConfigured() || !destination) {
+      if (!destination) return { success: false, error: "Invalid phone number" }
+      return { success: false, error: "Meta WhatsApp not configured" }
+    }
+
+    const interactive: Record<string, unknown> = {
+      type: "button",
+      body: { text: params.body },
+      action: {
+        buttons: params.buttons.slice(0, 3).map((b) => ({
+          type: "reply",
+          reply: { id: b.id, title: b.title },
+        })),
+      },
+    }
+    if (params.footer) interactive.footer = { text: params.footer }
+
+    try {
+      const response = await fetch(`${this.baseUrl}/${this.config.phoneNumberId}/messages`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${this.config.accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          recipient_type: "individual",
+          to: destination,
+          type: "interactive",
+          interactive,
+        }),
+      })
+
+      const result = await response.json()
+
+      if (response.ok && result.messages && result.messages[0]) {
+        return { success: true, messageId: result.messages[0].id }
+      }
+      const error = result.error?.message || "Unknown error"
+      logger.error("Failed to send WhatsApp interactive buttons", { destination, error, response: result })
+      return { success: false, error }
+    } catch (error: any) {
+      logger.error("Error sending WhatsApp interactive buttons", { destination, error: error.message })
+      return { success: false, error: error.message }
+    }
+  }
+
   // Template-specific methods
 
   async sendTalentOutreach(params: {

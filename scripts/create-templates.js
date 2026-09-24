@@ -1,7 +1,12 @@
-const TOKEN = "EAAOZAZASZCvjqkBSqQ0IJheWmDBtCcTxEKi5xljnngRNZAgtBfLWg7UfGtjeXUDfP70s0L12DqboqTKB05RV3yJhtvro4Rc2uzOPA7EvPCV70piMHsfMpUSpoUt9zWX5WQFCkI0AvD57SHPZAJ42sqyIRzxsnFA1zEGzdd7XSQzTOI5Dos4pdqYQqKHGrO8G9xgZDZD";
-const WABA_ID = "1292918636194299";
-const API_VERSION = "v21.0";
+const TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
+const WABA_ID = process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || "1292918636194299";
+const API_VERSION = process.env.WHATSAPP_API_VERSION || "v21.0";
 const BASE_URL = `https://graph.facebook.com/${API_VERSION}/${WABA_ID}/message_templates`;
+
+if (!TOKEN) {
+  console.error("WHATSAPP_ACCESS_TOKEN is required. Run with the .env.local values exported or via dotenv.");
+  process.exit(1);
+}
 
 const templates = [
   {

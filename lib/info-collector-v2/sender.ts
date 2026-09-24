@@ -155,13 +155,15 @@ async function sendStepQuestion(
 }
 
 async function sendReminder(participant: ParticipantInfo): Promise<{ success: boolean; messageId?: string; error?: string }> {
-  const templateName = process.env.WHATSAPP_TEMPLATE_INFO_REMINDER || 'info_reminder';
+  const templateName = process.env.WHATSAPP_TEMPLATE_REMINDER_NUDGE || 'reminder_nudge';
   
   const components = [
     {
       type: 'body',
       parameters: [
-        { type: 'text', text: participant.candidate_name }
+        { type: 'text', text: participant.candidate_name },
+        { type: 'text', text: participant.job_title },
+        { type: 'text', text: participant.company_name }
       ]
     }
   ];
