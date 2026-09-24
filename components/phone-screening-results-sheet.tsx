@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/select"
 import { useToast } from "@/hooks/use-toast"
 import { cn } from "@/lib/utils"
+import { CollectedInfoView, PreScreenVerdict } from "@/components/candidate-collected-info"
 
 interface TranscriptSegment {
   id: string
@@ -84,6 +85,11 @@ interface ParticipantDetail {
   whatsapp_history?: WhatsAppMessage[] | null
   call_payload_json?: Record<string, unknown> | null
   generated_questions?: string | null
+  info_data?: Record<string, unknown> | null
+  info_step?: string | null
+  info_confirmed?: boolean | null
+  prescreen_decision?: string | null
+  prescreen_reason?: string | null
   screening_context?: {
     jobTitle?: string
     clientName?: string
@@ -92,6 +98,12 @@ interface ParticipantDetail {
     mustHaveSkills?: string
     experienceRange?: string
     location?: string
+    preScreenResult?: {
+      decision?: string
+      reasons?: string[]
+      summary?: string
+      evaluatedAt?: string
+    }
   } | null
   candidates: {
     name: string
@@ -563,13 +575,31 @@ export function PhoneScreeningResultsSheet({
                           </div>
                           <div className="pb-4 flex-1 min-w-0">
                             <p className="text-xs font-bold text-zinc-700 mb-0.5">Candidate Reply</p>
-                            <div className="inline-block p-2.5 rounded-xl bg-green-50 border border-green-100 text-sm text-zinc-800 max-w-full">
+                            <div className="inline-block p-2.5 rounded-xl bg-green-50 border border-green-100 text-sm text-zinc-800 max-w-full whitespace-pre-wrap">
                               {data.whatsapp_reply_text}
                             </div>
                             {data.whatsapp_reply_at && (
                               <p className="text-xs text-zinc-400 mt-1">{formatTimeAgo(data.whatsapp_reply_at)}</p>
                             )}
                           </div>
+                        </div>
+                      )}
+
+                      {/* Structured reply: fields ingested via Gemini */}
+                      {(data.info_data && Object.keys(data.info_data).length > 0 || data.screening_context?.preScreenResult) && (
+                        <div className="mt-1 space-y-3">
+                          {data.screening_context?.preScreenResult && (
+                            <PreScreenVerdict result={data.screening_context.preScreenResult} />
+                          )}
+                          {data.info_data && Object.keys(data.info_data).length > 0 && (
+                            <CollectedInfoView infoData={data.info_data} />
+                          )}
+                          {data.prescreen_decision && !data.screening_context?.preScreenResult && (
+                            <p className="text-xs text-zinc-400">
+                              Decision: <span className="font-semibold text-zinc-600">{data.prescreen_decision}</span>
+                              {data.prescreen_reason ? ` — ${data.prescreen_reason}` : ""}
+                            </p>
+                          )}
                         </div>
                       )}
                     </div>

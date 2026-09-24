@@ -20,6 +20,7 @@ interface ParticipantData {
   whatsapp_delivery_status: string | null
   whatsapp_response: string | null
   whatsapp_reply_text: string | null
+  info_data?: Record<string, unknown> | null
   call_attempts: number
   retry_count: number
   next_retry_at: string | null
@@ -131,7 +132,19 @@ export function CandidateMetricsBar({ participant, callStatus }: CandidateMetric
       color: "text-green-600",
     })
   }
-  
+
+  // Structured fields collected & parsed by AI
+  const infoData = participant?.info_data
+  const infoFieldCount = infoData ? Object.values(infoData).filter(v => v !== null && v !== undefined && v !== "").length : 0
+  if (infoFieldCount > 0) {
+    items.push({
+      icon: CheckCheck,
+      label: "",
+      value: `${infoFieldCount} field${infoFieldCount !== 1 ? "s" : ""} collected`,
+      color: "text-teal-600",
+    })
+  }
+
   // Call attempts
   if (metrics.callAttempts > 0) {
     items.push({

@@ -20,6 +20,7 @@ import { PrescreenReviewModal, type ReviewCandidate } from "./prescreen-review-m
 import { CandidateActivityTimeline } from "./candidate-activity-timeline"
 import { CandidateTimeline } from "./candidate-timeline"
 import { CandidateMetricsBar } from "./candidate-metrics-bar"
+import { CollectedInfoView, PreScreenVerdict } from "./candidate-collected-info"
 import { RootCauseAnalytics } from "./root-cause-analytics"
 import {
   Loader2, User, MapPin, Briefcase, Eye, Sparkles, Mail, Phone, ChevronDown, ChevronUp,
@@ -287,6 +288,8 @@ const NEXT_ACTION_CONFIG: Record<string, { label: string; cta: string; icon: any
 function buildReviewCandidate(participant: any, application: Application): ReviewCandidate {
   const c = participant?.candidates || {}
   const job = participant?.jobs || {}
+  // Prefer structured fields collected via WhatsApp (info_data), fall back to candidate columns
+  const info = participant?.info_data || {}
   const checks = participant?.prescreen_reason
     ? participant.prescreen_reason.split("; ").map((r: string) => {
         const [field, detail] = r.split(" (")
@@ -305,13 +308,13 @@ function buildReviewCandidate(participant: any, application: Application): Revie
     currentCompany: c.current_company || null,
     phone: c.phone || null,
     email: c.email || null,
-    currentCtc: c.current_ctc || null,
-    expectedCtc: c.expected_ctc || null,
-    totalExperience: c.total_experience_years || null,
-    noticePeriod: c.notice_period || null,
-    location: c.location_preference || c.location || null,
-    willingToRelocate: c.willing_to_relocate ?? null,
-    reasonForSwitching: c.reason_for_switching || null,
+    currentCtc: (info.current_ctc as string) || c.current_ctc || null,
+    expectedCtc: (info.expected_ctc as string) || c.expected_ctc || null,
+    totalExperience: (info.total_experience as string) || c.total_experience_years || null,
+    noticePeriod: (info.notice_period as string) || c.notice_period || null,
+    location: (info.location as string) || c.location_preference || c.location || null,
+    willingToRelocate: (info.willing_to_relocate != null ? /^(yes|y|true|1)$/i.test(String(info.willing_to_relocate)) : null) ?? c.willing_to_relocate ?? null,
+    reasonForSwitching: (info.reason_for_switching as string) || c.reason_for_switching || null,
     aiPrescreenDecision: participant?.prescreen_decision || null,
     aiPrescreenReason: participant?.prescreen_reason || null,
     checks,
@@ -1495,6 +1498,16 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                     </div>
                     {/* Metrics Bar */}
                     <CandidateMetricsBar participant={participant} callStatus={callStatus || "pending"} />
+                  </div>
+                )}
+
+                {/* Structured reply: fields ingested via Gemini */}
+                {participant && participant.info_data && Object.keys(participant.info_data).length > 0 && (
+                  <div className="mt-3 space-y-2">
+                    {participant.screening_context?.preScreenResult && (
+                      <PreScreenVerdict result={participant.screening_context.preScreenResult} />
+                    )}
+                    <CollectedInfoView infoData={participant.info_data} compact />
                   </div>
                 )}
               </div>
