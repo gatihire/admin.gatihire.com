@@ -89,6 +89,7 @@ export interface Database {
           name: string
           email: string
           phone: string | null
+          phone_e164: string | null
           date_of_birth: string | null
           gender: 'male' | 'female' | 'other' | 'prefer-not-to-say' | null
           marital_status: 'single' | 'married' | 'divorced' | 'widowed' | null
@@ -161,6 +162,7 @@ export interface Database {
           name: string
           email: string
           phone?: string | null
+          phone_e164?: string | null
           date_of_birth?: string | null
           gender?: 'male' | 'female' | 'other' | 'prefer-not-to-say' | null
           marital_status?: 'single' | 'married' | 'divorced' | 'widowed' | null
@@ -232,6 +234,7 @@ export interface Database {
           name?: string
           email?: string
           phone?: string | null
+          phone_e164?: string | null
           date_of_birth?: string | null
           gender?: 'male' | 'female' | 'other' | 'prefer-not-to-say' | null
           marital_status?: 'single' | 'married' | 'divorced' | 'widowed' | null

@@ -15,6 +15,7 @@ import { evaluatePreScreenWithAI } from "@/lib/pre-screen"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { scheduleBolnaCall } from "@/lib/scheduled-call"
 import { classifyIntent } from "@/lib/ai-intent-classifier"
+import { toE164 } from "@/lib/phone"
 import crypto from "crypto"
 
 // Verify Meta webhook signature
@@ -124,29 +125,51 @@ async function handleIncomingMessage(message: any, contact: any) {
     if (c.length > 12 && c.startsWith("91")) return c.substring(c.length - 12)
     return c
   }
+  // Canonical E.164 comparison — the fast indexed path once phone_e164 is
+  // backfilled (send and lookup then share the exact same canonical form).
+  const senderE164 = toE164(phoneNumber)
 
   let participant = null
   let findError = null
   let matchedCandidateIds: string[] = []
 
   // Step 1: find candidate rows whose stored phone normalizes to the sender.
-  // Supabase caps a single select at 1000 rows, so paginate the scan.
   const matchedSet = new Set<string>()
-  for (let offset = 0; offset < 20000; offset += 1000) {
-    const { data: phoneMatches, error } = await supabaseAdmin
-      .from("candidates")
-      .select("id, phone")
-      .range(offset, offset + 999)
 
+  // Fast path: exact match on the canonical phone_e164 column (indexed).
+  if (senderE164) {
+    const { data: e164Matches, error } = await supabaseAdmin
+      .from("candidates")
+      .select("id")
+      .eq("phone_e164", senderE164)
+      .limit(10)
     if (error) {
-      logger.warn("Candidate phone scan failed", { phoneNumber, error: error.message })
+      logger.warn("Candidate phone_e164 lookup failed", { phoneNumber, error: error.message })
       findError = error
-      break
+    } else {
+      for (const c of e164Matches || []) matchedSet.add(c.id)
     }
-    for (const c of phoneMatches || []) {
-      if (normalizedTo(c.phone) === normalizedFrom) matchedSet.add(c.id)
+  }
+
+  // Fallback: normalized full-table scan for rows not yet backfilled.
+  if (matchedSet.size === 0) {
+    // Supabase caps a single select at 1000 rows, so paginate the scan.
+    for (let offset = 0; offset < 20000; offset += 1000) {
+      const { data: phoneMatches, error } = await supabaseAdmin
+        .from("candidates")
+        .select("id, phone")
+        .range(offset, offset + 999)
+
+      if (error) {
+        logger.warn("Candidate phone scan failed", { phoneNumber, error: error.message })
+        findError = error
+        break
+      }
+      for (const c of phoneMatches || []) {
+        if (normalizedTo(c.phone) === normalizedFrom) matchedSet.add(c.id)
+      }
+      if ((phoneMatches || []).length < 1000) break
     }
-    if ((phoneMatches || []).length < 1000) break
   }
   matchedCandidateIds = Array.from(matchedSet)
 
@@ -575,6 +598,12 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
   const phoneNumber = participant.candidates?.phone
 
   try {
+    // Instant ack so the candidate isn't staring at silence while Gemini
+    // extracts fields and runs the pre-screen. Fire-and-forget; the decision
+    // messages below supersede it.
+    sendSessionMessage(phoneNumber, "✅ Details received — ek second, mujhe aapka profile check karne dein...")
+      .catch(() => {})
+
     // Parse all fields from the single message
     const allFields = await extractAllFieldsFromReply(messageBody, participant.info_data || {})
     

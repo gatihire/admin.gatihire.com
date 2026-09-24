@@ -10,34 +10,34 @@ export const INFO_STEPS: Array<{
   {
     key: 'current_ctc',
     label: 'Current CTC',
-    question: 'What is your current CTC (annual)?\n\nExample: "8 LPA", "800000", "80K"',
+    question: 'Aapka current CTC (annual) kya hai?\n\nExample: "8 LPA", "800000", "80K"',
     validator: 'ctc',
     required: true,
     example: '8 LPA',
-    helpText: 'Your current annual compensation (e.g., 8 LPA, 800000, 80K)'
+    helpText: 'Aapki current annual salary (e.g., 8 LPA, 800000, 80K)'
   },
   {
     key: 'expected_ctc',
     label: 'Expected CTC',
-    question: 'What is your expected CTC (annual)?\n\nExample: "12 LPA", "1500000"',
+    question: 'Aapki expected CTC (annual) kya hai?\n\nExample: "12 LPA", "1500000"',
     validator: 'ctc',
     required: true,
     example: '12 LPA',
-    helpText: 'Your expected annual compensation'
+    helpText: 'Aapki expected annual salary'
   },
   {
     key: 'notice_period',
     label: 'Notice Period',
-    question: 'What is your notice period?\n\nExample: "30 days", "1 month", "Immediate"',
+    question: 'Aapka notice period kya hai?\n\nExample: "30 days", "1 month", "Immediate"',
     validator: 'notice_period',
     required: true,
     example: '30 days',
-    helpText: 'How soon you can join (e.g., 30 days, 1 month, Immediate)'
+    helpText: 'Kitne time me join kar sakte hain (e.g., 30 days, 1 month, Immediate)'
   },
   {
     key: 'total_experience',
     label: 'Total Experience',
-    question: 'What is your total work experience?\n\nExample: "4 years", "3.5 years", "48 months"',
+    question: 'Aapka total work experience kya hai?\n\nExample: "4 years", "3.5 years", "48 months"',
     validator: 'experience',
     required: true,
     example: '4 years',
@@ -46,29 +46,29 @@ export const INFO_STEPS: Array<{
   {
     key: 'location',
     label: 'Current Location',
-    question: 'What is your current city/location?\n\nExample: "Mumbai", "Bangalore", "Delhi NCR"',
+    question: 'Aapka current city/location kya hai?\n\nExample: "Mumbai", "Bangalore", "Delhi NCR"',
     validator: 'location',
     required: true,
     example: 'Mumbai',
-    helpText: 'Your current city/location'
+    helpText: 'Aapka current city/location'
   },
   {
     key: 'willing_to_relocate',
     label: 'Willing to Relocate',
-    question: 'Are you willing to relocate for this role?\n\nReply with "yes" or "no"',
+    question: 'Kya aap is role ke liye relocate karne ko ready hain?\n\nReply "yes" ya "no"',
     validator: 'boolean',
     required: true,
     example: 'yes',
-    helpText: 'Are you open to relocating for this role? (yes/no)'
+    helpText: 'Relocation ke liye ready hain? (yes/no)'
   },
   {
     key: 'reason_for_switching',
     label: 'Reason for Switching',
-    question: 'Why are you looking to switch jobs? (Optional)\n\nExample: "Better growth opportunities", "Location change"',
+    question: 'Job switch karne ka reason kya hai? (Optional)\n\nExample: "Better growth opportunities", "Location change"',
     validator: 'text',
     required: false,
     example: 'Better growth opportunities',
-    helpText: 'Brief reason for job change (optional)'
+    helpText: 'Job change ka karan (optional)'
   }
 ];
 

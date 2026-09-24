@@ -1,6 +1,7 @@
 import { supabase, supabaseAdmin, Database } from './supabase'
 import { ComprehensiveCandidateData } from './types'
 import { BUCKET_NAME, deleteFileFromSupabase, uploadFileToSupabase } from './supabase-storage-utils'
+import { toE164 } from './phone'
 
 type CandidateRow = Database['public']['Tables']['candidates']['Row']
 type CandidateInsert = Database['public']['Tables']['candidates']['Insert']
@@ -118,6 +119,7 @@ export class SupabaseCandidateService {
       name: candidate.name,
       email: (candidate.email || '').trim().toLowerCase(),
       phone: candidate.phone || null,
+      phone_e164: toE164(candidate.phone),
       date_of_birth: candidate.dateOfBirth || null,
       gender: candidate.gender as any || null,
       marital_status: candidate.maritalStatus as any || null,
@@ -909,7 +911,10 @@ export class SupabaseCandidateService {
       // Map only the fields that are being updated
       if (updates.name !== undefined) updateData.name = updates.name
       if (updates.email !== undefined) updateData.email = (updates.email || '').trim().toLowerCase()
-      if (updates.phone !== undefined) updateData.phone = updates.phone
+      if (updates.phone !== undefined) {
+        updateData.phone = updates.phone
+        updateData.phone_e164 = toE164(updates.phone)
+      }
       if (updates.dateOfBirth !== undefined) updateData.date_of_birth = updates.dateOfBirth || null
       if (updates.gender !== undefined) updateData.gender = (updates.gender as any) || null
       if (updates.maritalStatus !== undefined) updateData.marital_status = (updates.maritalStatus as any) || null

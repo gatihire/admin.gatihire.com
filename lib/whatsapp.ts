@@ -1,4 +1,5 @@
 import { logger } from "./logger"
+import { toDial } from "./phone"
 
 interface WhatsAppConfig {
   phoneNumberId: string
@@ -68,25 +69,9 @@ export class WhatsAppService {
 
   private normalizePhoneNumber(phone: string): string {
     if (!phone) return ""
-    let cleaned = phone.replace(/\D/g, "")
-    
-    if (cleaned.startsWith("0")) {
-      cleaned = cleaned.substring(1)
-    }
-
-    if (cleaned.length === 10) {
-      return `91${cleaned}`
-    }
-
-    if (cleaned.length === 12 && cleaned.startsWith("91")) {
-      return cleaned
-    }
-
-    if (cleaned.length > 12 && cleaned.startsWith("91")) {
-      return cleaned.substring(cleaned.length - 12)
-    }
-
-    return cleaned
+    // Shared canonical dial format (91XXXXXXXXXX) via lib/phone so send and
+    // lookup always agree, regardless of how the raw number was stored.
+    return toDial(phone)
   }
 
   private isMetaConfigured(): boolean {

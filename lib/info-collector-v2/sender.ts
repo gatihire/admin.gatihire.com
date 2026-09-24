@@ -1,6 +1,7 @@
 import { getWhatsAppService } from '@/lib/whatsapp';
 import { supabaseAdmin } from '@/lib/supabase';
 import { logger } from '@/lib/logger';
+import { toDial } from '@/lib/phone';
 import { InfoStepKey, getStep, getNextStep, getStepQuestion, STEP_KEYS } from './steps';
 
 export interface ParticipantInfo {
@@ -38,8 +39,7 @@ async function sendSessionMessage(phoneNumber: string, text: string): Promise<{ 
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
   const apiVersion = process.env.WHATSAPP_API_VERSION || 'v21.0';
   
-  const normalizedPhone = phoneNumber.replace(/\D/g, '').replace(/^0+/, '');
-  const recipient = normalizedPhone.startsWith('91') ? normalizedPhone : `91${normalizedPhone}`;
+  const recipient = toDial(phoneNumber);
   
   try {
     const response = await fetch(`https://graph.facebook.com/${apiVersion}/${phoneNumberId}/messages`, {

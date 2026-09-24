@@ -9,6 +9,7 @@
 import { Client } from "@upstash/qstash"
 import { supabaseAdmin } from "@/lib/supabase"
 import { placeBolnaCall } from "@/lib/bolna"
+import { buildAlreadyCollectedUserData } from "@/lib/prompt-user-data"
 import { logger } from "@/lib/logger"
 
 // WhatsApp outreach → human-escalation cadence. No blind AI calls: a silent
@@ -139,6 +140,7 @@ interface ParticipantRow {
   status: string
   call_attempts: number
   call_payload_json?: Record<string, unknown> | null
+  info_data?: Record<string, unknown> | null
   whatsapp_sent_at?: string | null
   next_retry_at?: string | null
   scheduled_call_at?: string | null
@@ -164,7 +166,7 @@ export async function placeCallForParticipant(
   const { data: participant, error: partError } = await supabaseAdmin
     .from("phone_screening_participants")
     .select(`
-      id, status, call_attempts, call_payload_json,
+      id, status, call_attempts, call_payload_json, info_data,
       whatsapp_sent_at, next_retry_at, scheduled_call_at, campaign_id,
       candidates: candidate_id (id, name, phone)
     `)
@@ -225,10 +227,11 @@ export async function placeCallForParticipant(
   }
 
   const payload = row.call_payload_json
+  const collected = buildAlreadyCollectedUserData(row.info_data)
   const userData =
     payload && Object.keys(payload).length > 0
-      ? { ...payload, participant_id: participantId }
-      : { candidate_name: candidate.name || "", participant_id: participantId }
+      ? { ...payload, ...collected, participant_id: participantId }
+      : { candidate_name: candidate.name || "", ...collected, participant_id: participantId }
 
   const result = await placeBolnaCall({
     to: candidate.phone,

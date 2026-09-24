@@ -89,19 +89,42 @@ export type QuestionGenerationResult = {
   promptUsed: string
 }
 
+/** Fields already collected on WhatsApp (never re-ask in the voice call). */
+const COLLECTED_FIELD_KEYS = [
+  "current_ctc",
+  "expected_ctc",
+  "notice_period",
+  "total_experience",
+  "location",
+  "willing_to_relocate",
+  "reason_for_switching",
+]
+
+function collectAlreadyKnown(infoData: Record<string, unknown> | null | undefined): string {
+  const data = infoData && typeof infoData === "object" ? infoData : {}
+  const present = COLLECTED_FIELD_KEYS.filter((k) => {
+    const v = data[k]
+    return v !== undefined && v !== null && v !== ""
+  })
+  if (present.length === 0) return "None collected yet (WhatsApp details phase)."
+  return present.map((k) => `- ${k.replace(/_/g, " ")}: ${String(data[k])}`).join("\n")
+}
+
 export async function generateJDQuestions(
   job: JobContext,
-  candidate: CandidateContext
+  candidate: CandidateContext,
+  infoData?: Record<string, unknown> | null
 ): Promise<QuestionGenerationResult> {
   const jobDescription = buildJobDescription(job)
   const candidateProfile = buildCandidateProfile(candidate)
   const resumeExcerpt = candidate.resume_text ? candidate.resume_text.slice(0, 3000) : ""
+  const alreadyCollected = collectAlreadyKnown(infoData)
 
   if (!process.env.GEMINI_API_KEY) {
-    return { questions: buildFallbackQuestions(job, candidate), promptUsed: "fallback" }
+    return { questions: buildFallbackQuestions(job, candidate, infoData), promptUsed: "fallback" }
   }
 
-  const prompt = `You are a recruiter preparing a first-round phone screening for a candidate. Generate exactly 5 to 8 highly specific, job-relevant screening questions that probe the candidate's fit for the role.
+  const prompt = `You are a recruiter preparing a SHORT first-round confirmation call for a candidate whose basic screening details were already collected on WhatsApp. Generate exactly 3 to 6 highly specific, job-relevant questions in natural Hinglish (Hindi + English mix) that probe ONLY the signals NOT yet collected.
 
 JOB DESCRIPTION:
 ${jobDescription || "(no job description available)"}
@@ -111,16 +134,19 @@ ${candidateProfile || "(no candidate profile available)"}
 
 ${resumeExcerpt ? `RESUME EXCERPT:\n${resumeExcerpt}` : ""}
 
-Requirements for the questions:
-- Each question must be specific to the role's must-have skills and responsibilities above, not generic.
-- Verify claimed experience against the required range; probe skill depth with concrete examples ("tell me about a time you used X").
-- Include a question about current salary and expected salary.
-- Include a question about notice period / availability.
-- Include a question about willingness to relocate or commute if the job location differs from the candidate's location.
-- Do NOT repeat the candidate's own resume back to them.
-- Questions must be phrased for a natural voice conversation, one at a time.
+ALREADY COLLECTED ON WHATSAPP (do NOT re-ask these):
+${alreadyCollected}
 
-Return ONLY a JSON array of strings, e.g. ["Question 1", "Question 2"]. No markdown, no code fences, no extra text.`
+Requirements for the questions:
+- Speak them in natural Hinglish (e.g. "Tell me about a time when aapne iska use kiya tha"), phrased for a voice conversation, one at a time.
+- Do NOT repeat any of the ALREADY COLLECTED signals above (no salary/CTC, notice period, total experience, city, relocation, or switching-reason questions).
+- Probe the role's must-have skills and key responsibilities: verify claimed experience with concrete examples ("tell me about a time you used X").
+- Ask about firm availability / joining timing if not already implied by the collected notice period.
+- Ask 1-2 category-specific questions where relevant (license type, shifts, WMS/TMS tools, account scale) if the job description hints at them (driver/fleet, warehouse/ops, SCM/TMS, sales/BD).
+- Do NOT repeat the candidate's own resume back to them.
+- Keep each question to one clear ask — 2 sentences max.
+
+Return ONLY a JSON array of strings, e.g. ["Q1", "Q2"]. No markdown, no code fences, no extra text.`
 
   try {
     const model = genAI.getGenerativeModel({ model: MODEL })
@@ -128,41 +154,58 @@ Return ONLY a JSON array of strings, e.g. ["Question 1", "Question 2"]. No markd
     const text = result.response.text().trim().replace(/^```(json)?\s*/i, "").replace(/```$/, "").trim()
     const parsed = JSON.parse(text)
     if (Array.isArray(parsed) && parsed.length > 0) {
-      return { questions: parsed.map((q) => String(q)).slice(0, 8), promptUsed: prompt }
+      return { questions: parsed.map((q) => String(q)).slice(0, 6), promptUsed: prompt }
     }
   } catch (err: any) {
     logger.warn("JD question generation failed, using fallback", { error: err?.message })
   }
 
-  return { questions: buildFallbackQuestions(job, candidate), promptUsed: prompt }
+  return { questions: buildFallbackQuestions(job, candidate, infoData), promptUsed: prompt }
 }
 
 export function buildFallbackQuestions(
   job: JobContext,
-  candidate: CandidateContext
+  candidate: CandidateContext,
+  infoData?: Record<string, unknown> | null
 ): string[] {
   const mustHave = skillsToText(job.skills_must_have) || "the required skills"
-  const expRange =
-    job.experience_min_years != null || job.experience_max_years != null
-      ? `${job.experience_min_years ?? 0}-${job.experience_max_years ?? "any"} years`
-      : "the required range"
-
-  const questions: string[] = [
-    `Can you walk me through your current role and what you do on a daily basis?`,
-    `How many years of experience do you have overall?`,
-    `Can you tell me about your experience with ${mustHave}? Could you give me a specific example of a time you used it?`,
-    `How does your experience of ${expRange} compare to what this role requires?`,
-  ]
-
-  if (job.city && candidate.location && job.city.toLowerCase() !== candidate.location.toLowerCase()) {
-    questions.push(`The role is based in ${job.city} and I see you are in ${candidate.location}. Would you be willing to relocate or commute for this role?`)
-  }
-
-  questions.push(
-    `What is your current monthly and annual salary, including any variable component?`,
-    `What is your expected salary for this role?`,
-    `What is your notice period, and how soon could you join if selected?`
+  const present = new Set(
+    COLLECTED_FIELD_KEYS.filter((k) => {
+      const v = infoData?.[k]
+      return v !== undefined && v !== null && v !== ""
+    })
   )
 
-  return questions.slice(0, 8)
+  const questions: string[] = []
+
+  // Must-have skill depth (never collected via WhatsApp)
+  questions.push(`${mustHave} me aapka experience kaisa hai? Ek concrete example batao jab aapne iska use kiya ho.`)
+
+  if (job.key_responsibilities?.length) {
+    questions.push(`Is role me ${job.key_responsibilities[0].toLowerCase()} aana hoga — aisi koi specific task pehle kiya hai aapne?`)
+  } else if (job.daily_work_summary) {
+    questions.push(`Routine kaam aisa dikhega: ${job.daily_work_summary}. Aapko is type ka kaam pehle karna aata hai?`)
+  }
+
+  // Category-specific probes
+  const cat = String(job.role_category || "").toLowerCase()
+  if (/(driver|fleet|delivery|route|transport|line_haul|long_haul|last_mile)/.test(cat) || /(driver|fleet|delivery)/.test(job.title || "")) {
+    questions.push(`Aapke paas LMV ya HMV license kaunsa hai, aur kitne saal driving experience hai?`)
+  } else if (/(warehouse|ops|store|inventory|loader)/.test(cat)) {
+    questions.push(`Kya aapne kisi WMS ya inventory system pe kaam kiya hai? Kitne warehouse operations ka experience hai?`)
+  } else if (/(scm|supply chain|planning|tms|forecast|operations)/.test(cat)) {
+    questions.push(`Aap SAP, TMS platform, ya advanced Excel kya use karte aaye hain? Planning ka experience kaisa hai?`)
+  } else if (/(sales|bd|account manager|corporate|key account)/.test(cat)) {
+    questions.push(`Client-facing ya account management experience kaisa hai? Revenue ya portfolio kitna handle kiya hai?`)
+  }
+
+  // Firm availability (notice may be collected, but joining timeline is a new signal)
+  questions.push(`Aap kitne time me join kar sakte hain — confirm karo, taki hum next steps schedule kar sakein.`)
+
+  // Salary consistency (verify only if expectation exists, never re-scrape)
+  if (present.has("expected_ctc")) {
+    questions.push(`Aapne expected CTC WhatsApp pe share kiya tha — usme variable component kaisa hai, aur kya negotiation possible hai?`)
+  }
+
+  return questions.slice(0, 6)
 }

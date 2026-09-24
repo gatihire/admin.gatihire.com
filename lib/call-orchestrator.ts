@@ -8,6 +8,7 @@ import { supabaseAdmin } from "@/lib/supabase"
 import { placeBolnaCall } from "@/lib/bolna"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { generateJDQuestions } from "@/lib/jd-questions"
+import { buildAlreadyCollectedUserData } from "@/lib/prompt-user-data"
 import { scheduleOutreachFollowup, scheduleBolnaCall, outreachNudgeHours, outreachEscalateHours } from "@/lib/scheduled-call"
 import { type CandidateOrigin } from "@/lib/origin"
 import { logger } from "@/lib/logger"
@@ -101,9 +102,10 @@ async function buildCallUserData(
   job: any,
   client: any,
   origin: string,
-  participantId?: string
+  participantId?: string,
+  infoData?: Record<string, unknown> | null
 ): Promise<CallUserDataResult> {
-  const { questions, promptUsed } = await generateJDQuestions(job, candidate as any)
+  const { questions, promptUsed } = await generateJDQuestions(job, candidate as any, infoData)
   const userData = {
     candidate_name: candidate.name || "",
     current_role: candidate.current_role || "",
@@ -114,6 +116,7 @@ async function buildCallUserData(
       ? (candidate.technical_skills as string[]).join(", ")
       : candidate.technical_skills || "",
     resume_text: candidate.resume_text || "",
+    ...buildAlreadyCollectedUserData(infoData),
     job_title: job.title || "",
     client_name: job.client_name || "",
     hiring_company_name: job.client_name || client?.name || "",

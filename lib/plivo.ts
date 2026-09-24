@@ -1,5 +1,6 @@
 import Plivo from "plivo"
 import { logger } from "./logger"
+import { toDial } from "./phone"
 
 function getConfig() {
   const authId = process.env.PLIVO_AUTH_ID
@@ -48,11 +49,8 @@ export interface SendWhatsAppResult {
 
 function normalizePhone(phone: string): string {
   if (!phone) return ""
-  let cleaned = phone.replace(/\D/g, "")
-  if (cleaned.startsWith("0")) cleaned = cleaned.substring(1)
-  if (cleaned.length === 10) return `91${cleaned}`
-  if (cleaned.length === 12 && cleaned.startsWith("91")) return cleaned
-  return cleaned
+  // Shared canonical dial format via lib/phone (91XXXXXXXXXX).
+  return toDial(phone)
 }
 
 export async function sendWhatsAppInteractive(

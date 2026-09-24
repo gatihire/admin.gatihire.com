@@ -459,6 +459,15 @@ async function handleFailedExecution(
   execution: BolnaExecution
 ): Promise<void> {
   const now = new Date().toISOString()
+
+  // Detect a partial / mid-conversation drop: candidate (or agent) hung up while a
+  // conversation had started — we have a partial transcript but never reached a verdict.
+  const isPartialCall =
+    execution.transcript &&
+    execution.status !== "no-answer" &&
+    execution.status !== "busy" &&
+    ["stopped", "canceled", "failed", "error"].includes(execution.status || "")
+
   const currentRetryCount = (participant.retry_count || 0) + 1
   const maxRetriesReached = currentRetryCount >= MAX_CALL_ATTEMPTS
 
@@ -466,10 +475,11 @@ async function handleFailedExecution(
     execution.status === "no-answer" || execution.status === "busy" ? 15 : 60
 
   const patch: Record<string, unknown> = {
-    status: maxRetriesReached ? "unreachable" : "failed",
+    status: isPartialCall ? "failed_partial" : maxRetriesReached ? "unreachable" : "failed",
     bolna_status: execution.status || "failed",
     call_ended_at: now,
     retry_count: currentRetryCount,
+    call_is_partial: isPartialCall ? true : null,
     updated_at: now,
   }
 
@@ -507,6 +517,16 @@ async function handleFailedExecution(
         is_partial: true,
       }))
       await supabaseAdmin.from("call_transcripts").insert(rows)
+    }
+
+    // Best-effort partial verdict + answers from whatever the transcript captured.
+    const partialVerdict = extractVerdictFromTranscript(execution.transcript)
+    if (partialVerdict) {
+      patch.verdict_json = partialVerdict
+      patch.ai_summary = JSON.stringify(partialVerdict)
+      if (typeof partialVerdict.score === "number") patch.ai_score = partialVerdict.score
+      if (partialVerdict.recommendation) patch.ai_recommendation = partialVerdict.recommendation
+      await writeScreeningAnswers(participant.id, partialVerdict)
     }
   }
 

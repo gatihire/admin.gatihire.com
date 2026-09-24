@@ -233,6 +233,7 @@ function callSubSection(participant: any): string {
   if (review === "rejected") return "failed"
   if (status === "not_interested") return "failed"
   if (status === "unreachable") return "failed"
+  if (status === "failed_partial") return "failed"  // partial call, needs review
   if (status === "failed" && !nextRetryAt) return "failed"  // no retry = terminal
   if (bolnaStatus === "canceled" || bolnaStatus === "stopped") return "failed"
 
@@ -338,6 +339,7 @@ function getActionForCard(application: Application, callStatus?: string, partici
     if (callStatus === "failed") {
       const bolnaStatus = participant?.bolna_status
       const retryCount = participant?.retry_count || 0
+      if (participant?.call_is_partial) return { label: "Call disconnected mid-conversation — partial transcript captured. Review what was recorded.", cta: "Review Partial", icon: AlertCircle, color: "bg-orange-50 border-orange-200 text-orange-800", action: "view_results" }
       if (bolnaStatus === "no-answer") return { label: `No answer after ${retryCount} attempt${retryCount !== 1 ? "s" : ""} — needs manual follow-up`, cta: "Manual Follow-up", icon: UserX, color: "bg-red-50 border-red-200 text-red-800", action: "manual_followup" }
       if (bolnaStatus === "busy") return { label: `Line busy after ${retryCount} attempt${retryCount !== 1 ? "s" : ""} — needs manual follow-up`, cta: "Manual Follow-up", icon: UserX, color: "bg-red-50 border-red-200 text-red-800", action: "manual_followup" }
       return { label: "Call failed — needs manual follow-up", cta: "Manual Follow-up", icon: UserX, color: "bg-red-50 border-red-200 text-red-800", action: "manual_followup" }
@@ -1531,7 +1533,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                   </Button>
                 ) : (
                   <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/50 border border-current/20">
-                    <Loader2 className="h-3 w-3 animate-spin" /> {nextAction.cta}
+                    <Clock className="h-3 w-3" /> {nextAction.cta} — auto-updating
                   </span>
                 )}
               </div>

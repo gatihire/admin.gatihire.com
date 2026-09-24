@@ -46,6 +46,7 @@ interface WhatsAppMessage {
 interface ParticipantDetail {
   id: string
   status: string
+  call_is_partial?: boolean | null
   origin?: string
   ai_score: number | null
   ai_summary: string | null
@@ -352,6 +353,17 @@ export function PhoneScreeningResultsSheet({
                     </Badge>
                   )}
                 </div>
+
+                {(data.call_is_partial || data.status === "failed_partial") && (
+                  <div className="flex items-start gap-2 p-2.5 rounded-lg border border-orange-200 bg-orange-50/60 text-sm text-orange-900 mb-3">
+                    <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-bold">Call disconnected mid-conversation.</span>{" "}
+                      Only a partial transcript was captured — the verdict below is best-effort from
+                      whatever was recorded. Consider re-running the call to get a complete screening.
+                    </div>
+                  </div>
+                )}
 
                 {data.callback_preference && (
                   <div className="flex items-start gap-2 p-2.5 rounded-lg border border-blue-100 bg-blue-50/50 text-sm text-blue-800 mb-3">
