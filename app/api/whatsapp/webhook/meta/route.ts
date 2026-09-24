@@ -107,43 +107,68 @@ async function handleIncomingMessage(message: any, contact: any) {
   
   logger.info("Received WhatsApp message", { phoneNumber, messageType, messageId: message.id })
   
-  // Find participant by phone number - need to join with candidates table
-  const normalizedPhone = phoneNumber.replace(/\D/g, "").replace(/^0+/, "")
-  // Handle Indian numbers: 10 digits -> add 91 prefix
-  const searchPhones = [
-    phoneNumber,
-    normalizedPhone,
-    normalizedPhone.startsWith("91") ? normalizedPhone : `91${normalizedPhone}`,
-    `+${normalizedPhone}`,
-    `+91${normalizedPhone.replace(/^91/, "")}`
-  ].filter(Boolean)
-  
+  // Find participant by phone number - need to join with candidates table.
+  // IMPORTANT: we must NOT filter phone_screening_participants by an embedded
+  // candidates.phone=  structured filter. PostgREST left-joins and returns the
+  // row with candidates: null (silently never matching), so every inbound
+  // message used to "match" the newest participant with no phone available.
+  // Instead: resolve candidate id(s) by matching any stored phone format in JS,
+  // then fetch the participant joined on candidate_id with real candidate data.
+  const normalizedFrom = (phoneNumber || "").replace(/\D/g, "").replace(/^0+/, "")
+  const normalizedTo = (p: string | null | undefined) => {
+    if (!p) return ""
+    let c = p.replace(/\D/g, "")
+    if (c.startsWith("0")) c = c.substring(1)
+    if (c.length === 10) return `91${c}`
+    if (c.length === 12 && c.startsWith("91")) return c
+    if (c.length > 12 && c.startsWith("91")) return c.substring(c.length - 12)
+    return c
+  }
+
   let participant = null
   let findError = null
-  
-  // Try to find participant by joining with candidates table
-  for (const searchPhone of searchPhones) {
-    const { data, error } = await supabaseAdmin
-      .from("phone_screening_participants")
-      .select(`
-        *,
-        candidates:candidate_id (id, name, phone, email),
-        jobs:job_id (id, title, client_name, city, location, salary_min, salary_max, experience_min_years, experience_max_years)
-      `)
-      .eq("candidates.phone", searchPhone)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle()
-    
-    if (!error && data) {
-      participant = data
-      break
+  let matchedCandidateIds: string[] = []
+
+  // Step 1: find candidate rows whose stored phone normalizes to the sender.
+  const { data: phoneMatches, error: candError } = await supabaseAdmin
+    .from("candidates")
+    .select("id, phone")
+
+  if (candError) {
+    logger.warn("Candidate phone scan failed", { phoneNumber, error: candError.message })
+    findError = candError
+  } else {
+    matchedCandidateIds = (phoneMatches || [])
+      .filter((c: any) => normalizedTo(c.phone) === normalizedFrom)
+      .map((c: any) => c.id)
+
+    // Step 2: fetch the newest active participant for any matched candidate.
+    if (matchedCandidateIds.length > 0) {
+      const { data, error } = await supabaseAdmin
+        .from("phone_screening_participants")
+        .select(`
+          *,
+          candidates:candidate_id (id, name, phone, email),
+          jobs:job_id (id, title, client_name, city, location, salary_min, salary_max, experience_min_years, experience_max_years)
+        `)
+        .in("candidate_id", matchedCandidateIds)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle()
+
+      if (!error && data) {
+        participant = data
+      } else {
+        findError = error
+      }
+    } else {
+      logger.warn("No candidate matched sender phone", { phoneNumber, normalized: normalizedFrom })
+      return
     }
-    findError = error
   }
   
   if (!participant) {
-    logger.warn("No participant found for phone number", { phoneNumber, tried: searchPhones })
+    logger.warn("No participant found for phone number", { phoneNumber, normalized: normalizedFrom, triedCandidates: matchedCandidateIds.length })
     return
   }
   
