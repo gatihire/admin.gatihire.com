@@ -130,18 +130,29 @@ async function handleIncomingMessage(message: any, contact: any) {
   let matchedCandidateIds: string[] = []
 
   // Step 1: find candidate rows whose stored phone normalizes to the sender.
-  const { data: phoneMatches, error: candError } = await supabaseAdmin
-    .from("candidates")
-    .select("id, phone")
+  // Supabase caps a single select at 1000 rows, so paginate the scan.
+  const matchedSet = new Set<string>()
+  for (let offset = 0; offset < 20000; offset += 1000) {
+    const { data: phoneMatches, error } = await supabaseAdmin
+      .from("candidates")
+      .select("id, phone")
+      .range(offset, offset + 999)
 
-  if (candError) {
-    logger.warn("Candidate phone scan failed", { phoneNumber, error: candError.message })
-    findError = candError
+    if (error) {
+      logger.warn("Candidate phone scan failed", { phoneNumber, error: error.message })
+      findError = error
+      break
+    }
+    for (const c of phoneMatches || []) {
+      if (normalizedTo(c.phone) === normalizedFrom) matchedSet.add(c.id)
+    }
+    if ((phoneMatches || []).length < 1000) break
+  }
+  matchedCandidateIds = Array.from(matchedSet)
+
+  if (findError) {
+    // fall through to no-participant handling below
   } else {
-    matchedCandidateIds = (phoneMatches || [])
-      .filter((c: any) => normalizedTo(c.phone) === normalizedFrom)
-      .map((c: any) => c.id)
-
     // Step 2: fetch the newest active participant for any matched candidate.
     if (matchedCandidateIds.length > 0) {
       const { data, error } = await supabaseAdmin
