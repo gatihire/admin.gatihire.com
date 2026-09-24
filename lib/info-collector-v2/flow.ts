@@ -436,6 +436,10 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
         await markScheduledAndFire(participant.id, new Date(Date.now() + 10 * 60 * 1000));
         break;
         
+      case 'in_20_min':
+        await markScheduledAndFire(participant.id, new Date(Date.now() + 20 * 60 * 1000));
+        break;
+        
       case 'in_30_min':
         await markScheduledAndFire(participant.id, new Date(Date.now() + 30 * 60 * 1000));
         break;
