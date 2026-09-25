@@ -30,7 +30,7 @@ export async function GET(request: NextRequest) {
   const email = request.nextUrl.searchParams.get("email") || ""
   const shouldSync = request.nextUrl.searchParams.get("sync") === "1"
 
-  if (!executionId && !phone && !email) {
+  if (!executionId && !phone && !email && request.nextUrl.searchParams.get("debug") !== "1") {
     return NextResponse.json({
       error: "Provide executionId, phone, or email",
       usage: "?executionId=<id>[&sync=1] | ?phone=<dial>[&sync=1] | ?email=<addr>[&sync=1]",
