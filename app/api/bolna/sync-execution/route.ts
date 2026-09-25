@@ -37,6 +37,21 @@ export async function GET(request: NextRequest) {
     }, { status: 400 })
   }
 
+  if (request.nextUrl.searchParams.get("debug") === "1") {
+    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+    const { data: recent } = await supabaseAdmin
+      .from("phone_screening_participants")
+      .select(`
+        id, status, bolna_execution_id, call_attempts, last_attempt_at,
+        candidates: candidate_id (id, name, phone, phone_e164, email)
+      `)
+      .in("status", ["calling", "in_progress", "failed", "failed_partial", "unreachable"])
+      .gte("created_at", since)
+      .order("last_attempt_at", { ascending: false })
+      .limit(30)
+    return NextResponse.json({ ok: true, debug: recent || [] })
+  }
+
   const { execution, participant } = await resolveSyncTarget({ executionId, phone, email })
 
   if (!participant) {

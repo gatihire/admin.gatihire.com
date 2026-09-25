@@ -504,25 +504,39 @@ export async function findParticipant(execution: BolnaExecution): Promise<Partic
 }
 
 // Find a participant by the candidate attached to it (email and/or phone).
-// phone_e164 may be null until the migration/backfill runs, so also match the
-// stored phone column across common Indian formatting variants.
+// Storage formats vary (spaces, hyphens, prefixes, missing phone_e164 until the
+// migration/backfill runs), so phone matching is done on the stable last-10
+// digits via ILIKE and a participant-side scan as a final fallback.
 export async function findParticipantByCandidate(input: {
   phone?: string
   email?: string
 }): Promise<ParticipantRecord | null> {
   const candidateIds = new Set<string>()
 
+  const last10 = input.phone ? (input.phone.replace(/\D/g, "").slice(-10)) : ""
+  const validLast10 = last10.length === 10
+
   const addCandidates = (rows: { id: string }[] | null) => {
     for (const row of rows || []) candidateIds.add(row.id)
   }
 
   if (input.email) {
+    const email = input.email.trim().toLowerCase()
     const { data } = await supabaseAdmin
       .from("candidates")
       .select("id")
-      .eq("email", input.email.trim().toLowerCase())
+      .ilike("email", email)
       .limit(5)
     addCandidates(data)
+    if (candidateIds.size === 0) {
+      // Fields may carry surrounding whitespace or extra casing.
+      const { data: loose } = await supabaseAdmin
+        .from("candidates")
+        .select("id")
+        .ilike("email", `%${email}%`)
+        .limit(5)
+      addCandidates(loose)
+    }
   }
 
   if (input.phone) {
@@ -532,6 +546,15 @@ export async function findParticipantByCandidate(input: {
         .from("candidates")
         .select("id")
         .eq("phone_e164", e164)
+        .limit(5)
+      addCandidates(data)
+    }
+    if (validLast10) {
+      // Match any stored formatting — last 10 digits are stable.
+      const { data } = await supabaseAdmin
+        .from("candidates")
+        .select("id")
+        .ilike("phone", `%${last10}%`)
         .limit(5)
       addCandidates(data)
     }
@@ -545,19 +568,50 @@ export async function findParticipantByCandidate(input: {
     }
   }
 
-  if (candidateIds.size === 0) return null
+  const candidateIdsArray = [...candidateIds]
 
-  const { data: participants } = await supabaseAdmin
-    .from("phone_screening_participants")
-    .select(PARTICIPANT_SELECT)
-    .in("candidate_id", [...candidateIds])
-    .order("last_attempt_at", { ascending: false })
-    .limit(10)
+  if (candidateIdsArray.length > 0) {
+    const { data: participants } = await supabaseAdmin
+      .from("phone_screening_participants")
+      .select(PARTICIPANT_SELECT)
+      .in("candidate_id", candidateIdsArray)
+      .order("last_attempt_at", { ascending: false })
+      .limit(10)
+    if (participants && participants.length > 0) {
+      return pickStuckParticipant(participants)
+    }
+  }
 
-  if (!participants || participants.length === 0) return null
+  // Participant-side fallback: scan recent drill participants and compare the
+  // candidate's stored phone by last-10 digits (covers null/candidate_id drift).
+  if (validLast10) {
+    const { data: candidates } = await supabaseAdmin
+      .from("candidates")
+      .select("id, phone")
+      .ilike("phone", `%${last10}%`)
+      .limit(20)
+    const ids = candidates?.map((c) => c.id) || []
+    if (ids.length > 0) {
+      const { data: participants } = await supabaseAdmin
+        .from("phone_screening_participants")
+        .select(PARTICIPANT_SELECT)
+        .in("candidate_id", ids)
+        .order("last_attempt_at", { ascending: false })
+        .limit(10)
+      if (participants && participants.length > 0) {
+        return pickStuckParticipant(participants)
+      }
+    }
+  }
 
+  return null
+}
+
+function pickStuckParticipant(
+  participants: any[]
+): ParticipantRecord | null {
   // Prefer a still-stuck drill (calling/in_progress) so recovery targets live calls.
-  const stuck = (participants as any[]).find(
+  const stuck = participants.find(
     (p) => p?.status === "calling" || p?.status === "in_progress"
   )
   return ((stuck || participants[0]) as unknown) as ParticipantRecord
