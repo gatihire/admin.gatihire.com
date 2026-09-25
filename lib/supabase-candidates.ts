@@ -910,7 +910,40 @@ export class SupabaseCandidateService {
       
       // Map only the fields that are being updated
       if (updates.name !== undefined) updateData.name = updates.name
-      if (updates.email !== undefined) updateData.email = (updates.email || '').trim().toLowerCase()
+      if (updates.email !== undefined) {
+        const targetEmail = (updates.email || '').trim().toLowerCase()
+        // Guard against the candidates_email_key unique violation (common during
+        // re-parsing when the parsed resume's email already belongs to a different
+        // candidate). Preserve this candidate's existing email instead of failing
+        // the entire update.
+        if (targetEmail) {
+          const { data: existing } = await supabaseAdmin
+            .from('candidates')
+            .select('email')
+            .eq('id', id)
+            .maybeSingle()
+          const currentEmail = ((existing as any)?.email || '').toString().trim().toLowerCase()
+          if (currentEmail === targetEmail) {
+            updateData.email = targetEmail
+          } else {
+            const { data: clash } = await supabaseAdmin
+              .from('candidates')
+              .select('id')
+              .eq('email', targetEmail)
+              .neq('id', id)
+              .limit(1)
+              .maybeSingle()
+            if (clash) {
+              console.warn(`Email ${targetEmail} already belongs to candidate ${clash.id} — preserving existing email "${currentEmail || '(none)'}" on ${id}`)
+              if (currentEmail) updateData.email = currentEmail
+            } else {
+              updateData.email = targetEmail
+            }
+          }
+        } else {
+          // Empty parsed email: leave the stored email untouched.
+        }
+      }
       if (updates.phone !== undefined) {
         updateData.phone = updates.phone
         updateData.phone_e164 = toE164(updates.phone)
