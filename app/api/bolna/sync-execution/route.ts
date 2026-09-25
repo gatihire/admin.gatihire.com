@@ -14,6 +14,7 @@ import {
 
 // Manually re-sync a Bolna execution into the DB. Used when a terminal webhook
 // never arrived (or failed) so a completed call stays stuck as "calling" in the UI.
+const BUILD = "v-heal-3"
 //  GET  ...?executionId=<id>&sync=1        -> resolve + apply (one-click recovery)
 //  GET  ...?phone=<dial>&sync=1            -> resolve by phone
 //  GET  ...?email=<address>&sync=1         -> resolve by candidate email
@@ -57,6 +58,7 @@ export async function GET(request: NextRequest) {
   if (!participant) {
     return NextResponse.json({
       error: "No matching participant found",
+      build: BUILD,
       diagnostics: {
         executionFetched: !!execution,
         executionId: execution?.id || executionId || null,
@@ -80,6 +82,7 @@ export async function GET(request: NextRequest) {
   if (!shouldSync || !execution || !terminal) {
     return NextResponse.json({
       ok: true,
+      build: BUILD,
       executionId: execution?.id || executionId || null,
       bolnaStatus: execution?.status || null,
       terminal,

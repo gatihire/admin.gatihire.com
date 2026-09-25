@@ -496,7 +496,10 @@ export async function findParticipant(
     if (data) return data as unknown as ParticipantRecord
   }
 
-  const participantId = execution.context_details?.participant_id
+  const contextPid =
+    execution.context_details?.participant_id ||
+    (execution.context_details?.recipient_data as Record<string, unknown> | undefined)?.participant_id
+  const participantId = typeof contextPid === "string" ? contextPid : undefined
   if (participantId) {
     const { data } = await supabaseAdmin
       .from("phone_screening_participants")
