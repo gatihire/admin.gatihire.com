@@ -479,9 +479,15 @@ const PARTICIPANT_SELECT = `
   jobs: job_id (id, title, client_name)
 `
 
-export async function findParticipant(execution: BolnaExecution): Promise<ParticipantRecord | null> {
-  const executionId = execution.id
-  if (executionId) {
+export async function findParticipant(
+  execution: BolnaExecution,
+  requestedExecutionId?: string
+): Promise<ParticipantRecord | null> {
+  // Bolna's GET /executions/{id} response `id` field can differ from the
+  // execution_id used in the path / recording URL / what we stored — so match
+  // the requested id first, then the response id, then context.
+  const idsToTry = [requestedExecutionId, execution.id].filter((x) => !!x) as string[]
+  for (const executionId of idsToTry) {
     const { data } = await supabaseAdmin
       .from("phone_screening_participants")
       .select(PARTICIPANT_SELECT)
@@ -647,7 +653,7 @@ export async function resolveSyncTarget(params: {
   if (params.executionId) {
     execution = await getBolnaExecution(params.executionId)
     if (execution) {
-      participant = await findParticipant(execution)
+      participant = await findParticipant(execution, params.executionId)
       // 1a. Executions API usually doesn't echo user_data context for single
       //     calls — fall back to matching the dialed number if we can't match.
       if (!participant) {

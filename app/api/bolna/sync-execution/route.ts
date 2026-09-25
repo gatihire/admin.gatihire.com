@@ -98,7 +98,9 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ ok: true, alreadySynced: true, participant: current })
   }
 
-  if (execution.id) await persistBolnaExecutionId(participant.id, execution.id)
+  if (execution.id || executionId) {
+      await persistBolnaExecutionId(participant.id, executionId || execution.id || "")
+    }
 
   logger.info("Syncing Bolna execution (GET)", {
     executionId: execution.id,
@@ -156,7 +158,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: true, alreadySynced: true, participant: current })
   }
 
-  if (execution.id) await persistBolnaExecutionId(participant.id, execution.id)
+  if (execution.id || executionId) {
+      await persistBolnaExecutionId(participant.id, executionId || execution.id || "")
+    }
 
   logger.info("Syncing Bolna execution (POST)", { executionId, participantId: participant.id, status })
 
