@@ -14,7 +14,10 @@ import {
 
 // Manually re-sync a Bolna execution into the DB. Used when a terminal webhook
 // never arrived (or failed) so a completed call stays stuck as "calling" in the UI.
-const BUILD = "v-heal-3"
+const BUILD = "v-heal-4"
+const PARTICIPANT_PROBE_SELECT = `id, status, bolna_execution_id, candidate_id,
+  candidates: candidate_id (id, name, phone),
+  jobs: job_id (id, title, client_name)`
 //  GET  ...?executionId=<id>&sync=1        -> resolve + apply (one-click recovery)
 //  GET  ...?phone=<dial>&sync=1            -> resolve by phone
 //  GET  ...?email=<address>&sync=1         -> resolve by candidate email
@@ -56,6 +59,26 @@ export async function GET(request: NextRequest) {
   const { execution, participant } = await resolveSyncTarget({ executionId, phone, email })
 
   if (!participant) {
+    // Deep-probe the exact DB queries so a mismatch is never a black box.
+    const probeExId = executionId || execution?.id || ""
+    const probe1 = probeExId
+      ? await supabaseAdmin
+          .from("phone_screening_participants")
+          .select(PARTICIPANT_PROBE_SELECT)
+          .eq("bolna_execution_id", probeExId)
+          .maybeSingle()
+      : null
+    const ctxPid =
+      (execution?.context_details?.recipient_data as Record<string, unknown> | undefined)?.participant_id ||
+      execution?.context_details?.participant_id ||
+      null
+    const probe2 = ctxPid
+      ? await supabaseAdmin
+          .from("phone_screening_participants")
+          .select("id,status,bolna_execution_id,candidate_id")
+          .eq("id", String(ctxPid))
+          .maybeSingle()
+      : null
     return NextResponse.json({
       error: "No matching participant found",
       build: BUILD,
@@ -64,7 +87,10 @@ export async function GET(request: NextRequest) {
         executionId: execution?.id || executionId || null,
         executionStatus: execution?.status || null,
         executionDialedNumber: execution?.telephony_data?.to_number || (execution as any)?.user_number || null,
-        contextParticipantId: execution?.context_details?.participant_id || null,
+        contextParticipantId: ctxPid,
+        probeExecId: probeExId,
+        probeExec: { found: !!probe1?.data, data: probe1?.data ? { id: (probe1.data as any).id, status: (probe1.data as any).status } : null, error: probe1?.error?.message || null },
+        probeCtx: { found: !!probe2?.data, data: probe2?.data || null, error: probe2?.error?.message || null },
       },
     }, { status: 404 })
   }
