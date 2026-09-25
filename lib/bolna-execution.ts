@@ -5,7 +5,13 @@ import { getWhatsAppService } from "@/lib/whatsapp"
 import { scheduleBolnaCall, MAX_CALL_ATTEMPTS } from "@/lib/scheduled-call"
 import { enrichTranscript } from "@/lib/transcript-enrichment"
 import { logCandidateActivity } from "@/lib/activity-logger"
-import { BOLNA_TERMINAL_STATUSES, type BolnaExecution } from "@/lib/bolna"
+import { toE164 } from "@/lib/phone"
+import {
+  getBolnaExecution,
+  findLatestExecutionByPhone,
+  BOLNA_TERMINAL_STATUSES,
+  type BolnaExecution,
+} from "@/lib/bolna"
 
 // Terminal-execution handling shared by the live webhook and the manual
 // sync/reconcile recovery routes. Everything here must be idempotent enough to
@@ -468,7 +474,7 @@ export interface ParticipantRecord {
 }
 
 const PARTICIPANT_SELECT = `
-  id, call_attempts, retry_count, whatsapp_missed_nudge_sent, whatsapp_history,
+  id, status, call_attempts, retry_count, whatsapp_missed_nudge_sent, whatsapp_history,
   candidates: candidate_id (id, name, phone),
   jobs: job_id (id, title, client_name)
 `
@@ -495,6 +501,155 @@ export async function findParticipant(execution: BolnaExecution): Promise<Partic
   }
 
   return null
+}
+
+// Find a participant by the candidate attached to it (email and/or phone).
+// phone_e164 may be null until the migration/backfill runs, so also match the
+// stored phone column across common Indian formatting variants.
+export async function findParticipantByCandidate(input: {
+  phone?: string
+  email?: string
+}): Promise<ParticipantRecord | null> {
+  const candidateIds = new Set<string>()
+
+  const addCandidates = (rows: { id: string }[] | null) => {
+    for (const row of rows || []) candidateIds.add(row.id)
+  }
+
+  if (input.email) {
+    const { data } = await supabaseAdmin
+      .from("candidates")
+      .select("id")
+      .eq("email", input.email.trim().toLowerCase())
+      .limit(5)
+    addCandidates(data)
+  }
+
+  if (input.phone) {
+    const e164 = toE164(input.phone)
+    if (e164) {
+      const { data } = await supabaseAdmin
+        .from("candidates")
+        .select("id")
+        .eq("phone_e164", e164)
+        .limit(5)
+      addCandidates(data)
+    }
+    for (const variant of phoneMatchVariants(input.phone)) {
+      const { data } = await supabaseAdmin
+        .from("candidates")
+        .select("id")
+        .eq("phone", variant)
+        .limit(5)
+      addCandidates(data)
+    }
+  }
+
+  if (candidateIds.size === 0) return null
+
+  const { data: participants } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .select(PARTICIPANT_SELECT)
+    .in("candidate_id", [...candidateIds])
+    .order("last_attempt_at", { ascending: false })
+    .limit(10)
+
+  if (!participants || participants.length === 0) return null
+
+  // Prefer a still-stuck drill (calling/in_progress) so recovery targets live calls.
+  const stuck = (participants as any[]).find(
+    (p) => p?.status === "calling" || p?.status === "in_progress"
+  )
+  return ((stuck || participants[0]) as unknown) as ParticipantRecord
+}
+
+function phoneMatchVariants(phone: string): string[] {
+  const clean = phone.replace(/[^0-9]/g, "")
+  const variants = new Set<string>([clean])
+  if (clean.startsWith("91") && clean.length === 12) {
+    variants.add(clean.slice(2)) // national format
+    variants.add(`+${clean}`)
+  } else if (clean.length === 10) {
+    variants.add(`91${clean}`)
+    variants.add(`+91${clean}`)
+  } else if (clean.length === 11 && clean.startsWith("0")) {
+    variants.add(clean.slice(1))
+    variants.add(`91${clean.slice(1)}`)
+  }
+  return [...variants]
+}
+
+// Resolve the participant (and fetch its Bolna execution) from whatever lookup
+// is available. Shared by sync-execution and reconcile single-target recovery.
+export async function resolveSyncTarget(params: {
+  executionId?: string
+  phone?: string
+  email?: string
+}): Promise<{ execution: BolnaExecution | null; participant: ParticipantRecord | null }> {
+  let execution: BolnaExecution | null = null
+  let participant: ParticipantRecord | null = null
+
+  // 1. By execution id (recording URL id == execution id per Bolna).
+  if (params.executionId) {
+    execution = await getBolnaExecution(params.executionId)
+    if (execution) {
+      participant = await findParticipant(execution)
+      // 1a. Executions API usually doesn't echo user_data context for single
+      //     calls — fall back to matching the dialed number if we can't match.
+      if (!participant) {
+        const dialed = execution.telephony_data?.to_number || (execution as any).user_number || null
+        if (dialed) participant = await findParticipantByCandidate({ phone: dialed })
+      }
+    }
+  }
+
+  // 2. By phone / email against our candidates.
+  if (!participant && (params.phone || params.email)) {
+    participant = await findParticipantByCandidate({
+      phone: params.phone,
+      email: params.email,
+    })
+  }
+
+  // 3. We found the participant but still lack the execution: use the stored id
+  //    or locate the execution on Bolna by the dialed number.
+  if (participant && !execution) {
+    const { data: stored } = await supabaseAdmin
+      .from("phone_screening_participants")
+      .select("bolna_execution_id")
+      .eq("id", participant.id)
+      .maybeSingle()
+    if (stored?.bolna_execution_id) {
+      execution = await getBolnaExecution(stored.bolna_execution_id)
+    }
+    if (!execution) {
+      const candidatePhone = participant.candidates?.phone
+      if (candidatePhone) {
+        execution = await findLatestExecutionByPhone(candidatePhone)
+      }
+    }
+  }
+
+  return { execution, participant }
+}
+
+// Adopt a Bolna execution id that was missing/mismatched so future webhooks match.
+export async function persistBolnaExecutionId(
+  participantId: string,
+  executionId: string
+): Promise<void> {
+  if (!executionId) return
+  const { data } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .select("bolna_execution_id")
+    .eq("id", participantId)
+    .maybeSingle()
+  if (!data?.bolna_execution_id) {
+    await supabaseAdmin
+      .from("phone_screening_participants")
+      .update({ bolna_execution_id: executionId, updated_at: new Date().toISOString() })
+      .eq("id", participantId)
+  }
 }
 
 export async function handleFailedExecution(

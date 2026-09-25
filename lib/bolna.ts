@@ -125,19 +125,73 @@ export interface BolnaExecution {
 }
 
 export async function getBolnaExecution(executionId: string): Promise<BolnaExecution | null> {
-  const { apiKey } = getConfig()
+  const { apiKey, agentId } = getConfig()
   if (!apiKey) return null
 
-  try {
-    const res = await fetch(`${BOLNA_API}/executions/${executionId}`, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    })
-    if (!res.ok) return null
-    return await res.json()
-  } catch (err: any) {
-    logger.error("Bolna execution fetch failed", { executionId, error: err.message })
-    return null
+  const candidates = [
+    { label: "v1", url: `${BOLNA_API}/executions/${executionId}` },
+    { label: "v2-common", url: `${BOLNA_API}/v2/executions/${executionId}` },
+    { label: "agent-v1", url: `${BOLNA_API}/agent/${agentId}/execution/${executionId}` },
+    { label: "agent-v2", url: `${BOLNA_API}/v2/agent/${agentId}/execution/${executionId}` },
+  ]
+
+  for (const variant of candidates) {
+    try {
+      const res = await fetch(variant.url, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+      })
+      if (res.ok) {
+        const data = await res.json()
+        logger.info("Bolna execution fetched", { executionId, via: variant.label })
+        return data
+      }
+    } catch (err: any) {
+      logger.error("Bolna execution fetch exception", { executionId, via: variant.label, error: err.message })
+    }
   }
+
+  logger.error("Bolna execution fetch failed on all endpoints", { executionId })
+  return null
+}
+
+export async function findLatestExecutionByPhone(
+  phone: string,
+  opts?: { from?: Date }
+): Promise<BolnaExecution | null> {
+  const { apiKey, agentId } = getConfig()
+  const target = toE164(phone)
+  if (!apiKey || !agentId || !target) return null
+
+  const from = (opts?.from || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)).toISOString()
+  const to = new Date().toISOString()
+
+  for (let page = 1; page <= 3; page++) {
+    const url =
+      `${BOLNA_API}/v2/agent/${agentId}/executions?page_size=50&page_number=${page}` +
+      `&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
+    try {
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+      })
+      if (!res.ok) {
+        logger.error("Bolna executions list failed", { status: res.status, page })
+        return null
+      }
+      const body = await res.json()
+      const list = body?.data || []
+      for (const ex of list) {
+        const toNumber = ex?.telephony_data?.to_number || ex?.user_number || null
+        if (toNumber && toE164(toNumber) === target) {
+          return ex as BolnaExecution
+        }
+      }
+      if (!body?.has_more) break
+    } catch (err: any) {
+      logger.error("Bolna executions list exception", { error: err.message, page })
+      return null
+    }
+  }
+  return null
 }
 
 export const BOLNA_TERMINAL_STATUSES = new Set([

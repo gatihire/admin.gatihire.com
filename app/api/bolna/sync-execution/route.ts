@@ -4,64 +4,21 @@ export const runtime = "nodejs"
 import { supabaseAdmin } from "@/lib/supabase"
 import { logger } from "@/lib/logger"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
-import { getBolnaExecution, BOLNA_TERMINAL_STATUSES, type BolnaExecution } from "@/lib/bolna"
-import { toDial } from "@/lib/phone"
+import { BOLNA_TERMINAL_STATUSES } from "@/lib/bolna"
 import {
-  findParticipant,
+  resolveSyncTarget,
+  persistBolnaExecutionId,
   handleCompletedExecution,
   handleFailedExecution,
 } from "@/lib/bolna-execution"
 
 // Manually re-sync a Bolna execution into the DB. Used when a terminal webhook
 // never arrived (or failed) so a completed call stays stuck as "calling" in the UI.
-//  GET  ...?executionId=<id>                -> dry-run status, no writes
-//  GET  ...?executionId=<id>&sync=1         -> dry-run then apply (one-click recovery)
-//  GET  ...?phone=<dial>&sync=1             -> resolve by phone instead of execution id
-//  POST { executionId }                     -> apply (programmatic)
-
-async function resolveParticipant(executionId: string, phone: string) {
-  if (executionId) {
-    const execution = await getBolnaExecution(executionId)
-    if (execution) {
-      const participant = await findParticipant(execution as unknown as BolnaExecution)
-      if (participant) return { execution, participant }
-    }
-  }
-  if (phone) {
-    const dial = toDial(phone)
-    if (dial) {
-      const { data: candidate } = await supabaseAdmin
-        .from("candidates")
-        .select("id")
-        .eq("phone_e164", toDialWithPlus(dial))
-        .limit(1)
-        .maybeSingle()
-      const candidateId = candidate?.id || null
-      const { data: participant } = await supabaseAdmin
-        .from("phone_screening_participants")
-        .select(
-          `id,
-           candidates: candidate_id (id, name, phone),
-           jobs: job_id (id, title, client_name)`
-        )
-        .in(candidateId ? "candidate_id" : "id", candidateId ? [candidateId] : [])
-        .order("last_attempt_at", { ascending: false })
-        .limit(1)
-        .maybeSingle()
-      if (participant) {
-        // phone_e164 may not be backfilled; fall back to scanning by stored phone.
-        return { execution: null, participant: participant as any }
-      }
-    }
-  }
-  return null
-}
-
-function toDialWithPlus(dial: string): string {
-  return `+${dial}`
-}
-
-const isTerminal = (s: string) => BOLNA_TERMINAL_STATUSES.has(s)
+//  GET  ...?executionId=<id>&sync=1        -> resolve + apply (one-click recovery)
+//  GET  ...?phone=<dial>&sync=1            -> resolve by phone
+//  GET  ...?email=<address>&sync=1         -> resolve by candidate email
+//  GET  ... (no sync=1)                    -> dry-run: report what would happen
+//  POST { executionId }                    -> apply (programmatic)
 
 export async function GET(request: NextRequest) {
   const ctx = await getInternalAuthContext(request)
@@ -70,40 +27,55 @@ export async function GET(request: NextRequest) {
 
   const executionId = request.nextUrl.searchParams.get("executionId") || ""
   const phone = request.nextUrl.searchParams.get("phone") || ""
+  const email = request.nextUrl.searchParams.get("email") || ""
   const shouldSync = request.nextUrl.searchParams.get("sync") === "1"
 
-  if (!executionId && !phone) {
-    return NextResponse.json({ error: "Provide executionId or phone" }, { status: 400 })
+  if (!executionId && !phone && !email) {
+    return NextResponse.json({
+      error: "Provide executionId, phone, or email",
+      usage: "?executionId=<id>[&sync=1] | ?phone=<dial>[&sync=1] | ?email=<addr>[&sync=1]",
+    }, { status: 400 })
   }
 
-  const resolved = await resolveParticipant(executionId, phone)
-  const execution = resolved?.execution || null
-  const participant = resolved?.participant || null
+  const { execution, participant } = await resolveSyncTarget({ executionId, phone, email })
 
   if (!participant) {
-    return NextResponse.json({ error: "No matching participant found" }, { status: 404 })
+    return NextResponse.json({
+      error: "No matching participant found",
+      diagnostics: {
+        executionFetched: !!execution,
+        executionId: execution?.id || executionId || null,
+        executionStatus: execution?.status || null,
+        executionDialedNumber: execution?.telephony_data?.to_number || (execution as any)?.user_number || null,
+        contextParticipantId: execution?.context_details?.participant_id || null,
+      },
+    }, { status: 404 })
   }
 
   const { data: current } = await supabaseAdmin
     .from("phone_screening_participants")
-    .select("id, status, bolna_status, verdict_json, recording_url")
+    .select("id, status, bolna_execution_id, bolna_status, verdict_json, recording_url")
     .eq("id", participant.id)
     .maybeSingle()
 
-  const terminal = execution ? isTerminal(execution.status || "") : null
+  const terminal = execution ? BOLNA_TERMINAL_STATUSES.has(execution.status || "") : null
   const alreadySynced =
     current?.status === "completed" && (current.verdict_json || current.recording_url)
 
   if (!shouldSync || !execution || !terminal) {
     return NextResponse.json({
       ok: true,
-      executionId: executionId || execution?.id || null,
+      executionId: execution?.id || executionId || null,
       bolnaStatus: execution?.status || null,
       terminal,
       participantId: participant.id,
       current: current || null,
       wouldSync: !!(execution && terminal && !alreadySynced),
-      note: shouldSync && !terminal ? "Not terminal yet — nothing to sync" : undefined,
+      note: !execution
+        ? "Execution could not be fetched from Bolna (yet). Try again or pass executionId."
+        : !terminal
+          ? `Not terminal yet (${execution.status}) — nothing to sync`
+          : undefined,
     })
   }
 
@@ -111,21 +83,23 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ ok: true, alreadySynced: true, participant: current })
   }
 
-  logger.info("Syncing Bolna execution (GET sync=1)", {
+  if (execution.id) await persistBolnaExecutionId(participant.id, execution.id)
+
+  logger.info("Syncing Bolna execution (GET)", {
     executionId: execution.id,
     participantId: participant.id,
     status: execution.status,
   })
 
   if (execution.status === "completed") {
-    await handleCompletedExecution(participant.id, execution as unknown as BolnaExecution)
+    await handleCompletedExecution(participant.id, execution)
   } else {
-    await handleFailedExecution(participant as any, execution as unknown as BolnaExecution)
+    await handleFailedExecution(participant as any, execution)
   }
 
   const { data: after } = await supabaseAdmin
     .from("phone_screening_participants")
-    .select("id, status, bolna_status, verdict_json, recording_url, ai_score, ai_recommendation, transcript_raw")
+    .select("id, status, bolna_status, bolna_execution_id, verdict_json, recording_url, ai_score, ai_recommendation, transcript_raw")
     .eq("id", participant.id)
     .maybeSingle()
 
@@ -144,22 +118,22 @@ export async function POST(request: NextRequest) {
   const executionId = String(body?.executionId || "").trim()
   if (!executionId) return NextResponse.json({ error: "executionId is required" }, { status: 400 })
 
-  const execution = await getBolnaExecution(executionId)
-  if (!execution) return NextResponse.json({ error: "Execution not found on Bolna" }, { status: 404 })
-
-  const status = execution.status || ""
-  if (!isTerminal(status)) {
-    return NextResponse.json({ error: `Execution not terminal (status="${status}")` }, { status: 409 })
+  const { execution, participant } = await resolveSyncTarget({ executionId })
+  if (!execution) {
+    return NextResponse.json({ error: "Execution not found on Bolna" }, { status: 404 })
   }
-
-  const participant = await findParticipant(execution as unknown as BolnaExecution)
   if (!participant) {
     return NextResponse.json({ error: "No matching participant found" }, { status: 404 })
   }
 
+  const status = execution.status || ""
+  if (!BOLNA_TERMINAL_STATUSES.has(status)) {
+    return NextResponse.json({ error: `Execution not terminal (status="${status}")` }, { status: 409 })
+  }
+
   const { data: current } = await supabaseAdmin
     .from("phone_screening_participants")
-    .select("id, status, bolna_status, verdict_json, recording_url")
+    .select("id, status, bolna_execution_id, verdict_json, recording_url")
     .eq("id", participant.id)
     .maybeSingle()
 
@@ -167,17 +141,19 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: true, alreadySynced: true, participant: current })
   }
 
+  if (execution.id) await persistBolnaExecutionId(participant.id, execution.id)
+
   logger.info("Syncing Bolna execution (POST)", { executionId, participantId: participant.id, status })
 
   if (status === "completed") {
-    await handleCompletedExecution(participant.id, execution as unknown as BolnaExecution)
+    await handleCompletedExecution(participant.id, execution)
   } else {
-    await handleFailedExecution(participant, execution as unknown as BolnaExecution)
+    await handleFailedExecution(participant as any, execution)
   }
 
   const { data: after } = await supabaseAdmin
     .from("phone_screening_participants")
-    .select("id, status, bolna_status, verdict_json, recording_url, ai_score, ai_recommendation, transcript_raw")
+    .select("id, status, bolna_status, bolna_execution_id, verdict_json, recording_url, ai_score, ai_recommendation, transcript_raw")
     .eq("id", participant.id)
     .maybeSingle()
 
