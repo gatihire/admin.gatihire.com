@@ -49,20 +49,21 @@ export default function Sidebar({ isHrUser = false, permissionKeys = [], isSuper
     setIsDark(false);
   }, []);
 
-  // Poll for pending credit requests every 60s
+  // Fetch the pending credit-request count once on load for the badge. No
+  // recurring polling — the dashboard page fetches fresh data when opened.
   useEffect(() => {
+    let cancelled = false
     const fetchPending = async () => {
       try {
         const res = await fetch("/api/clients/credit-requests?status=pending", { credentials: "include" })
         if (res.ok) {
           const data = await res.json()
-          setPendingCredits((data.requests || []).length)
+          if (!cancelled) setPendingCredits((data.requests || []).length)
         }
       } catch {}
     }
     fetchPending()
-    const interval = setInterval(fetchPending, 60_000)
-    return () => clearInterval(interval)
+    return () => { cancelled = true }
   }, [])
 
   const toggleDark = () => {
