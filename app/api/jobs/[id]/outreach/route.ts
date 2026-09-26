@@ -165,10 +165,14 @@ Return ONLY valid JSON:
       const websearchQ = buildWebsearchQuery(allKeyTerms, 15).replace(/[()]/g, " ").trim()
 
       // Step 3: Build RPC filters
+      // NOTE: must_kw is intentionally left empty. The RPC ANDs (bool_and) every
+      // must_kw element against search_vector, so a JD with many extracted
+      // terms returns ZERO candidates despite good matches existing. Keywords
+      // already drive retrieval via websearchQ.
       const rpcFilters: any = {}
       if (criteria.location) rpcFilters.currentCity = [criteria.location]
       if (criteria.min_experience_years) rpcFilters.exp_min = criteria.min_experience_years.toString()
-      if (allKeyTerms.length > 0) rpcFilters.must_kw = allKeyTerms
+      rpcFilters.must_kw = []
 
       // Step 4: Run RPC search
       const { data, error } = await supabaseAdmin.rpc("search_candidates_hybrid", {

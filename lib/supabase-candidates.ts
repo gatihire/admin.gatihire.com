@@ -7,6 +7,19 @@ type CandidateRow = Database['public']['Tables']['candidates']['Row']
 type CandidateInsert = Database['public']['Tables']['candidates']['Insert']
 type CandidateUpdate = Database['public']['Tables']['candidates']['Update']
 
+// Words that indicate a query is about a role/skill rather than a company, so a
+// company-like query ("Delhivery") can be ranked company-first instead of being
+// drowned in the general text pool.
+const ROLE_KEYWORD_HINTS = [
+  'driver', 'manager', 'supervisor', 'coordinator', 'executive', 'operator',
+  'incharge', 'logistics', 'fleet', 'warehouse', 'transport', 'operations',
+  'accountant', 'delivery', 'supply', 'chain', 'sourcing', 'procurement',
+  'sales', 'marketing', 'administrator', 'assistant', 'analyst', 'engineer',
+  'technician', 'mechanic', 'attendant', 'helper', 'load', 'unload', 'billing',
+  'inventory', 'route', 'dispatcher', 'truck', 'vehicle', 'maintenance',
+  'compliance', 'quality', 'safety', 'hr', 'payroll', 'finance', 'cleaning',
+]
+
 export class SupabaseCandidateService {
   // Convert Supabase row to ComprehensiveCandidateData
   static mapRowToCandidate(row: CandidateRow): ComprehensiveCandidateData {
@@ -239,10 +252,11 @@ export class SupabaseCandidateService {
       }
 
       // Company / institution pass (always runs, independent of the vector search).
-      // search_vector only indexes current_company + resume_text, so past
-      // employers in work_experience.company and school/institution would
-      // otherwise never surface for company-based keyword searches.
+      // search_vector indexes current_company + resume_text (previous_companies of
+      // legacy rows may be empty), so past employers in work_experience.company and
+      // school/institution would otherwise never surface for company searches.
       let companyLinkedRows: any[] = []
+      let fuzzyLinkedRows: any[] = []
       if (terms.length) {
         const workOr = terms.map((t) => `company.ilike.%${t}%`).join(',')
         const eduOr = terms.map((t) => `institution.ilike.%${t}%`).join(',')
@@ -296,11 +310,61 @@ export class SupabaseCandidateService {
             }
           }
         }
+
+        // Fuzzy / typo-tolerant company pass via pg_trgm (search_candidates_by_company
+        // now covers current + past employers + institutions with similarity matching).
+        // Resolves the "Sennheiser" class of failures: search_vector ILIKE misses
+        // misspelled or string-differently-formatted company names.
+        try {
+          const { data: fuzzyHits, error: fuzzyErr } = await supabaseAdmin.rpc('search_candidates_by_company', {
+            p_query: query.trim(),
+            p_limit: Math.min(limit, 500),
+          })
+          if (fuzzyErr) {
+            console.warn('Company pass (fuzzy RPC) failed:', fuzzyErr)
+          } else {
+            const fuzzyIds = Array.from(
+              new Set((fuzzyHits || []).map((r: any) => r?.candidate_id).filter(Boolean))
+            ).filter((id: any): id is string => !!id && !rankedIds.has(id))
+            for (let i = 0; i < fuzzyIds.length; i += 300) {
+              let idBuilder: any = supabaseAdmin
+                .from('candidates')
+                .select('*')
+                .in('id', fuzzyIds.slice(i, i + 300))
+                .limit(limit)
+              idBuilder = this.applyInternalUserExclusions(idBuilder, filters)
+              const { data: fuzzyMatched, error: fuzzyMatchedError } = await idBuilder
+              if (fuzzyMatchedError) {
+                console.warn('Company pass (fetch fuzzy linked candidates) failed:', fuzzyMatchedError)
+                continue
+              }
+              for (const m of fuzzyMatched || []) {
+                if (!rankedIds.has(m.id)) {
+                  fuzzyLinkedRows.push(m)
+                  rankedIds.add(m.id)
+                }
+              }
+            }
+          }
+        } catch (fuzzyCatch) {
+          console.warn('Company pass (fuzzy RPC) threw:', fuzzyCatch)
+        }
       }
 
-      // Keep the ranked vector pool first, but never drop company/institution
-      // matches — that's the whole point of this pass (search_vector misses them).
-      const allRows = [...(rows || []), ...companyLinkedRows]
+      // Company-first ranking: when the query looks like a pure company/institution
+      // name with no role keywords, put its matches ahead of the text pool so the
+      // employer the user typed appears at the top instead of drowning in the pool.
+      const isCompanyLikeQuery = terms.length > 0 && terms.length <= 4 && !terms.some((t) =>
+        ROLE_KEYWORD_HINTS.some((k) => t.startsWith(k))
+      )
+      let allRows: any[]
+      if (isCompanyLikeQuery && fuzzyLinkedRows.length) {
+        allRows = [...fuzzyLinkedRows, ...companyLinkedRows, ...(rows || [])]
+      } else {
+        // Keep the ranked text pool first, but never drop company/institution
+        // matches — that's the whole point of this pass.
+        allRows = [...(rows || []), ...companyLinkedRows, ...fuzzyLinkedRows]
+      }
 
       const candidates = allRows.map((row: CandidateRow) => this.mapRowToCandidate(row));
 

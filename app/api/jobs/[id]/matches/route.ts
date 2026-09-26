@@ -236,11 +236,17 @@ Return ONLY valid JSON:
     // SOFT RANKING: no hard SQL filters — the JD's city/exp/keyword requirements are
     // weighted by the JS re-scorer below instead of shrinking the candidate pool.
     // BUT we still pass filters to SQL to reduce the retrieval pool size and improve quality.
+    //
+    // NOTE: pass an EMPTY must_kw. The RPC ANDs every must_kw element against the
+    // candidate's search_vector (bool_and), so a JD with many must-have skills (e.g.
+    // this job has 11) returns ZERO candidates even though good matches exist. The
+    // JS re-scorer below already enforces skill coverage, so hard SQL narrowing here
+    // only erases the pool. Keywords still enter retrieval via websearchQ.
     const p_filters = {
       currentCity: jobLocation ? [jobLocation] : [],
       exp_min: jobMinExp ?? null,
       exp_max: jobMaxExp ?? null,
-      must_kw: mappedCriteria.must_have_skills || [],
+      must_kw: [] as string[],
       exclude_kw: [],
     }
     let rows: any[] = []
