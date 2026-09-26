@@ -9,14 +9,18 @@ interface WhatsAppConfig {
 }
 
 interface TemplateParameter {
-  type: "text"
-  text: string
+  type: "text" | "action"
+  text?: string
+  action?: {
+    flow_token?: string
+    flow_action_data?: Record<string, unknown>
+  }
 }
 
 interface TemplateComponent {
   type: "body" | "button"
-  sub_type?: "quick_reply"
-  index?: number
+  sub_type?: "quick_reply" | "flow"
+  index?: number | string
   parameters?: TemplateParameter[]
 }
 
@@ -627,6 +631,50 @@ export class WhatsAppService {
     })
     console.log("[WHATSAPP] sendDetailedInfoRequest result:", result)
     return result
+  }
+
+  // WhatsApp Flows form — the structured 7-field replacement for
+  // detailed_info_request. The template's FLOW button opens the native
+  // truckinzy_candidate_screening form; submissions come back to the webhook
+  // as interactive nfm_reply with response_json, correlated via flow_token.
+  async sendCollectInfoForm(params: {
+    phoneNumber: string
+    candidateName: string
+    jobTitle: string
+    companyName: string
+    flowToken: string
+  }): Promise<SendMessageResult> {
+    const templateName = process.env.WHATSAPP_TEMPLATE_COLLECT_INFO_FORM || "collect_info_form"
+
+    return this.sendTemplateMessage({
+      to: params.phoneNumber,
+      languageCode: "en_US",
+      templateName,
+      components: [
+        {
+          type: "body",
+          parameters: [
+            { type: "text", text: params.candidateName },
+            { type: "text", text: params.jobTitle },
+            { type: "text", text: params.companyName },
+          ],
+        },
+        {
+          type: "button",
+          sub_type: "flow",
+          index: "0",
+          parameters: [
+            {
+              type: "action",
+              action: {
+                flow_token: params.flowToken,
+                flow_action_data: { screen: "DETAILS_SCREEN" },
+              },
+            },
+          ],
+        },
+      ],
+    })
   }
 
   // Flow 5: Screening Decision (filtered out)

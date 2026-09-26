@@ -106,13 +106,14 @@ async function renudgeExistingParticipant(opts: {
       })
       status = "whatsapp_sent"
     } else {
-      // Flow B external + Flow C outbound (after interest): 7-field ask
-      template = "detailed_info_request"
-      msgResult = await whatsapp.sendDetailedInfoRequest({
+      // Flow B external + Flow C outbound (after interest): WhatsApp Flows form ask
+      template = "collect_info_form"
+      msgResult = await whatsapp.sendCollectInfoForm({
         phoneNumber: candidate.phone as string,
         candidateName: candidate.name || "",
         jobTitle: job.title || "",
         companyName: job.client_name || client?.name || "",
+        flowToken: participantId,
       })
       status = "info_requested"
     }
@@ -155,9 +156,10 @@ async function renudgeExistingParticipant(opts: {
         renudgedAt: now,
       }
     } else if (effMode === "collect_info_first") {
-      // Reset any half-finished info-collection state so the next reply parses cleanly.
+      // Reset any half-finished info-collection state so the next form
+      // submission parses cleanly.
       update.screening_mode = "collect_info_first"
-      update.info_step = "collect_all"
+      update.info_step = "collect_form"
       update.info_data = {}
       update.info_confirmed = false
       update.screening_context = {

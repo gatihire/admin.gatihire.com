@@ -120,8 +120,9 @@ async function sendShortlistMessage(opts: {
   return { sent: true, messageId: result.messageId }
 }
 
-// Flow B (external resumes) + Flow C outbound interested step: send the single
-// 7-field detailed_info_request, then pre-screen and call from the reply.
+// Flow B (external resumes) + Flow C outbound interested step: send the
+// WhatsApp Flows form (structured 7-field collect_info_form template), then
+// pre-screen and call from the nfm_reply submission.
 async function sendDetailedInfoMessage(opts: {
   candidate: ScreeningCandidate
   job: any
@@ -136,11 +137,12 @@ async function sendDetailedInfoMessage(opts: {
   const { candidate, job, client, origin, participantId, campaignId, nudgeH, escalateH, preScreenConfig } = opts
   const whatsapp = getWhatsAppService()
   const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(candidate, job, client, origin, participantId)
-  const result = await whatsapp.sendDetailedInfoRequest({
+  const result = await whatsapp.sendCollectInfoForm({
     phoneNumber: candidate.phone as string,
     candidateName: candidate.name || "",
     jobTitle: job.title || "",
     companyName: job.client_name || client?.name || "",
+    flowToken: participantId || candidate.id,
   })
   if (!result.success) return { sent: false, error: result.error }
   if (!participantId) return { sent: true, messageId: result.messageId }
@@ -148,7 +150,7 @@ async function sendDetailedInfoMessage(opts: {
   const now = new Date().toISOString()
   const history = [{
     messageId: result.messageId || null,
-    template: "detailed_info_request",
+    template: "collect_info_form",
     sentAt: now,
     status: "sent",
   }]
@@ -157,18 +159,18 @@ async function sendDetailedInfoMessage(opts: {
     .update({
       status: "info_requested",
       screening_mode: "collect_info_first",
-      info_step: "collect_all",
+      info_step: "collect_form",
       info_data: {},
       info_confirmed: false,
       whatsapp_message_id: result.messageId || null,
       whatsapp_sent_at: now,
       whatsapp_delivery_status: "sent",
-      whatsapp_outbound_template: "detailed_info_request",
+      whatsapp_outbound_template: "collect_info_form",
       whatsapp_history: history,
       call_payload_json: userData,
       generated_questions: generatedQuestions.join("\n"),
       gemini_prompt_used: geminiPromptUsed,
-      screening_context: screeningContextFor(job, client, origin, { preScreenConfig }),
+      screening_context: screeningContextFor(job, client, origin, { preScreenConfig, infoViaForm: true }),
       updated_at: now,
     })
     .eq("campaign_id", campaignId)

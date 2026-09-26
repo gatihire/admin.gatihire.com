@@ -261,6 +261,19 @@ async function handleInteractiveMessage(participant: any, interactive: any) {
     
     const { handleInteractiveButton } = await import('@/lib/info-collector-v2')
     await handleInteractiveButton(participant.id, buttonId, buttonTitle)
+  } else if (interactive.type === "nfm_reply") {
+    // Structured answers from the collect_info_form WhatsApp Flow. Only act
+    // while the participant is actually being asked for info — ignore stale
+    // submissions that arrive after they've already scheduled/been reviewed.
+    if (participant.status === "info_requested" && participant.info_step === "collect_form") {
+      await handleFlowFormReply(participant, interactive.nfm_reply)
+    } else {
+      logger.info("Ignoring nfm_reply for non-collect participant", {
+        participantId: participant.id,
+        status: participant.status,
+        infoStep: participant.info_step,
+      })
+    }
   }
 }
 
@@ -611,6 +624,239 @@ async function assertSet(participantId: string, fields: Record<string, any>) {
   }
 }
 
+// Shared post-collect path: persist collected info + pre-screen result, then
+// branch (proceed / needs_review / filtered_out). Used by BOTH the free-text
+// collect_all reply and the WhatsApp Flows form (nfm_reply) submission.
+async function finalizeCollectedInfo(
+  participant: any,
+  mergedInfoData: Record<string, any>,
+  infoSource: "collect_all" | "collect_form",
+  sourceText: string,
+) {
+  const phoneNumber = participant.candidates?.phone
+
+  // Get job requirements for pre-screen
+  const jobRequirements = {
+    salaryMinLpa: participant.jobs?.salary_min,
+    salaryMaxLpa: participant.jobs?.salary_max,
+    experienceMinYears: participant.jobs?.experience_min_years,
+    experienceMaxYears: participant.jobs?.experience_max_years,
+    city: participant.jobs?.city,
+    location: participant.jobs?.location,
+    title: participant.jobs?.title,
+  }
+
+  // Get pre-screen config from screening_context
+  const preScreenConfig = participant.screening_context?.preScreenConfig || {
+    salaryTolerancePercent: 40,
+    experienceMinPercent: 50,
+    experienceMaxPercent: 200,
+    maxNoticePeriodDays: 120,
+  }
+
+  // Run AI pre-screen evaluation on the normalized numeric CandidateInfo
+  // (extracted strings like "8 LPA"/"5 years" never satisfied the numeric
+  // checks, so every candidate used to sail through as "proceed").
+  const preScreenResult = await evaluatePreScreenWithAI(
+    buildCandidateInfoFromCollected(mergedInfoData),
+    jobRequirements,
+    preScreenConfig
+  )
+
+  logger.info("Pre-screen evaluation result", {
+    participantId: participant.id,
+    decision: preScreenResult.decision,
+    summary: preScreenResult.summary,
+    reasons: preScreenResult.reasons,
+  })
+
+  // Update participant with collected info and pre-screen result
+  const now = new Date().toISOString()
+  await supabaseAdmin
+    .from("phone_screening_participants")
+    .update({
+      info_data: mergedInfoData,
+      // 'confirmed' is a sentinel that isInInfoFlow explicitly excludes (it
+      // excludes 'confirmed' and 'collect_all', NOT 'confirm'). The old
+      // 'confirm' value left participants stuck in the step-by-step re-ask.
+      info_step: 'confirmed',
+      info_confirmed: false,
+      whatsapp_reply_text: sourceText.slice(0, 500),
+      whatsapp_reply_at: now,
+      info_received_at: now,
+      screening_context: {
+        ...participant.screening_context,
+        infoReceivedVia: infoSource,
+        preScreenResult: {
+          decision: preScreenResult.decision,
+          reasons: preScreenResult.reasons,
+          summary: preScreenResult.summary,
+          evaluatedAt: new Date().toISOString(),
+        }
+      },
+      updated_at: now
+    })
+    .eq("id", participant.id)
+
+  // Branch based on pre-screen decision
+  switch (preScreenResult.decision) {
+    case 'proceed': {
+      // Mark as passed pre-screen; let candidate pick a call slot via session buttons
+      await supabaseAdmin
+        .from("phone_screening_participants")
+        .update({ status: "info_received", updated_at: new Date().toISOString() })
+        .eq("id", participant.id)
+
+      const { getWhatsAppService } = await import('@/lib/whatsapp')
+      const sendResult = await getWhatsAppService().sendInteractiveButtons({
+        phoneNumber,
+        body: "✅ Thanks for sharing your details! Your profile looks like a good fit.\n\nWhen should our AI recruiter call you for the quick screening?",
+        footer: "Reply 'call now' or pick a slot",
+        buttons: [
+          { id: "call_now", title: "Call Now" },
+          { id: "in_10_min", title: "In 10 min" },
+          { id: "in_30_min", title: "In 30 min" },
+        ],
+      })
+
+      if (!sendResult.success) {
+        logger.warn("Failed to send schedule buttons after proceed", {
+          participantId: participant.id,
+          error: sendResult.error,
+        })
+        await appendToHistory(participant.id, {
+          at: new Date().toISOString(),
+          kind: "schedule_buttons",
+          status: "failed",
+          error: sendResult.error,
+        })
+      } else {
+        logger.info("Schedule buttons sent after proceed", {
+          participantId: participant.id,
+          messageId: sendResult.messageId,
+        })
+        await appendToHistory(participant.id, {
+          at: new Date().toISOString(),
+          kind: "schedule_buttons",
+          status: "sent",
+          messageId: sendResult.messageId,
+        })
+        await assertSet(participant.id, {
+          whatsapp_delivery_status: "sent",
+          whatsapp_message_id: sendResult.messageId,
+        })
+      }
+      break
+    }
+
+    case 'needs_review': {
+      // Mark for HR review, but still let the candidate schedule the call.
+      // HR review runs alongside — the candidate isn't blocked from an intro call.
+      await supabaseAdmin
+        .from("phone_screening_participants")
+        .update({ status: "needs_review", updated_at: new Date().toISOString() })
+        .eq("id", participant.id)
+
+      const { getWhatsAppService } = await import('@/lib/whatsapp')
+      const sendResult = await getWhatsAppService().sendInteractiveButtons({
+        phoneNumber,
+        body: "Thanks for sharing your details! To take this forward, Ayush AIR needs a quick 5-10 minute call to understand your background. When should Ayush AIR call you?",
+        footer: "Reply 'call now' or pick a slot",
+        buttons: [
+          { id: "call_now", title: "Call Now" },
+          { id: "in_10_min", title: "In 10 min" },
+          { id: "in_30_min", title: "In 30 min" },
+        ],
+      })
+
+      if (!sendResult.success) {
+        logger.warn("Failed to send schedule buttons after needs_review", {
+          participantId: participant.id,
+          error: sendResult.error,
+        })
+        await appendToHistory(participant.id, {
+          at: new Date().toISOString(),
+          kind: "schedule_buttons",
+          status: "failed",
+          error: sendResult.error,
+        })
+      } else {
+        logger.info("Schedule buttons sent after needs_review", {
+          participantId: participant.id,
+          messageId: sendResult.messageId,
+        })
+        await appendToHistory(participant.id, {
+          at: new Date().toISOString(),
+          kind: "schedule_buttons",
+          status: "sent",
+          messageId: sendResult.messageId,
+        })
+        await assertSet(participant.id, {
+          whatsapp_delivery_status: "sent",
+          whatsapp_message_id: sendResult.messageId,
+        })
+      }
+      break
+    }
+
+    case 'filtered_out': {
+      // Inform candidate they don't match
+      await supabaseAdmin
+        .from("phone_screening_participants")
+        .update({ status: "filtered_out", updated_at: new Date().toISOString() })
+        .eq("id", participant.id)
+
+      await sendSessionMessage(phoneNumber, "Thank you for your interest! Based on the details you shared, this role may not be the best match for your profile at this time. We'll keep your details on file for future opportunities.")
+      break
+    }
+  }
+}
+
+// Structured fields submitted through the collect_info_form WhatsApp Flow.
+// The flow form is only sent to collect_info_first participants (info_step
+// "collect_form"), so the data is trusted as-is — no Gemini extraction, the
+// form fields already match the CandidateInfo keys the pre-screen reads.
+async function handleFlowFormReply(participant: any, nfmReply: any) {
+  const phoneNumber = participant.candidates?.phone
+
+  try {
+    // Instant ack so the candidate isn't staring at silence while the
+    // pre-screen runs. Fire-and-forget; the decision messages supersede it.
+    sendSessionMessage(phoneNumber, "✅ Details received — ek second, mujhe aapka profile check karne dein...")
+      .catch(() => {})
+
+    let fields: Record<string, any> = {}
+    try {
+      fields = JSON.parse(nfmReply?.response_json || "{}")
+    } catch {
+      fields = {}
+    }
+
+    // Form returns "Yes"/"No" but the pre-screen checks for "yes"/true.
+    if (typeof fields.willing_to_relocate === "string") {
+      fields.willing_to_relocate = fields.willing_to_relocate.toLowerCase()
+    }
+
+    logger.info("Received flow form reply", {
+      participantId: participant.id,
+      flowToken: nfmReply?.flow_token,
+      fields,
+    })
+
+    const mergedInfoData = { ...participant.info_data, ...fields }
+    const sourceText = JSON.stringify({ ...mergedInfoData, flow_token: nfmReply?.flow_token || null })
+    await finalizeCollectedInfo(participant, mergedInfoData, "collect_form", sourceText)
+  } catch (error: any) {
+    logger.error("Error handling flow form reply", {
+      participantId: participant.id,
+      error: error.message,
+    })
+    if (phoneNumber) {
+      await sendSessionMessage(phoneNumber, "Thanks for sharing your details! Our team will review them and reach out shortly.")
+    }
+  }
+}
+
 async function handleCollectAllReply(participant: any, messageBody: string) {
   const phoneNumber = participant.candidates?.phone
 
@@ -632,180 +878,7 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
     // Merge with existing info_data
     const mergedInfoData = { ...participant.info_data, ...allFields }
 
-    // Get job requirements for pre-screen
-    const jobRequirements = {
-      salaryMinLpa: participant.jobs?.salary_min,
-      salaryMaxLpa: participant.jobs?.salary_max,
-      experienceMinYears: participant.jobs?.experience_min_years,
-      experienceMaxYears: participant.jobs?.experience_max_years,
-      city: participant.jobs?.city,
-      location: participant.jobs?.location,
-      title: participant.jobs?.title,
-    }
-
-    // Get pre-screen config from screening_context
-    const preScreenConfig = participant.screening_context?.preScreenConfig || {
-      salaryTolerancePercent: 40,
-      experienceMinPercent: 50,
-      experienceMaxPercent: 200,
-      maxNoticePeriodDays: 120,
-    }
-
-    // Run AI pre-screen evaluation on the normalized numeric CandidateInfo
-    // (extracted strings like "8 LPA"/"5 years" never satisfied the numeric
-    // checks, so every candidate used to sail through as "proceed").
-    const preScreenResult = await evaluatePreScreenWithAI(
-      buildCandidateInfoFromCollected(mergedInfoData),
-      jobRequirements,
-      preScreenConfig
-    )
-
-    logger.info("Pre-screen evaluation result", { 
-      participantId: participant.id, 
-      decision: preScreenResult.decision,
-      summary: preScreenResult.summary,
-      reasons: preScreenResult.reasons
-    })
-
-    // Update participant with collected info and pre-screen result
-    const now = new Date().toISOString()
-    await supabaseAdmin
-      .from("phone_screening_participants")
-      .update({
-        info_data: mergedInfoData,
-        // 'confirmed' is a sentinel that isInInfoFlow explicitly excludes (it
-        // excludes 'confirmed' and 'collect_all', NOT 'confirm'). The old
-        // 'confirm' value left participants stuck in the step-by-step re-ask.
-        info_step: 'confirmed',
-        info_confirmed: false,
-        whatsapp_reply_text: messageBody.slice(0, 500),
-        whatsapp_reply_at: now,
-        info_received_at: now,
-        screening_context: {
-          ...participant.screening_context,
-          preScreenResult: {
-            decision: preScreenResult.decision,
-            reasons: preScreenResult.reasons,
-            summary: preScreenResult.summary,
-            evaluatedAt: new Date().toISOString(),
-          }
-        },
-        updated_at: now
-      })
-      .eq("id", participant.id)
-
-    // Branch based on pre-screen decision
-    switch (preScreenResult.decision) {
-      case 'proceed': {
-        // Mark as passed pre-screen; let candidate pick a call slot via session buttons
-        await supabaseAdmin
-          .from("phone_screening_participants")
-          .update({ status: "info_received", updated_at: new Date().toISOString() })
-          .eq("id", participant.id)
-
-        const { getWhatsAppService } = await import('@/lib/whatsapp')
-        const sendResult = await getWhatsAppService().sendInteractiveButtons({
-          phoneNumber,
-          body: "✅ Thanks for sharing your details! Your profile looks like a good fit.\n\nWhen should our AI recruiter call you for the quick screening?",
-          footer: "Reply 'call now' or pick a slot",
-          buttons: [
-            { id: "call_now", title: "Call Now" },
-            { id: "in_10_min", title: "In 10 min" },
-            { id: "in_30_min", title: "In 30 min" },
-          ],
-        })
-
-        if (!sendResult.success) {
-          logger.warn("Failed to send schedule buttons after proceed", {
-            participantId: participant.id,
-            error: sendResult.error,
-          })
-          await appendToHistory(participant.id, {
-            at: new Date().toISOString(),
-            kind: "schedule_buttons",
-            status: "failed",
-            error: sendResult.error,
-          })
-        } else {
-          logger.info("Schedule buttons sent after proceed", {
-            participantId: participant.id,
-            messageId: sendResult.messageId,
-          })
-          await appendToHistory(participant.id, {
-            at: new Date().toISOString(),
-            kind: "schedule_buttons",
-            status: "sent",
-            messageId: sendResult.messageId,
-          })
-          await assertSet(participant.id, {
-            whatsapp_delivery_status: "sent",
-            whatsapp_message_id: sendResult.messageId,
-          })
-        }
-        break
-      }
-
-      case 'needs_review': {
-        // Mark for HR review, but still let the candidate schedule the call.
-        // HR review runs alongside — the candidate isn't blocked from an intro call.
-        await supabaseAdmin
-          .from("phone_screening_participants")
-          .update({ status: "needs_review", updated_at: new Date().toISOString() })
-          .eq("id", participant.id)
-
-        const { getWhatsAppService } = await import('@/lib/whatsapp')
-        const sendResult = await getWhatsAppService().sendInteractiveButtons({
-          phoneNumber,
-          body: "Thanks for sharing your details! To take this forward, Ayush AIR needs a quick 5-10 minute call to understand your background. When should Ayush AIR call you?",
-          footer: "Reply 'call now' or pick a slot",
-          buttons: [
-            { id: "call_now", title: "Call Now" },
-            { id: "in_10_min", title: "In 10 min" },
-            { id: "in_30_min", title: "In 30 min" },
-          ],
-        })
-
-        if (!sendResult.success) {
-          logger.warn("Failed to send schedule buttons after needs_review", {
-            participantId: participant.id,
-            error: sendResult.error,
-          })
-          await appendToHistory(participant.id, {
-            at: new Date().toISOString(),
-            kind: "schedule_buttons",
-            status: "failed",
-            error: sendResult.error,
-          })
-        } else {
-          logger.info("Schedule buttons sent after needs_review", {
-            participantId: participant.id,
-            messageId: sendResult.messageId,
-          })
-          await appendToHistory(participant.id, {
-            at: new Date().toISOString(),
-            kind: "schedule_buttons",
-            status: "sent",
-            messageId: sendResult.messageId,
-          })
-          await assertSet(participant.id, {
-            whatsapp_delivery_status: "sent",
-            whatsapp_message_id: sendResult.messageId,
-          })
-        }
-        break
-      }
-
-      case 'filtered_out': {
-        // Inform candidate they don't match
-        await supabaseAdmin
-          .from("phone_screening_participants")
-          .update({ status: "filtered_out", updated_at: new Date().toISOString() })
-          .eq("id", participant.id)
-
-        await sendSessionMessage(phoneNumber, "Thank you for your interest! Based on the details you shared, this role may not be the best match for your profile at this time. We'll keep your details on file for future opportunities.")
-        break
-      }
-    }
+    await finalizeCollectedInfo(participant, mergedInfoData, "collect_all", messageBody)
 
   } catch (error: any) {
     logger.error("Error handling collect_all reply", { 
