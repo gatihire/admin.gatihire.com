@@ -44,14 +44,19 @@ function CompleteBadge() {
 
 export function CollectedInfoView({
   infoData,
+  fallback,
   className,
   compact,
 }: {
   infoData: Record<string, unknown> | null | undefined
+  /** Candidate-row values (total_experience, location, reason_for_switching,
+   *  etc.) shown when the participant hasn't been asked on WhatsApp yet — so
+   *  portal applicants never display "—" for data we already know. */
+  fallback?: Record<string, unknown> | null | undefined
   className?: string
   compact?: boolean
 }) {
-  const data = infoData || {}
+  const data = { ...(fallback || {}), ...(infoData || {}) }
   const filledCount = COLLECTED_INFO_FIELDS.filter((f) => {
     const v = data[f.key]
     return v !== null && v !== undefined && v !== "" && String(v).trim() !== ""

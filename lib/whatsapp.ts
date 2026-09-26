@@ -135,11 +135,48 @@ export class WhatsAppService {
         const messageId = result.messages[0].id
         logger.info(`WhatsApp message sent successfully via Meta`, { messageId, destination })
         return { success: true, messageId }
-      } else {
-        const error = result.error?.message || "Unknown error"
-        logger.error("Failed to send WhatsApp via Meta", { destination, error, response: result })
-        return { success: false, error }
       }
+
+      // (#132001) "Template name does not exist in the translation" — the
+      // requested language code does not match the template's registered
+      // language (e.g. template is "en_US" but we asked for "en", or vice
+      // versa). Retry once with the alternate code instead of failing.
+      if (result?.error?.code === 132001) {
+        const requestedLanguage = message.languageCode || "en"
+        const altLanguage = requestedLanguage === "en_US" ? "en" : "en_US"
+        logger.warn("Template language mismatch, retrying with alternate language", {
+          destination,
+          template: message.templateName,
+          requestedLanguage,
+          altLanguage,
+        })
+        const retryPayload = {
+          ...payload,
+          template: { ...payload.template, language: { code: altLanguage } },
+        }
+        const retryResponse = await fetch(`${this.baseUrl}/${this.config.phoneNumberId}/messages`, {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${this.config.accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(retryPayload),
+        })
+        const retryResult = await retryResponse.json()
+        if (retryResponse.ok && retryResult.messages && retryResult.messages[0]) {
+          const messageId = retryResult.messages[0].id
+          logger.info(`WhatsApp message sent via Meta (alternate language)`, { messageId, destination })
+          return { success: true, messageId }
+        }
+        return {
+          success: false,
+          error: retryResult.error?.message || "Unknown error",
+        }
+      }
+
+      const error = result.error?.message || "Unknown error"
+      logger.error("Failed to send WhatsApp via Meta", { destination, error, response: result })
+      return { success: false, error }
     } catch (error: any) {
       logger.error("Error sending WhatsApp via Meta", { destination, error: error.message })
       return { success: false, error: error.message }
@@ -497,6 +534,7 @@ export class WhatsAppService {
 
     return this.sendTemplateMessage({
       to: params.phoneNumber,
+      languageCode: "en_US",
       templateName,
       components: [
         {

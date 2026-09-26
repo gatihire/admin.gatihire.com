@@ -1512,7 +1512,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                     {participant.screening_context?.preScreenResult && (
                       <PreScreenVerdict result={participant.screening_context.preScreenResult} />
                     )}
-                    <CollectedInfoView infoData={participant.info_data} compact />
+                    <CollectedInfoView infoData={participant.info_data} compact fallback={application.candidates} />
                   </div>
                 )}
               </div>
