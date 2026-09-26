@@ -10,7 +10,7 @@ import { getWhatsAppService } from "@/lib/whatsapp"
 import { generateJDQuestions } from "@/lib/jd-questions"
 import { buildAlreadyCollectedUserData } from "@/lib/prompt-user-data"
 import { scheduleOutreachFollowup, scheduleBolnaCall, outreachNudgeHours, outreachEscalateHours } from "@/lib/scheduled-call"
-import { type CandidateOrigin } from "@/lib/origin"
+import { type CandidateOrigin, deriveCandidateFlow } from "@/lib/origin"
 import { logger } from "@/lib/logger"
 
 /** Batch size for WhatsApp sends — delay between batches to avoid rate limits. */
@@ -27,6 +27,155 @@ export interface ScreeningCandidate {
   location?: string | null
   technical_skills?: unknown
   resume_text?: string | null
+  source?: string | null
+  current_ctc?: string | null
+  expected_ctc?: string | null
+  notice_period?: string | null
+}
+
+// Flow A (portal applicants) have CTC / expected / notice captured in the
+// talent-portal apply form, so their info_count is pre-seeded instead of asking
+// for the 7-field WhatsApp request.
+function seedAlreadyCollectedInfo(candidate: ScreeningCandidate): Record<string, unknown> {
+  const info: Record<string, unknown> = {}
+  if (candidate.current_ctc) info.current_ctc = String(candidate.current_ctc)
+  if (candidate.expected_ctc) info.expected_ctc = String(candidate.expected_ctc)
+  if (candidate.notice_period) info.notice_period = String(candidate.notice_period)
+  return info
+}
+
+type OutboundSendResult = { sent: boolean; error?: string; messageId?: string }
+
+function screeningContextFor(job: any, client: any, origin: string, extra?: Record<string, unknown>) {
+  return {
+    jobTitle: job.title,
+    clientName: job.client_name || client?.name || "",
+    origin,
+    salaryRange: formatSalaryRange(job),
+    mustHaveSkills: Array.isArray(job.skills_must_have) ? job.skills_must_have.join(", ") : job.skills_must_have || "",
+    experienceRange: `${job.experience_min_years ?? 0}-${job.experience_max_years ?? "any"}`,
+    location: job.city || "",
+    ...(extra || {}),
+  }
+}
+
+// Flow A: send the shortlist + schedule template (portal applicants only) and
+// mark the participant as already having their info (from the apply form).
+async function sendShortlistMessage(opts: {
+  candidate: ScreeningCandidate
+  job: any
+  client: any
+  origin: string
+  participantId?: string
+  campaignId: string
+  nudgeH: number
+  escalateH: number
+}): Promise<OutboundSendResult> {
+  const { candidate, job, client, origin, participantId, campaignId, nudgeH, escalateH } = opts
+  const whatsapp = getWhatsAppService()
+  const seededInfo = seedAlreadyCollectedInfo(candidate)
+  const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(
+    candidate, job, client, origin, participantId, seededInfo
+  )
+  const result = await whatsapp.sendShortlistSchedule({
+    phoneNumber: candidate.phone as string,
+    candidateName: candidate.name || "",
+    jobTitle: job.title || "",
+    companyName: job.client_name || client?.name || "",
+  })
+  if (!result.success) return { sent: false, error: result.error }
+  if (!participantId) return { sent: true, messageId: result.messageId }
+
+  const now = new Date().toISOString()
+  const history = [{
+    messageId: result.messageId || null,
+    template: "shortlist_call_schedule",
+    sentAt: now,
+    status: "sent",
+  }]
+  await supabaseAdmin
+    .from("phone_screening_participants")
+    .update({
+      status: "whatsapp_sent",
+      screening_mode: "collect_info_first",
+      info_step: "confirmed",
+      info_data: seededInfo,
+      info_confirmed: false,
+      whatsapp_message_id: result.messageId || null,
+      whatsapp_sent_at: now,
+      whatsapp_delivery_status: "sent",
+      whatsapp_outbound_template: "shortlist_call_schedule",
+      whatsapp_outbound_params: { jobTitle: job.title, location: job.city || "", salaryBudget: formatSalaryRange(job) },
+      whatsapp_history: history,
+      call_payload_json: userData,
+      generated_questions: generatedQuestions.join("\n"),
+      gemini_prompt_used: geminiPromptUsed,
+      screening_context: screeningContextFor(job, client, origin),
+      updated_at: now,
+    })
+    .eq("campaign_id", campaignId)
+    .eq("candidate_id", candidate.id)
+  await scheduleOutreachFollowup(participantId, "nudge", nudgeH * 60 * 60)
+  await scheduleOutreachFollowup(participantId, "escalate", escalateH * 60 * 60)
+  return { sent: true, messageId: result.messageId }
+}
+
+// Flow B (external resumes) + Flow C outbound interested step: send the single
+// 7-field detailed_info_request, then pre-screen and call from the reply.
+async function sendDetailedInfoMessage(opts: {
+  candidate: ScreeningCandidate
+  job: any
+  client: any
+  origin: string
+  participantId?: string
+  campaignId: string
+  nudgeH: number
+  escalateH: number
+  preScreenConfig: Record<string, number>
+}): Promise<OutboundSendResult> {
+  const { candidate, job, client, origin, participantId, campaignId, nudgeH, escalateH, preScreenConfig } = opts
+  const whatsapp = getWhatsAppService()
+  const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(candidate, job, client, origin, participantId)
+  const result = await whatsapp.sendDetailedInfoRequest({
+    phoneNumber: candidate.phone as string,
+    candidateName: candidate.name || "",
+    jobTitle: job.title || "",
+    companyName: job.client_name || client?.name || "",
+  })
+  if (!result.success) return { sent: false, error: result.error }
+  if (!participantId) return { sent: true, messageId: result.messageId }
+
+  const now = new Date().toISOString()
+  const history = [{
+    messageId: result.messageId || null,
+    template: "detailed_info_request",
+    sentAt: now,
+    status: "sent",
+  }]
+  await supabaseAdmin
+    .from("phone_screening_participants")
+    .update({
+      status: "info_requested",
+      screening_mode: "collect_info_first",
+      info_step: "collect_all",
+      info_data: {},
+      info_confirmed: false,
+      whatsapp_message_id: result.messageId || null,
+      whatsapp_sent_at: now,
+      whatsapp_delivery_status: "sent",
+      whatsapp_outbound_template: "detailed_info_request",
+      whatsapp_history: history,
+      call_payload_json: userData,
+      generated_questions: generatedQuestions.join("\n"),
+      gemini_prompt_used: geminiPromptUsed,
+      screening_context: screeningContextFor(job, client, origin, { preScreenConfig }),
+      updated_at: now,
+    })
+    .eq("campaign_id", campaignId)
+    .eq("candidate_id", candidate.id)
+  await scheduleOutreachFollowup(participantId, "nudge", nudgeH * 60 * 60)
+  await scheduleOutreachFollowup(participantId, "escalate", escalateH * 60 * 60)
+  return { sent: true, messageId: result.messageId }
 }
 
 const ROLE_CATEGORY_MAP: Record<string, string> = {
@@ -144,6 +293,8 @@ export interface OrchestrateScreeningInput {
   candidates: ScreeningCandidate[]
   originByCandidate: Map<string, CandidateOrigin>
   fallbackOrigin: CandidateOrigin
+  /** Application source per candidate (used to distinguish portal / external / outbound flows). */
+  sourceByCandidate?: Map<string, string>
   createdBy: string
   /** "call_now": place AI call immediately. */
   /** "quick_screen": WhatsApp outreach with buttons (Interested/Not Interested/Call Now). */
@@ -223,16 +374,20 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
 
   const participantRows = validCandidates.map((c) => {
     const origin = originByCandidate.get(c.id) || fallbackOrigin || "inbound"
+    const flow = deriveCandidateFlow(input.sourceByCandidate?.get(c.id), origin)
+    // Flow A (portal): info already captured in the apply form -> shortlist +
+    // schedule only, marked info as confirmed so no 7-field ask happens later.
+    const isPortal = flow === "portal"
     return {
       campaign_id: campaign.id,
       candidate_id: c.id,
       job_id: job.id,
-      status: isCollectInfoFirst ? "info_requested" : isQuickScreen ? "whatsapp_sent" : "calling",
+      status: isPortal ? "whatsapp_sent" : isCollectInfoFirst ? "info_requested" : isQuickScreen ? "whatsapp_sent" : "calling",
       origin,
-      info_step: isCollectInfoFirst ? "collect_all" : null,
-      info_data: isCollectInfoFirst ? {} : null,
-      info_confirmed: isCollectInfoFirst ? false : null,
-      screening_mode: callMode,
+      info_step: isPortal ? "confirmed" : isCollectInfoFirst ? "collect_all" : null,
+      info_data: isPortal ? seedAlreadyCollectedInfo(c) : isCollectInfoFirst ? {} : null,
+      info_confirmed: isPortal ? false : isCollectInfoFirst ? false : null,
+      screening_mode: isPortal ? "collect_info_first" : callMode,
     }
   })
 
@@ -260,6 +415,7 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
   for (let i = 0; i < validCandidates.length; i++) {
     const candidate = validCandidates[i]
     const origin = originByCandidate.get(candidate.id) || "outbound"
+    const flow = deriveCandidateFlow(input.sourceByCandidate?.get(candidate.id), origin)
     const participantId = participantByCandidate.get(candidate.id)
 
     // Batch delay: pause between batches to avoid WhatsApp rate limits
@@ -271,32 +427,68 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
     // ==================== QUICK SCREEN MODE ====================
     // WhatsApp outreach with buttons (Interested/Not Interested/Call Now)
     if (isQuickScreen) {
+      // Flow A (portal): shortlist + schedule. Info already in the apply form.
+      if (flow === "portal") {
+        const shortlist = await sendShortlistMessage({
+          candidate, job, client, origin, participantId,
+          campaignId: campaign.id, nudgeH, escalateH,
+        })
+        if (shortlist.sent) nudgeSent++
+        else {
+          await supabaseAdmin
+            .from("phone_screening_participants")
+            .update({
+              status: "needs_manual_followup",
+              needs_manual_followup: true,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("campaign_id", campaign.id)
+            .eq("candidate_id", candidate.id)
+          failed++
+          errors.push(`${candidate.name}: shortlist message failed (${shortlist.error})`)
+        }
+        continue
+      }
+
+      // Flow B (external resume): no form data -> 7-field WhatsApp ask.
+      if (flow === "external") {
+        const info = await sendDetailedInfoMessage({
+          candidate, job, client, origin, participantId,
+          campaignId: campaign.id, nudgeH, escalateH, preScreenConfig,
+        })
+        if (info.sent) nudgeSent++
+        else {
+          await supabaseAdmin
+            .from("phone_screening_participants")
+            .update({
+              status: "needs_manual_followup",
+              needs_manual_followup: true,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("campaign_id", campaign.id)
+            .eq("candidate_id", candidate.id)
+          failed++
+          errors.push(`${candidate.name}: detailed info request failed (${info.error})`)
+        }
+        continue
+      }
+
+      // Flow C (outbound): talent_outreach (MARKETING) - HR reaching out
       const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(candidate, job, client, origin, participantId)
       const whatsapp = getWhatsAppService()
-      
-      // Send appropriate template based on origin
-      // Outbound: talent_outreach (MARKETING) - HR reaching out to candidates
-      // Inbound: inbound_screening_invite (UTILITY) - Candidate applied via board-app
-      const outreachResult = origin === "inbound"
-        ? await whatsapp.sendInboundScreeningInvite({
-            phoneNumber: candidate.phone as string,
-            candidateName: candidate.name || "",
-            jobTitle: job.title || "",
-            companyName: job.client_name || client?.name || "",
-          })
-        : await whatsapp.sendTalentOutreach({
-            phoneNumber: candidate.phone as string,
-            candidateName: candidate.name || "",
-            jobTitle: job.title || "",
-            companyName: job.client_name || client?.name || "",
-            location: job.city || "",
-            salary: formatSalaryRange(job),
-          })
+      const outreachResult = await whatsapp.sendTalentOutreach({
+        phoneNumber: candidate.phone as string,
+        candidateName: candidate.name || "",
+        jobTitle: job.title || "",
+        companyName: job.client_name || client?.name || "",
+        location: job.city || "",
+        salary: formatSalaryRange(job),
+      })
 
       if (outreachResult.success) {
         const history = [{
           messageId: outreachResult.messageId || null,
-          template: origin === "inbound" ? "inbound_screening_invite" : "talent_outreach",
+          template: "talent_outreach",
           sentAt: new Date().toISOString(),
           status: "sent",
         }]
@@ -307,21 +499,13 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
             whatsapp_message_id: outreachResult.messageId || null,
             whatsapp_sent_at: new Date().toISOString(),
             whatsapp_delivery_status: "sent",
-            whatsapp_outbound_template: origin === "inbound" ? "inbound_screening_invite" : "talent_outreach",
+            whatsapp_outbound_template: "talent_outreach",
             whatsapp_outbound_params: { jobTitle: job.title, location: job.city, salaryBudget: formatSalaryRange(job) },
             whatsapp_history: history,
             call_payload_json: userData,
             generated_questions: generatedQuestions.join("\n"),
             gemini_prompt_used: geminiPromptUsed,
-            screening_context: {
-              jobTitle: job.title,
-              clientName: job.client_name || client?.name || "",
-              origin,
-              salaryRange: formatSalaryRange(job),
-              mustHaveSkills: Array.isArray(job.skills_must_have) ? job.skills_must_have.join(", ") : job.skills_must_have || "",
-              experienceRange: `${job.experience_min_years ?? 0}-${job.experience_max_years ?? "any"}`,
-              location: job.city || "",
-            },
+            screening_context: screeningContextFor(job, client, origin),
             updated_at: new Date().toISOString(),
           })
           .eq("campaign_id", campaign.id)
@@ -352,60 +536,36 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
     // ==================== COLLECT INFO FIRST MODE ====================
     // Single detailed_info_request template, parse all fields, pre-screen, then call
     if (isCollectInfoFirst) {
-      const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(candidate, job, client, origin, participantId)
-      const whatsapp = getWhatsAppService()
-      
-      // Use detailed_info_request template (no buttons, free-text)
-      // Works for both inbound and outbound
-      const infoResult = await whatsapp.sendDetailedInfoRequest({
-        phoneNumber: candidate.phone as string,
-        candidateName: candidate.name || "",
-        jobTitle: job.title || "",
-        companyName: job.client_name || client?.name || "",
-      })
-
-      if (infoResult.success) {
-        const history = [{
-          messageId: infoResult.messageId || null,
-          template: "detailed_info_request",
-          sentAt: new Date().toISOString(),
-          status: "sent",
-        }]
-        await supabaseAdmin
-          .from("phone_screening_participants")
-          .update({
-            status: "info_requested",
-            screening_mode: "collect_info_first",
-            whatsapp_message_id: infoResult.messageId || null,
-            whatsapp_sent_at: new Date().toISOString(),
-            whatsapp_delivery_status: "sent",
-            whatsapp_outbound_template: "detailed_info_request",
-            whatsapp_history: history,
-            call_payload_json: userData,
-            generated_questions: generatedQuestions.join("\n"),
-            gemini_prompt_used: geminiPromptUsed,
-            screening_context: {
-              jobTitle: job.title,
-              clientName: job.client_name || client?.name || "",
-              origin,
-              salaryRange: formatSalaryRange(job),
-              mustHaveSkills: Array.isArray(job.skills_must_have) ? job.skills_must_have.join(", ") : job.skills_must_have || "",
-              experienceRange: `${job.experience_min_years ?? 0}-${job.experience_max_years ?? "any"}`,
-              location: job.city || "",
-              preScreenConfig: preScreenConfig,
-            },
-            updated_at: new Date().toISOString(),
-          })
-          .eq("campaign_id", campaign.id)
-          .eq("candidate_id", candidate.id)
-        nudgeSent++
-
-        // Schedule follow-up nudge/escalate for no-reply
-        if (participantId) {
-          await scheduleOutreachFollowup(participantId, "nudge", nudgeH * 60 * 60)
-          await scheduleOutreachFollowup(participantId, "escalate", escalateH * 60 * 60)
+      // Flow A (portal): shortlist + schedule (info already in the apply form).
+      if (flow === "portal") {
+        const shortlist = await sendShortlistMessage({
+          candidate, job, client, origin, participantId,
+          campaignId: campaign.id, nudgeH, escalateH,
+        })
+        if (shortlist.sent) nudgeSent++
+        else {
+          await supabaseAdmin
+            .from("phone_screening_participants")
+            .update({
+              status: "needs_manual_followup",
+              needs_manual_followup: true,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("campaign_id", campaign.id)
+            .eq("candidate_id", candidate.id)
+          failed++
+          errors.push(`${candidate.name}: shortlist message failed (${shortlist.error})`)
         }
-      } else {
+        continue
+      }
+
+      // Flow B external + Flow C outbound interested step: 7-field ask
+      const info = await sendDetailedInfoMessage({
+        candidate, job, client, origin, participantId,
+        campaignId: campaign.id, nudgeH, escalateH, preScreenConfig,
+      })
+      if (info.sent) nudgeSent++
+      else {
         await supabaseAdmin
           .from("phone_screening_participants")
           .update({
@@ -416,7 +576,7 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
           .eq("campaign_id", campaign.id)
           .eq("candidate_id", candidate.id)
         failed++
-        errors.push(`${candidate.name}: detailed info request failed (${infoResult.error})`)
+        errors.push(`${candidate.name}: detailed info request failed (${info.error})`)
       }
       continue
     }

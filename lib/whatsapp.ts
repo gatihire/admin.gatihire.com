@@ -478,6 +478,35 @@ export class WhatsAppService {
     })
   }
 
+  // Flow A: Portal applicant shortlist + schedule (shortlist_call_schedule).
+  // Talent-portal applicants already filled CTC / notice at apply time, so this
+  // is the only WhatsApp message they receive before the AI screening call —
+  // no 7-field info ask. Button replies (Call Now / In 10 min / In 30 min /
+  // Today Evening / Custom Time) schedule the call directly.
+  async sendShortlistSchedule(params: {
+    phoneNumber: string
+    candidateName: string
+    jobTitle: string
+    companyName: string
+  }): Promise<SendMessageResult> {
+    const templateName = process.env.WHATSAPP_TEMPLATE_SHORTLIST_SCHEDULE || "shortlist_call_schedule"
+
+    return this.sendTemplateMessage({
+      to: params.phoneNumber,
+      templateName,
+      components: [
+        {
+          type: "body",
+          parameters: [
+            { type: "text", text: params.candidateName },
+            { type: "text", text: params.jobTitle },
+            { type: "text", text: params.companyName }
+          ]
+        }
+      ]
+    })
+  }
+
   async sendInfoReceivedConfirm(params: {
     phoneNumber: string
     candidateName: string

@@ -746,13 +746,52 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
       }
 
       case 'needs_review': {
-        // Mark for HR review
+        // Mark for HR review, but still let the candidate schedule the call.
+        // HR review runs alongside — the candidate isn't blocked from an intro call.
         await supabaseAdmin
           .from("phone_screening_participants")
           .update({ status: "needs_review", updated_at: new Date().toISOString() })
           .eq("id", participant.id)
 
-        await sendSessionMessage(phoneNumber, "Thanks for sharing your details! Our team will review your profile and get back to you within 24 hours.")
+        const { getWhatsAppService } = await import('@/lib/whatsapp')
+        const sendResult = await getWhatsAppService().sendInteractiveButtons({
+          phoneNumber,
+          body: "Thanks for sharing your details! Our team is reviewing your profile.\n\nWe can still schedule the intro call - when should Ayush AIR call you?",
+          footer: "Reply 'call now' or pick a slot",
+          buttons: [
+            { id: "call_now", title: "Call Now" },
+            { id: "in_10_min", title: "In 10 min" },
+            { id: "in_30_min", title: "In 30 min" },
+          ],
+        })
+
+        if (!sendResult.success) {
+          logger.warn("Failed to send schedule buttons after needs_review", {
+            participantId: participant.id,
+            error: sendResult.error,
+          })
+          await appendToHistory(participant.id, {
+            at: new Date().toISOString(),
+            kind: "schedule_buttons",
+            status: "failed",
+            error: sendResult.error,
+          })
+        } else {
+          logger.info("Schedule buttons sent after needs_review", {
+            participantId: participant.id,
+            messageId: sendResult.messageId,
+          })
+          await appendToHistory(participant.id, {
+            at: new Date().toISOString(),
+            kind: "schedule_buttons",
+            status: "sent",
+            messageId: sendResult.messageId,
+          })
+          await assertSet(participant.id, {
+            whatsapp_delivery_status: "sent",
+            whatsapp_message_id: sendResult.messageId,
+          })
+        }
         break
       }
 

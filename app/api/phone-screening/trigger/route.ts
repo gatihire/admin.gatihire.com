@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
-import { deriveOrigin, type CandidateOrigin } from "@/lib/origin"
+import { deriveOrigin, deriveCandidateFlow, type CandidateOrigin } from "@/lib/origin"
 import { orchestrateScreening } from "@/lib/call-orchestrator"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { placeBolnaCall } from "@/lib/bolna"
@@ -33,7 +33,7 @@ interface TriggerRequest {
 //  - call_now           -> re-place the AI call using the stored call payload
 async function renudgeExistingParticipant(opts: {
   participantId: string
-  candidate: { id: string; name?: string | null; phone?: string | null }
+  candidate: { id: string; name?: string | null; phone?: string | null; source?: string | null }
   job: any
   client: any
   origin: CandidateOrigin
@@ -75,25 +75,33 @@ async function renudgeExistingParticipant(opts: {
     let msgResult: { success: boolean; messageId?: string; error?: string }
     let template: string
     let status: string
-    if (callMode === "quick_screen") {
-      template = origin === "inbound" ? "inbound_screening_invite" : "talent_outreach"
-      msgResult = origin === "inbound"
-        ? await whatsapp.sendInboundScreeningInvite({
-            phoneNumber: candidate.phone as string,
-            candidateName: candidate.name || "",
-            jobTitle: job.title || "",
-            companyName: job.client_name || client?.name || "",
-          })
-        : await whatsapp.sendTalentOutreach({
-            phoneNumber: candidate.phone as string,
-            candidateName: candidate.name || "",
-            jobTitle: job.title || "",
-            companyName: job.client_name || client?.name || "",
-            location: job.city || "",
-            salary: `${job.salary_min || "?"} - ${job.salary_max || "?"}`,
-          })
+    const flow = deriveCandidateFlow(candidate.source, origin)
+    const portalShortlist = flow === "portal"
+    const externalInfo = flow === "external"
+    if (callMode === "quick_screen" && flow === "outbound") {
+      // Flow C outbound: matched outreach
+      template = "talent_outreach"
+      msgResult = await whatsapp.sendTalentOutreach({
+        phoneNumber: candidate.phone as string,
+        candidateName: candidate.name || "",
+        jobTitle: job.title || "",
+        companyName: job.client_name || client?.name || "",
+        location: job.city || "",
+        salary: `${job.salary_min || "?"} - ${job.salary_max || "?"}`,
+      })
+      status = "whatsapp_sent"
+    } else if (portalShortlist) {
+      // Flow A portal: shortlist + schedule (info already in apply form)
+      template = "shortlist_call_schedule"
+      msgResult = await whatsapp.sendShortlistSchedule({
+        phoneNumber: candidate.phone as string,
+        candidateName: candidate.name || "",
+        jobTitle: job.title || "",
+        companyName: job.client_name || client?.name || "",
+      })
       status = "whatsapp_sent"
     } else {
+      // Flow B external + Flow C outbound (after interest): 7-field ask
       template = "detailed_info_request"
       msgResult = await whatsapp.sendDetailedInfoRequest({
         phoneNumber: candidate.phone as string,
@@ -133,7 +141,15 @@ async function renudgeExistingParticipant(opts: {
       updated_at: now,
     }
 
-    if (callMode !== "quick_screen") {
+    if (portalShortlist) {
+      // Flow A portal: keep the previously seeded info; just re-send the invite.
+      update.screening_mode = "collect_info_first"
+      update.info_step = "confirmed"
+      update.screening_context = {
+        ...((current as any)?.screening_context || {}),
+        renudgedAt: now,
+      }
+    } else if (callMode !== "quick_screen" || externalInfo) {
       // Reset any half-finished info-collection state so the next reply parses cleanly.
       update.screening_mode = "collect_info_first"
       update.info_step = "collect_all"
@@ -194,7 +210,7 @@ export async function POST(request: NextRequest) {
 
     const { data: candidates, error: candError } = await supabaseAdmin
       .from("candidates")
-      .select("id,name,phone,current_role,current_company,total_experience,location,technical_skills,resume_text")
+      .select("id,name,phone,current_role,current_company,total_experience,location,technical_skills,resume_text,source,current_ctc,expected_ctc,notice_period")
       .in("id", candidateIds)
 
     if (candError) {
@@ -214,6 +230,7 @@ export async function POST(request: NextRequest) {
 
     const originByCandidate = new Map<string, CandidateOrigin>()
     const appByCandidate = new Map<string, any>()
+    const sourceByCandidate = new Map<string, string>()
     for (const app of applications || []) {
       const a = app as any
       // Respect the application's own origin (inbound applicants stay inbound).
@@ -222,6 +239,16 @@ export async function POST(request: NextRequest) {
       }
       if (!appByCandidate.has(a.candidate_id)) {
         appByCandidate.set(a.candidate_id, a)
+      }
+      if (!sourceByCandidate.has(a.candidate_id)) {
+        sourceByCandidate.set(a.candidate_id, a.source || "applied")
+      }
+    }
+    // Fall back to the candidate's own source column for candidates without an application row.
+    for (const candidate of candidates || []) {
+      if (!sourceByCandidate.has(candidate.id)) {
+        const origin = originByCandidate.get(candidate.id) || deriveOrigin(candidate.source)
+        sourceByCandidate.set(candidate.id, (candidate as any).source || (origin === "outbound" ? "database" : "applied"))
       }
     }
 
@@ -382,6 +409,7 @@ export async function POST(request: NextRequest) {
       client,
       candidates: freshCandidates as any[],
       originByCandidate,
+      sourceByCandidate,
       fallbackOrigin,
       createdBy: ctx.authUser.id,
       callMode,
