@@ -253,7 +253,7 @@ async function handleStepByStepReply(participantId: string, replyText: string): 
           .from('phone_screening_participants')
           .update({
             info_data: mergedInfoData,
-            info_step: 'confirm',
+            info_step: 'confirmed',
             info_confirmed: false,
             updated_at: new Date().toISOString()
           })
@@ -314,7 +314,7 @@ async function handleStepByStepReply(participantId: string, replyText: string): 
       .from('phone_screening_participants')
       .update({
         info_data: { ...participant.info_data, [currentStepKey]: extraction.normalized_value },
-        info_step: nextStep || 'confirm',
+        info_step: nextStep || 'confirmed',
         info_confirmed: false,
         updated_at: new Date().toISOString()
       })

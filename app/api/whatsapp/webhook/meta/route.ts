@@ -11,7 +11,7 @@ import {
   extractAllFieldsFromReply,
   sendSessionMessage
 } from "@/lib/info-collector-v2"
-import { evaluatePreScreenWithAI } from "@/lib/pre-screen"
+import { evaluatePreScreenWithAI, buildCandidateInfoFromCollected } from "@/lib/pre-screen"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { scheduleBolnaCall } from "@/lib/scheduled-call"
 import { classifyIntent } from "@/lib/ai-intent-classifier"
@@ -219,6 +219,26 @@ async function handleIncomingMessage(message: any, contact: any) {
     infoStep: participant.info_step,
     infoConfirmed: participant.info_confirmed
   })
+  
+  // Idempotency: Meta redelivers webhook events on retries/timeouts. Skip any
+  // message id we already processed so a candidate is never acked, parsed, or
+  // re-asked more than once per inbound message.
+  const msgKey = String(message.id || "")
+  const seen = (participant.screening_context?.processedMessages || {}) as Record<string, string>
+  if (msgKey && seen[msgKey]) {
+    logger.info("Duplicate WhatsApp message, skipping", { participantId: participant.id, messageId: message.id })
+    return
+  }
+  if (msgKey) {
+    participant.screening_context = {
+      ...(participant.screening_context || {}),
+      processedMessages: { ...seen, [msgKey]: new Date().toISOString() },
+    }
+    await supabaseAdmin
+      .from("phone_screening_participants")
+      .update({ screening_context: participant.screening_context, updated_at: new Date().toISOString() })
+      .eq("id", participant.id)
+  }
   
   // Handle different message types
   if (messageType === "interactive") {
@@ -592,9 +612,6 @@ async function assertSet(participantId: string, fields: Record<string, any>) {
 }
 
 async function handleCollectAllReply(participant: any, messageBody: string) {
-  const candidateName = participant.candidates?.name || 'Candidate'
-  const jobTitle = participant.jobs?.title || ''
-  const companyName = participant.jobs?.client_name || ''
   const phoneNumber = participant.candidates?.phone
 
   try {
@@ -634,8 +651,14 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
       maxNoticePeriodDays: 120,
     }
 
-    // Run AI pre-screen evaluation
-    const preScreenResult = await evaluatePreScreenWithAI(mergedInfoData, jobRequirements, preScreenConfig)
+    // Run AI pre-screen evaluation on the normalized numeric CandidateInfo
+    // (extracted strings like "8 LPA"/"5 years" never satisfied the numeric
+    // checks, so every candidate used to sail through as "proceed").
+    const preScreenResult = await evaluatePreScreenWithAI(
+      buildCandidateInfoFromCollected(mergedInfoData),
+      jobRequirements,
+      preScreenConfig
+    )
 
     logger.info("Pre-screen evaluation result", { 
       participantId: participant.id, 
@@ -650,7 +673,10 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
       .from("phone_screening_participants")
       .update({
         info_data: mergedInfoData,
-        info_step: 'confirm',
+        // 'confirmed' is a sentinel that isInInfoFlow explicitly excludes (it
+        // excludes 'confirmed' and 'collect_all', NOT 'confirm'). The old
+        // 'confirm' value left participants stuck in the step-by-step re-ask.
+        info_step: 'confirmed',
         info_confirmed: false,
         whatsapp_reply_text: messageBody.slice(0, 500),
         whatsapp_reply_at: now,
@@ -723,7 +749,7 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
         // Mark for HR review
         await supabaseAdmin
           .from("phone_screening_participants")
-          .update({ status: "pre_screen_review", updated_at: new Date().toISOString() })
+          .update({ status: "needs_review", updated_at: new Date().toISOString() })
           .eq("id", participant.id)
 
         await sendSessionMessage(phoneNumber, "Thanks for sharing your details! Our team will review your profile and get back to you within 24 hours.")
@@ -734,7 +760,7 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
         // Inform candidate they don't match
         await supabaseAdmin
           .from("phone_screening_participants")
-          .update({ status: "pre_screen_filtered_out", updated_at: new Date().toISOString() })
+          .update({ status: "filtered_out", updated_at: new Date().toISOString() })
           .eq("id", participant.id)
 
         await sendSessionMessage(phoneNumber, "Thank you for your interest! Based on the details you shared, this role may not be the best match for your profile at this time. We'll keep your details on file for future opportunities.")
@@ -748,25 +774,53 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
       error: error.message 
     })
 
-    // Fallback: ask for details step-by-step
-    await supabaseAdmin
-      .from("phone_screening_participants")
-      .update({ info_step: 'current_ctc', updated_at: new Date().toISOString() })
-      .eq("id", participant.id)
+    // Never reset to step-by-step + re-send the info-request template here
+    // (that was the "asks again and again" loop when the status write failed
+    // or extraction threw). Keep collect_all, ask once for a re-formatted
+    // reply, and escalate to HR follow-up after repeated failures.
+    const ctx = participant.screening_context || {}
+    const failCount = Number(ctx.collect_fail_count || 0) + 1
 
-    const { sendFirstQuestion } = await import('@/lib/info-collector-v2')
-    const refreshed = await supabaseAdmin
-      .from('phone_screening_participants')
-      .select('*')
-      .eq('id', participant.id)
-      .single()
+    if (failCount >= 2) {
+      await supabaseAdmin
+        .from("phone_screening_participants")
+        .update({
+          info_step: 'confirmed',
+          status: "needs_manual_followup",
+          screening_context: {
+            ...ctx,
+            collect_fail_count: failCount,
+            collect_error: String(error.message || error),
+          },
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", participant.id)
 
-    if (refreshed.data) {
-      await sendFirstQuestion(
-        refreshed.data,
-        jobTitle,
-        companyName
-      )
+      if (phoneNumber) {
+        await sendSessionMessage(phoneNumber, "Thanks for sharing your details! Our team will review them and reach out shortly.")
+      }
+    } else {
+      await supabaseAdmin
+        .from("phone_screening_participants")
+        .update({
+          info_step: 'collect_all',
+          screening_context: {
+            ...ctx,
+            collect_fail_count: failCount,
+            collect_error: String(error.message || error),
+          },
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", participant.id)
+
+      if (phoneNumber) {
+        await sendSessionMessage(
+          phoneNumber,
+          "🙏 Couldn't read all the details. Please share them in ONE reply like:\n\n" +
+            "Current CTC, Expected CTC, Total experience, Notice period, City, Willing to relocate (yes/no), Reason for switching\n\n" +
+            'Example: "8 LPA, 12 LPA, 5 years, 30 days, Mumbai, yes, better growth"'
+        )
+      }
     }
   }
 }

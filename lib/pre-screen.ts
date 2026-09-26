@@ -74,6 +74,27 @@ function parseDays(value: string | undefined): number | undefined {
   return isNaN(num) ? undefined : num
 }
 
+/**
+ * Build a typed CandidateInfo from the snake_case strings the WhatsApp info
+ * collector stores (extractors normalize values like "8 LPA", "30 days",
+ * "4 years", "yes"/"no"). evaluatePreScreenWithAI expects camelCase numbers,
+ * so without this mapping every check silently "skips" and the candidate is
+ * always passed through.
+ */
+export function buildCandidateInfoFromCollected(info: Record<string, any>): CandidateInfo {
+  return {
+    currentCtcLpa: typeof info.current_ctc === "string" ? parseLpa(info.current_ctc) : undefined,
+    expectedCtcLpa: typeof info.expected_ctc === "string" ? parseLpa(info.expected_ctc) : undefined,
+    totalExperienceYears: typeof info.total_experience === "string" ? parseYears(info.total_experience) : undefined,
+    noticePeriodDays: typeof info.notice_period === "string" ? parseDays(info.notice_period) : undefined,
+    preferredCity: typeof info.location === "string" && info.location ? info.location : undefined,
+    willingToRelocate:
+      info.willing_to_relocate === "yes" || info.willing_to_relocate === true || info.willing_to_relocate === "true",
+    switchingReason:
+      typeof info.reason_for_switching === "string" && info.reason_for_switching ? info.reason_for_switching : undefined,
+  }
+}
+
 function normalizeCity(city: string): string {
   return city
     .toLowerCase()
