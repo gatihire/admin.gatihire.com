@@ -756,7 +756,7 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
         const { getWhatsAppService } = await import('@/lib/whatsapp')
         const sendResult = await getWhatsAppService().sendInteractiveButtons({
           phoneNumber,
-          body: "Thanks for sharing your details! Our team is reviewing your profile.\n\nWe can still schedule the intro call - when should Ayush AIR call you?",
+          body: "Thanks for sharing your details! To take this forward, Ayush AIR needs a quick 5-10 minute call to understand your background. When should Ayush AIR call you?",
           footer: "Reply 'call now' or pick a slot",
           buttons: [
             { id: "call_now", title: "Call Now" },
