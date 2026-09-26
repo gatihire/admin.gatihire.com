@@ -381,6 +381,9 @@ export function PhoneScreeningCandidateSelector({
               WhatsApp collect
             </button>
           </div>
+          <p className="text-[11px] text-zinc-400 leading-tight max-w-[220px]">
+            For portal/inbound candidates the system auto-picks the message (shortlist or 7-field); this choice applies to outbound candidates only.
+          </p>
           <div className="flex items-center gap-2">
             <Button variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>
               Cancel

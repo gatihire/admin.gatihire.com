@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { deriveOrigin, deriveCandidateFlow, type CandidateOrigin } from "@/lib/origin"
-import { orchestrateScreening } from "@/lib/call-orchestrator"
+import { orchestrateScreening, systemDecidesMode } from "@/lib/call-orchestrator"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { placeBolnaCall } from "@/lib/bolna"
 import { logger } from "@/lib/logger"
@@ -42,9 +42,13 @@ async function renudgeExistingParticipant(opts: {
 }): Promise<{ ok: boolean; kind: "nudge" | "call"; error?: string }> {
   const { participantId, candidate, job, client, origin, callMode, now } = opts
   const whatsapp = getWhatsAppService()
+  // The SYSTEM decides the nudge type (see systemDecidesMode): portal -> shortlist,
+  // external -> 7-field, and only outbound candidates honor HR's call_now.
+  const flow = deriveCandidateFlow(candidate.source, origin)
+  const effMode = systemDecidesMode(callMode, flow)
 
   try {
-    if (callMode === "call_now") {
+    if (effMode === "call_now") {
       const { data: participant } = await supabaseAdmin
         .from("phone_screening_participants")
         .select("call_payload_json")
@@ -75,10 +79,8 @@ async function renudgeExistingParticipant(opts: {
     let msgResult: { success: boolean; messageId?: string; error?: string }
     let template: string
     let status: string
-    const flow = deriveCandidateFlow(candidate.source, origin)
     const portalShortlist = flow === "portal"
-    const externalInfo = flow === "external"
-    if (callMode === "quick_screen" && flow === "outbound") {
+    if (effMode === "quick_screen" && flow === "outbound") {
       // Flow C outbound: matched outreach
       template = "talent_outreach"
       msgResult = await whatsapp.sendTalentOutreach({
@@ -149,7 +151,7 @@ async function renudgeExistingParticipant(opts: {
         ...((current as any)?.screening_context || {}),
         renudgedAt: now,
       }
-    } else if (callMode !== "quick_screen" || externalInfo) {
+    } else if (effMode === "collect_info_first") {
       // Reset any half-finished info-collection state so the next reply parses cleanly.
       update.screening_mode = "collect_info_first"
       update.info_step = "collect_all"
@@ -164,7 +166,7 @@ async function renudgeExistingParticipant(opts: {
     await supabaseAdmin.from("phone_screening_participants").update(update).eq("id", participantId)
     return { ok: true, kind: "nudge" }
   } catch (err: any) {
-    return { ok: false, kind: callMode === "call_now" ? "call" : "nudge", error: err?.message || "Re-nudge failed" }
+    return { ok: false, kind: effMode === "call_now" ? "call" : "nudge", error: err?.message || "Re-nudge failed" }
   }
 }
 

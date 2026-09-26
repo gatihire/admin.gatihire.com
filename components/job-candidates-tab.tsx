@@ -1261,6 +1261,9 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
                     </button>
                   </div>
                 </div>
+                <p className="text-[11px] text-zinc-400 leading-tight">
+                  Note: the system auto-picks the nudge for inbound candidates — portal applicants get the shortlist + schedule message, external resumes get the 7-field info ask. This choice applies to outbound candidates only.
+                </p>
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>

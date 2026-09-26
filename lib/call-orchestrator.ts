@@ -287,6 +287,24 @@ async function buildCallUserData(
   return { userData, generatedQuestions: questions, geminiPromptUsed: promptUsed }
 }
 
+export type ScreeningCallMode = "call_now" | "quick_screen" | "collect_info_first"
+
+// Who decides the nudge type?
+// The SYSTEM decides for the inbound flows based on how the candidate entered:
+//   - Flow A (portal apply)   -> shortlist_call_schedule (info already in the apply form)
+//   - Flow B (external resume)-> 7-field detailed_info_request
+//   - Flow C (outbound)       -> HR's chosen mode wins (call_now / outreach / 7-field)
+// So "call_now" is honored ONLY for outbound candidates; an HR clicking Call Now
+// on a portal applicant or external resume still gets the WhatsApp-first flow.
+export function systemDecidesMode(
+  callMode: ScreeningCallMode | undefined,
+  flow: string
+): ScreeningCallMode {
+  if (flow === "portal") return "quick_screen"
+  if (flow === "external") return "collect_info_first"
+  return callMode || "call_now"
+}
+
 export interface OrchestrateScreeningInput {
   job: any
   client: any
@@ -328,8 +346,6 @@ export interface OrchestrateScreeningResult {
 export async function orchestrateScreening(input: OrchestrateScreeningInput): Promise<OrchestrateScreeningResult> {
   const { job, client, candidates, originByCandidate, fallbackOrigin, createdBy } = input
   const callMode: "call_now" | "quick_screen" | "collect_info_first" = input.callMode || "call_now"
-  const isQuickScreen = callMode === "quick_screen"
-  const isCollectInfoFirst = callMode === "collect_info_first"
 
   // Per-job campaign config (with sensible defaults)
   const nudgeH = input.campaignConfig?.nudgeHours ?? outreachNudgeHours()
@@ -375,19 +391,29 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
   const participantRows = validCandidates.map((c) => {
     const origin = originByCandidate.get(c.id) || fallbackOrigin || "inbound"
     const flow = deriveCandidateFlow(input.sourceByCandidate?.get(c.id), origin)
+    // System decides the nudge type per candidate (see systemDecidesMode) —
+    // HR's mode only matters for outbound candidates.
+    const mode = systemDecidesMode(callMode, flow)
     // Flow A (portal): info already captured in the apply form -> shortlist +
     // schedule only, marked info as confirmed so no 7-field ask happens later.
     const isPortal = flow === "portal"
+    const isCollect = mode === "collect_info_first"
     return {
       campaign_id: campaign.id,
       candidate_id: c.id,
       job_id: job.id,
-      status: isPortal ? "whatsapp_sent" : isCollectInfoFirst ? "info_requested" : isQuickScreen ? "whatsapp_sent" : "calling",
+      status: isPortal
+        ? "whatsapp_sent"
+        : isCollect
+          ? "info_requested"
+          : mode === "call_now"
+            ? "calling"
+            : "whatsapp_sent",
       origin,
-      info_step: isPortal ? "confirmed" : isCollectInfoFirst ? "collect_all" : null,
-      info_data: isPortal ? seedAlreadyCollectedInfo(c) : isCollectInfoFirst ? {} : null,
-      info_confirmed: isPortal ? false : isCollectInfoFirst ? false : null,
-      screening_mode: isPortal ? "collect_info_first" : callMode,
+      info_step: isPortal ? "confirmed" : isCollect ? "collect_all" : null,
+      info_data: isPortal ? seedAlreadyCollectedInfo(c) : isCollect ? {} : null,
+      info_confirmed: isPortal ? false : isCollect ? false : null,
+      screening_mode: mode,
     }
   })
 
@@ -417,6 +443,12 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
     const origin = originByCandidate.get(candidate.id) || "outbound"
     const flow = deriveCandidateFlow(input.sourceByCandidate?.get(candidate.id), origin)
     const participantId = participantByCandidate.get(candidate.id)
+
+    // THE SYSTEM decides the nudge type per candidate (see systemDecidesMode):
+    // portal -> shortlist, external -> 7-field, only outbound honors HR's mode.
+    const mode = systemDecidesMode(callMode, flow)
+    const isQuickScreen = mode === "quick_screen"
+    const isCollectInfoFirst = mode === "collect_info_first"
 
     // Batch delay: pause between batches to avoid WhatsApp rate limits
 if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
