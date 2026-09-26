@@ -31,16 +31,24 @@ export interface ScreeningCandidate {
   current_ctc?: string | null
   expected_ctc?: string | null
   notice_period?: string | null
+  reason_for_switching?: string | null
 }
 
-// Flow A (portal applicants) have CTC / expected / notice captured in the
-// talent-portal apply form, so their info_count is pre-seeded instead of asking
-// for the 7-field WhatsApp request.
+// Flow A (portal applicants) have compensation + profile details captured in the
+// talent-portal apply form / candidate profile, so their already_collected_*
+// fields are pre-seeded instead of asking for the 7-field WhatsApp request.
+// Only fields we genuinely know are set — anything unset stays "Not provided on
+// WhatsApp" in the call prompt and becomes a NEW-signal probe on the call.
 function seedAlreadyCollectedInfo(candidate: ScreeningCandidate): Record<string, unknown> {
   const info: Record<string, unknown> = {}
   if (candidate.current_ctc) info.current_ctc = String(candidate.current_ctc)
   if (candidate.expected_ctc) info.expected_ctc = String(candidate.expected_ctc)
   if (candidate.notice_period) info.notice_period = String(candidate.notice_period)
+  if (candidate.total_experience != null && String(candidate.total_experience) !== "") {
+    info.total_experience = String(candidate.total_experience)
+  }
+  if (candidate.location) info.location = String(candidate.location)
+  if (candidate.reason_for_switching) info.reason_for_switching = String(candidate.reason_for_switching)
   return info
 }
 

@@ -21,6 +21,9 @@ The final nudge message for 7-field collection is a **WhatsApp Flows form**
 (native in-chat form with individual input fields + placeholders), replacing the
 older "reply all 7 values in one text message" template.
 
+> **See also** `docs/call-prompt-per-user.md` — how the Ayush AI call prompt is
+> personalized per user with the 07 already-collected fields.
+
 ---
 
 ## 2. The Three Flows

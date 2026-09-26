@@ -217,7 +217,7 @@ export async function POST(request: NextRequest) {
 
     const { data: candidates, error: candError } = await supabaseAdmin
       .from("candidates")
-      .select("id,name,phone,current_role,current_company,total_experience,location,technical_skills,resume_text,source,current_ctc,expected_ctc,notice_period")
+      .select("id,name,phone,current_role,current_company,total_experience,location,technical_skills,resume_text,source,current_ctc,expected_ctc,notice_period,reason_for_switching")
       .in("id", candidateIds)
 
     if (candError) {
