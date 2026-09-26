@@ -35,6 +35,9 @@ interface SendMessageResult {
   success: boolean
   messageId?: string
   error?: string
+  /** Meta Graph error code, populated when a send fails (e.g. 132001 language
+   *  mismatch, 131042 template not yet approved). */
+  errorCode?: string | number
 }
 
 export class WhatsAppService {
@@ -176,7 +179,7 @@ export class WhatsAppService {
 
       const error = result.error?.message || "Unknown error"
       logger.error("Failed to send WhatsApp via Meta", { destination, error, response: result })
-      return { success: false, error }
+      return { success: false, error, errorCode: result.error?.code }
     } catch (error: any) {
       logger.error("Error sending WhatsApp via Meta", { destination, error: error.message })
       return { success: false, error: error.message }
@@ -522,31 +525,60 @@ export class WhatsAppService {
   // Flow A: Portal applicant shortlist + schedule (shortlist_call_schedule).
   // Talent-portal applicants already filled CTC / notice at apply time, so this
   // is the only WhatsApp message they receive before the AI screening call —
-  // no 7-field info ask. Button replies (Call Now / In 10 min / In 30 min /
-  // Today Evening / Custom Time) schedule the call directly.
+  // no 7-field info ask. Button replies (Call Now / In 10 min / In 30 min) schedule
+  // the call directly. Tries the latest approved-name templates first, falling back
+  // on template-level Graph errors (not yet approved / not found in translation) so
+  // a freshly created _v2 can roll out without downtime and without a new deploy.
   async sendShortlistSchedule(params: {
     phoneNumber: string
     candidateName: string
     jobTitle: string
     companyName: string
   }): Promise<SendMessageResult> {
-    const templateName = process.env.WHATSAPP_TEMPLATE_SHORTLIST_SCHEDULE || "shortlist_call_schedule"
+    const preferred = (process.env.WHATSAPP_TEMPLATE_SHORTLIST_SCHEDULE || "").trim()
+    const templateNames = [
+      preferred,
+      "shortlist_call_schedule_v2",
+      "shortlist_call_schedule",
+    ].filter((t) => !!t)
 
-    return this.sendTemplateMessage({
-      to: params.phoneNumber,
-      languageCode: "en_US",
-      templateName,
-      components: [
-        {
-          type: "body",
-          parameters: [
-            { type: "text", text: params.candidateName },
-            { type: "text", text: params.jobTitle },
-            { type: "text", text: params.companyName }
-          ]
-        }
+    let lastResult: SendMessageResult | null = null
+    for (const templateName of templateNames) {
+      const attempts = [
+        { languageCode: "en_US" },
+        { languageCode: "en" },
       ]
-    })
+      for (const a of attempts) {
+        lastResult = await this.sendTemplateMessage({
+          to: params.phoneNumber,
+          languageCode: a.languageCode,
+          templateName,
+          components: [
+            {
+              type: "body",
+              parameters: [
+                { type: "text", text: params.candidateName },
+                { type: "text", text: params.jobTitle },
+                { type: "text", text: params.companyName }
+              ]
+            }
+          ]
+        })
+        if (lastResult.success) return lastResult
+      }
+      // Abort unless the failure is a template-level problem worth switching
+      // names for (unapproved template, missing translation, missing text).
+      const code = Number((lastResult || {}).errorCode || 0)
+      const retryable = [
+        131042, // Message template in non-approved state
+        131047, // Template paused / not ready
+        132000, // Missing template text
+        132001, // Template name does not exist in the translation
+      ].includes(code)
+      if (!retryable) break
+    }
+
+    return lastResult || { success: false, error: "Failed to send shortlist schedule" }
   }
 
   async sendInfoReceivedConfirm(params: {
