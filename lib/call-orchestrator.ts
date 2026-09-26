@@ -31,6 +31,7 @@ export interface ScreeningCandidate {
   current_ctc?: string | null
   expected_ctc?: string | null
   notice_period?: string | null
+  willing_to_relocate?: string | null
   reason_for_switching?: string | null
 }
 
@@ -49,6 +50,9 @@ function seedAlreadyCollectedInfo(candidate: ScreeningCandidate): Record<string,
   }
   if (candidate.location) info.location = String(candidate.location)
   if (candidate.reason_for_switching) info.reason_for_switching = String(candidate.reason_for_switching)
+  if (candidate.willing_to_relocate === "yes" || candidate.willing_to_relocate === "no") {
+    info.willing_to_relocate = candidate.willing_to_relocate === "yes" ? "Yes" : "No"
+  }
   return info
 }
 
