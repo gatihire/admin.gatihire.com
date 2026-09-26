@@ -183,6 +183,15 @@ export class SupabaseCandidateService {
     try {
       if (!query.trim()) return [];
 
+      // Shared keyword extraction so the company pass can reuse the same terms.
+      const terms = query
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .map((t) => t.trim())
+        .filter((t) => t.length >= 3)
+        .slice(0, 8)
+
       // Format query for websearch_to_tsquery or plainto_tsquery
       // "websearch" handles quotes and +/- better
       const filters = await this.getInternalUserFilters()
@@ -206,16 +215,6 @@ export class SupabaseCandidateService {
       }
 
       if (!rows || rows.length === 0) {
-        const terms = query
-          .toLowerCase()
-          .replace(/[^a-z0-9\s]/g, ' ')
-          .split(/\s+/)
-          .map((t) => t.trim())
-          .filter((t) => t.length >= 3)
-          .slice(0, 8)
-
-        if (!terms.length) return []
-
         const parts: string[] = []
         for (const t of terms) {
           const like = `%${t}%`
@@ -227,20 +226,86 @@ export class SupabaseCandidateService {
           parts.push(`resume_text.ilike.${like}`)
         }
 
-        let fallbackBuilder: any = supabaseAdmin.from('candidates').select('*').or(parts.join(',')).limit(limit)
-        fallbackBuilder = this.applyInternalUserExclusions(fallbackBuilder, filters)
-        const { data: fallbackRows, error: fallbackError } = await fallbackBuilder
-        if (fallbackError) {
-          console.error('Fallback ilike search failed:', fallbackError)
-          return []
+        if (parts.length) {
+          let fallbackBuilder: any = supabaseAdmin.from('candidates').select('*').or(parts.join(',')).limit(limit)
+          fallbackBuilder = this.applyInternalUserExclusions(fallbackBuilder, filters)
+          const { data: fallbackRows, error: fallbackError } = await fallbackBuilder
+          if (fallbackError) {
+            console.error('Fallback ilike search failed:', fallbackError)
+          } else {
+            rows = fallbackRows
+          }
         }
-        rows = fallbackRows
       }
 
-      const candidates = (rows || []).map((row: CandidateRow) => this.mapRowToCandidate(row));
-      
+      // Company / institution pass (always runs, independent of the vector search).
+      // search_vector only indexes current_company + resume_text, so past
+      // employers in work_experience.company and school/institution would
+      // otherwise never surface for company-based keyword searches.
+      let companyLinkedRows: any[] = []
+      if (terms.length) {
+        const workOr = terms.map((t) => `company.ilike.%${t}%`).join(',')
+        const eduOr = terms.map((t) => `institution.ilike.%${t}%`).join(',')
+        const companyOr = terms.map((t) => `current_company.ilike.%${t}%`).join(',')
+        const [workRes, eduRes, companyRes] = await Promise.all([
+          supabaseAdmin.from('work_experience').select('candidate_id').or(workOr),
+          supabaseAdmin.from('education').select('candidate_id').or(eduOr),
+          supabaseAdmin.from('candidates').select('*').or(companyOr).limit(limit),
+        ])
+
+        if (workRes.error) console.warn('Company pass (work_experience) failed:', workRes.error)
+        if (eduRes.error) console.warn('Company pass (education) failed:', eduRes.error)
+
+        const linkedIds: string[] = Array.from(
+          new Set(
+            [
+              ...(workRes.data || []).map((r: any) => r?.candidate_id).filter(Boolean),
+              ...(eduRes.data || []).map((r: any) => r?.candidate_id).filter(Boolean),
+            ]
+          )
+        )
+
+        const rankedIds = new Set((rows || []).map((r: any) => r?.id))
+        const directCompanyRows = (companyRes.error ? [] : (companyRes.data || [])) || []
+        for (const r of directCompanyRows) {
+          if (r?.id && !rankedIds.has(r.id)) {
+            companyLinkedRows.push(r)
+            rankedIds.add(r.id)
+          }
+        }
+
+        if (linkedIds.length) {
+          const missing = linkedIds.filter((id: string) => !rankedIds.has(id))
+          for (let i = 0; i < missing.length; i += 300) {
+            let idBuilder: any = supabaseAdmin
+              .from('candidates')
+              .select('*')
+              .in('id', missing.slice(i, i + 300))
+              .limit(limit)
+            idBuilder = this.applyInternalUserExclusions(idBuilder, filters)
+            const { data: matched, error: matchedError } = await idBuilder
+            if (matchedError) {
+              console.warn('Company pass (fetch linked candidates) failed:', matchedError)
+              continue
+            }
+            for (const m of matched || []) {
+              if (!rankedIds.has(m.id)) {
+                companyLinkedRows.push(m)
+                rankedIds.add(m.id)
+              }
+            }
+          }
+        }
+      }
+
+      // Keep the ranked vector pool first, but never drop company/institution
+      // matches — that's the whole point of this pass (search_vector misses them).
+      const allRows = [...(rows || []), ...companyLinkedRows]
+
+      const candidates = allRows.map((row: CandidateRow) => this.mapRowToCandidate(row));
+
       const candidateIds = includeDetails
-        ? candidates.map((c: ComprehensiveCandidateData) => c.id).filter((id: string): id is string => !!id)
+        ? candidates.map((c: ComprehensiveCandidateData) => c.id).filter((id): id is string => !!id)
         : []
       if (candidateIds.length > 0) {
          try {
