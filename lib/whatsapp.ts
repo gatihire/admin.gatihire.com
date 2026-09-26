@@ -266,7 +266,7 @@ export class WhatsAppService {
     jobTitle: string
     companyName: string
   }): Promise<SendMessageResult> {
-    const templateName = process.env.WHATSAPP_TEMPLATE_SCREENING_INVITE || "screening_invite"
+    const templateName = process.env.WHATSAPP_TEMPLATE_SCREENING_INVITE || "screening_invite_v2"
     
     return this.sendTemplateMessage({
       to: params.phoneNumber,
