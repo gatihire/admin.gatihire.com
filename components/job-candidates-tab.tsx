@@ -966,12 +966,12 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
                         disabled={callingStarted || selectedCandidateIds.length === 0}
                       >
                         {callingStarted ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MessageCircle className="h-3.5 w-3.5" />}
-                        WhatsApp Collect Info
+                        WhatsApp First
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent className="max-w-xs">
-                      <p className="font-semibold">WhatsApp Collect Info &amp; Schedule</p>
-                      <p className="text-xs opacity-80">Send the info-request template. Candidates reply with CTC, notice period, etc. in one message, get pre-screened, then pick a call slot.</p>
+                      <p className="font-semibold">WhatsApp First (auto)</p>
+                      <p className="text-xs opacity-80">The system auto-picks the message by candidate flow: portal applicants → shortlist + schedule, external resumes → 7-field info ask, outbound → outreach.</p>
                     </TooltipContent>
                   </Tooltip>
 
@@ -1249,20 +1249,20 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
                       type="button" disabled={callingStarted} onClick={() => setBulkNudgeMode("collect_info_first")}
                       className={`px-3 py-2.5 text-left text-xs transition-all ${bulkNudgeMode === "collect_info_first" ? "bg-teal-50 text-teal-800 ring-1 ring-inset ring-teal-300" : "text-zinc-500 hover:bg-zinc-50"}`}
                     >
-                      <span className="block font-bold text-xs uppercase tracking-wide">WhatsApp Collect Info &amp; Schedule</span>
-                      <span className="text-xs opacity-80 mt-0.5 block">Send info template, pre-screen replies, then call</span>
+                      <span className="block font-bold text-xs uppercase tracking-wide">WhatsApp First</span>
+                      <span className="text-xs opacity-80 mt-0.5 block">System auto-picks per flow: portal → shortlist, external → 7-field, outbound → outreach</span>
                     </button>
                     <button
                       type="button" disabled={callingStarted} onClick={() => setBulkNudgeMode("call_now")}
                       className={`px-3 py-2.5 text-left text-xs transition-all ${bulkNudgeMode === "call_now" ? "bg-emerald-50 text-emerald-800 ring-1 ring-inset ring-emerald-300" : "text-zinc-500 hover:bg-zinc-50"}`}
                     >
                       <span className="block font-bold text-xs uppercase tracking-wide">Call Now</span>
-                      <span className="text-xs opacity-80 mt-0.5 block">Bolna AI calls immediately, no WhatsApp</span>
+                      <span className="text-xs opacity-80 mt-0.5 block">Outbound only — Bolna AI calls immediately, no WhatsApp</span>
                     </button>
                   </div>
                 </div>
                 <p className="text-[11px] text-zinc-400 leading-tight">
-                  Note: the system auto-picks the nudge for inbound candidates — portal applicants get the shortlist + schedule message, external resumes get the 7-field info ask. This choice applies to outbound candidates only.
+                  For inbound candidates the system auto-picks the message (shortlist for portal applicants, 7-field for external resumes) regardless of the selection above; only outbound candidates honor it.
                 </p>
               </AlertDialogDescription>
             </AlertDialogHeader>
@@ -1642,12 +1642,12 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-56">
                   <DropdownMenuItem onClick={() => { setConfirmCallMode("collect_info_first"); setConfirmCallOpen(true) }} className="flex flex-col items-start gap-0.5 py-2">
-                    <span className="flex items-center gap-2 font-semibold text-xs"><MessageCircle className="h-3.5 w-3.5 text-teal-500" /> WhatsApp Collect Info &amp; Schedule</span>
-                    <span className="text-[11px] text-zinc-400 leading-snug">Send info request, pre-screen reply, then call.</span>
+                    <span className="flex items-center gap-2 font-semibold text-xs"><MessageCircle className="h-3.5 w-3.5 text-teal-500" /> WhatsApp First</span>
+                    <span className="text-[11px] text-zinc-400 leading-snug">System auto-picks: shortlist (portal) / 7-field ask (external) / outreach (outbound).</span>
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={() => { setConfirmCallMode("call_now"); setConfirmCallOpen(true) }} className="flex flex-col items-start gap-0.5 py-2">
                     <span className="flex items-center gap-2 font-semibold text-xs"><PhoneCall className="h-3.5 w-3.5 text-emerald-500" /> Call Now</span>
-                    <span className="text-[11px] text-zinc-400 leading-snug">Skip WhatsApp. Bolna AI calls immediately.</span>
+                    <span className="text-[11px] text-zinc-400 leading-snug">Outbound only. Skip WhatsApp, Bolna AI calls immediately.</span>
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
@@ -1847,17 +1847,17 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
       <AlertDialog open={confirmCallOpen} onOpenChange={setConfirmCallOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{confirmCallMode === "call_now" ? "Start AI call?" : "Collect candidate info?"}</AlertDialogTitle>
+            <AlertDialogTitle>{confirmCallMode === "call_now" ? "Start AI call?" : "WhatsApp first?"}</AlertDialogTitle>
             <AlertDialogDescription>
               {confirmCallMode === "call_now"
-                ? `Bolna will directly call ${c.name}. The AI agent will screen them for this role.`
-                : `Send the info-request template to ${c.name}. They reply with CTC, experience, notice period, relocation & reason for switching. We pre-screen before scheduling the AI call.`}
+                ? `Bolna will directly call ${c.name}. The AI agent will screen them for this role. (Applies only if this is an outbound candidate.)`
+                : `The system sends the right WhatsApp message for ${c.name} based on how they joined: portal applicants get the shortlist + schedule invite, external resumes get the 7-field info ask, outbound candidates get outreach.`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={() => { setConfirmCallOpen(false); sendWhatsAppNudge(confirmCallMode) }}>
-              {confirmCallMode === "call_now" ? "Call Now" : "Send Info Request"}
+              {confirmCallMode === "call_now" ? "Call Now" : "Send WhatsApp"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
