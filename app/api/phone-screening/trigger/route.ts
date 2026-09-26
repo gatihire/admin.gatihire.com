@@ -3,6 +3,8 @@ import { supabaseAdmin } from "@/lib/supabase"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { deriveOrigin, type CandidateOrigin } from "@/lib/origin"
 import { orchestrateScreening } from "@/lib/call-orchestrator"
+import { getWhatsAppService } from "@/lib/whatsapp"
+import { placeBolnaCall } from "@/lib/bolna"
 import { logger } from "@/lib/logger"
 import { logCandidateActivityBatch } from "@/lib/activity-logger"
 
@@ -19,6 +21,134 @@ interface TriggerRequest {
     nudgeHours?: number
     escalateHours?: number
     maxCallAttempts?: number
+  }
+}
+
+// Re-nudge an already-active participant (the HR clicked Nudge again).
+// Previously dedup made this a silent no-op that returned nudgeSent: 0 without
+// sending anything, so an HR who re-nudged got silence. Now we actually send
+// the appropriate follow-up for the current call mode:
+//  - collect_info_first -> re-ask the info request (reset any half-parsed state)
+//  - quick_screen       -> re-send the outreach / screening invite
+//  - call_now           -> re-place the AI call using the stored call payload
+async function renudgeExistingParticipant(opts: {
+  participantId: string
+  candidate: { id: string; name?: string | null; phone?: string | null }
+  job: any
+  client: any
+  origin: CandidateOrigin
+  callMode?: TriggerRequest["callMode"]
+  now: string
+}): Promise<{ ok: boolean; kind: "nudge" | "call"; error?: string }> {
+  const { participantId, candidate, job, client, origin, callMode, now } = opts
+  const whatsapp = getWhatsAppService()
+
+  try {
+    if (callMode === "call_now") {
+      const { data: participant } = await supabaseAdmin
+        .from("phone_screening_participants")
+        .select("call_payload_json")
+        .eq("id", participantId)
+        .maybeSingle()
+      const userData = (participant as any)?.call_payload_json
+      if (!userData || !candidate.phone) {
+        return { ok: false, kind: "call", error: "No stored call payload or phone for re-nudge" }
+      }
+      const result = await placeBolnaCall({ to: candidate.phone, userData })
+      if (!result.success || !result.executionId) {
+        return { ok: false, kind: "call", error: result.error || "Failed to re-place call" }
+      }
+      await supabaseAdmin
+        .from("phone_screening_participants")
+        .update({
+          status: "calling",
+          bolna_execution_id: result.executionId,
+          bolna_status: "queued",
+          call_attempts: 1,
+          last_attempt_at: now,
+          updated_at: now,
+        })
+        .eq("id", participantId)
+      return { ok: true, kind: "call" }
+    }
+
+    let msgResult: { success: boolean; messageId?: string; error?: string }
+    let template: string
+    let status: string
+    if (callMode === "quick_screen") {
+      template = origin === "inbound" ? "inbound_screening_invite" : "talent_outreach"
+      msgResult = origin === "inbound"
+        ? await whatsapp.sendInboundScreeningInvite({
+            phoneNumber: candidate.phone as string,
+            candidateName: candidate.name || "",
+            jobTitle: job.title || "",
+            companyName: job.client_name || client?.name || "",
+          })
+        : await whatsapp.sendTalentOutreach({
+            phoneNumber: candidate.phone as string,
+            candidateName: candidate.name || "",
+            jobTitle: job.title || "",
+            companyName: job.client_name || client?.name || "",
+            location: job.city || "",
+            salary: `${job.salary_min || "?"} - ${job.salary_max || "?"}`,
+          })
+      status = "whatsapp_sent"
+    } else {
+      template = "detailed_info_request"
+      msgResult = await whatsapp.sendDetailedInfoRequest({
+        phoneNumber: candidate.phone as string,
+        candidateName: candidate.name || "",
+        jobTitle: job.title || "",
+        companyName: job.client_name || client?.name || "",
+      })
+      status = "info_requested"
+    }
+
+    if (!msgResult.success) return { ok: false, kind: "nudge", error: msgResult.error || "Failed to send message" }
+
+    const { data: current } = await supabaseAdmin
+      .from("phone_screening_participants")
+      .select("whatsapp_history, screening_context")
+      .eq("id", participantId)
+      .maybeSingle()
+
+    const history = Array.isArray((current as any)?.whatsapp_history)
+      ? [...(current as any).whatsapp_history]
+      : []
+    history.push({
+      messageId: msgResult.messageId || null,
+      template,
+      sentAt: now,
+      status: "sent",
+      kind: "re-nudge",
+    })
+
+    const update: Record<string, unknown> = {
+      status,
+      whatsapp_message_id: msgResult.messageId || null,
+      whatsapp_sent_at: now,
+      whatsapp_delivery_status: "sent",
+      whatsapp_outbound_template: template,
+      whatsapp_history: history,
+      updated_at: now,
+    }
+
+    if (callMode !== "quick_screen") {
+      // Reset any half-finished info-collection state so the next reply parses cleanly.
+      update.screening_mode = "collect_info_first"
+      update.info_step = "collect_all"
+      update.info_data = {}
+      update.info_confirmed = false
+      update.screening_context = {
+        ...((current as any)?.screening_context || {}),
+        renudgedAt: now,
+      }
+    }
+
+    await supabaseAdmin.from("phone_screening_participants").update(update).eq("id", participantId)
+    return { ok: true, kind: "nudge" }
+  } catch (err: any) {
+    return { ok: false, kind: callMode === "call_now" ? "call" : "nudge", error: err?.message || "Re-nudge failed" }
   }
 }
 
@@ -189,6 +319,33 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // ==================== RE-NUDGE (DEDUP THAT ACTUALLY SENDS) ====================
+    // Previously dedup refreshed the context and returned nudgeSent: 0 without
+    // sending anything. An HR who clicked "Nudge" again got silence. Instead,
+    // re-send the correct follow-up to every already-active participant.
+    let renudgedCandidates = 0
+    let recalledCandidates = 0
+    const renudgeFailures: string[] = []
+    for (const du of dedupUpdates) {
+      const candidate = (candidates || []).find((c) => c.id === du.candidateId)
+      if (!candidate) continue
+      const result = await renudgeExistingParticipant({
+        participantId: du.participantId,
+        candidate,
+        job,
+        client,
+        origin: originByCandidate.get(du.candidateId) || fallbackOrigin,
+        callMode,
+        now,
+      })
+      if (!result.ok) {
+        renudgeFailures.push(`${candidate.name || du.candidateId}: ${result.error}`)
+        continue
+      }
+      if (result.kind === "call") recalledCandidates++
+      else renudgedCandidates++
+    }
+
     // Filter out deduped candidates from triggering new calls (they already have active participants)
     const freshCandidateIds = candidateIds.filter(id => !dedupedCandidateIds.has(id))
     const freshCandidates = (candidates || []).filter(c => freshCandidateIds.includes(c.id))
@@ -197,16 +354,19 @@ export async function POST(request: NextRequest) {
     console.log("[TRIGGER] freshCandidates:", freshCandidates?.map(c => ({ id: c.id, name: c.name, phone: c.phone })))
 
     if (freshCandidateIds.length === 0) {
-      // All candidates already have active participants — return dedup info
+      // All candidates already have active participants — report the re-nudge
       return NextResponse.json({
         campaignId: null,
         totalCandidates: candidateIds.length,
-        callsTriggered: 0,
+        callsTriggered: recalledCandidates,
         callsFailed: 0,
-        nudgeSent: 0,
+        nudgeSent: renudgedCandidates,
         dedupedCount: dedupUpdates.length,
         dedupedCandidateIds: dedupUpdates.map(d => d.candidateId),
-        message: "All candidates already have active screening participants (updated context)",
+        message: renudgedCandidates + recalledCandidates > 0
+          ? `Re-nudged ${renudgedCandidates} candidate(s) and re-queued ${recalledCandidates} call(s)`
+          : "All candidates already have active screening participants (re-nudge failed)",
+        errors: renudgeFailures.length > 0 ? renudgeFailures : undefined,
       })
     }
 
@@ -245,11 +405,13 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       campaignId: result.campaignId,
       totalCandidates: result.totalCandidates,
-      callsTriggered: result.callsTriggered,
+      callsTriggered: (result.callsTriggered || 0) + recalledCandidates,
       callsFailed: result.callsFailed,
-      nudgeSent: result.nudgeSent,
+      nudgeSent: (result.nudgeSent || 0) + renudgedCandidates,
       skippedNoPhone: result.skippedNoPhone.length > 0 ? result.skippedNoPhone : undefined,
       errors: result.errors,
+      renudgedCount: renudgedCandidates,
+      renudgeErrors: renudgeFailures.length > 0 ? renudgeFailures : undefined,
     })
   } catch (error: any) {
     if (error?.message === "No candidates with phone numbers found") {
