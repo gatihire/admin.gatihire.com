@@ -37,14 +37,17 @@ async function renudgeExistingParticipant(opts: {
   job: any
   client: any
   origin: CandidateOrigin
+  /** Application-derived source (preferred for flow classification — the candidate row often has source=null). */
+  source?: string | null
   callMode?: TriggerRequest["callMode"]
   now: string
 }): Promise<{ ok: boolean; kind: "nudge" | "call"; error?: string }> {
-  const { participantId, candidate, job, client, origin, callMode, now } = opts
+  const { participantId, candidate, job, client, origin, source, callMode, now } = opts
   const whatsapp = getWhatsAppService()
   // The SYSTEM decides the nudge type (see systemDecidesMode): portal -> shortlist,
   // external -> 7-field, and only outbound candidates honor HR's call_now.
-  const flow = deriveCandidateFlow(candidate.source, origin)
+  // Prefer the application-derived source — candidate.source is often null.
+  const flow = deriveCandidateFlow(source ?? candidate.source, origin)
   const effMode = systemDecidesMode(callMode, flow)
 
   try {
@@ -364,6 +367,7 @@ export async function POST(request: NextRequest) {
         job,
         client,
         origin: originByCandidate.get(du.candidateId) || fallbackOrigin,
+        source: sourceByCandidate.get(du.candidateId) || (candidate as any).source,
         callMode,
         now,
       })

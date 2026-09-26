@@ -10,7 +10,7 @@ import { getWhatsAppService } from "@/lib/whatsapp"
 import { generateJDQuestions } from "@/lib/jd-questions"
 import { buildAlreadyCollectedUserData } from "@/lib/prompt-user-data"
 import { scheduleOutreachFollowup, scheduleBolnaCall, outreachNudgeHours, outreachEscalateHours } from "@/lib/scheduled-call"
-import { type CandidateOrigin, deriveCandidateFlow } from "@/lib/origin"
+import { type CandidateOrigin, type CandidateFlow, deriveCandidateFlow } from "@/lib/origin"
 import { logger } from "@/lib/logger"
 
 /** Batch size for WhatsApp sends — delay between batches to avoid rate limits. */
@@ -347,6 +347,20 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
   const { job, client, candidates, originByCandidate, fallbackOrigin, createdBy } = input
   const callMode: "call_now" | "quick_screen" | "collect_info_first" = input.callMode || "call_now"
 
+  // Flow classification with resilient fallbacks:
+  //  1. application-derived source (preferred — candidate.source is often null)
+  //  2. the candidate's own source column
+  //  3. existing form data (current/expected CTC, notice) -> almost certainly a portal applicant
+  const flowForCandidate = (c: ScreeningCandidate): CandidateFlow => {
+    const origin = originByCandidate.get(c.id) || fallbackOrigin || "inbound"
+    const src = input.sourceByCandidate?.get(c.id) || c.source
+    let flow = deriveCandidateFlow(src, origin)
+    if (flow !== "portal" && (c.current_ctc || c.expected_ctc || c.notice_period)) {
+      flow = "portal"
+    }
+    return flow
+  }
+
   // Per-job campaign config (with sensible defaults)
   const nudgeH = input.campaignConfig?.nudgeHours ?? outreachNudgeHours()
   const escalateH = input.campaignConfig?.escalateHours ?? outreachEscalateHours()
@@ -390,7 +404,7 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
 
   const participantRows = validCandidates.map((c) => {
     const origin = originByCandidate.get(c.id) || fallbackOrigin || "inbound"
-    const flow = deriveCandidateFlow(input.sourceByCandidate?.get(c.id), origin)
+    const flow = flowForCandidate(c)
     // System decides the nudge type per candidate (see systemDecidesMode) —
     // HR's mode only matters for outbound candidates.
     const mode = systemDecidesMode(callMode, flow)
@@ -441,7 +455,7 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
   for (let i = 0; i < validCandidates.length; i++) {
     const candidate = validCandidates[i]
     const origin = originByCandidate.get(candidate.id) || "outbound"
-    const flow = deriveCandidateFlow(input.sourceByCandidate?.get(candidate.id), origin)
+    const flow = flowForCandidate(candidate)
     const participantId = participantByCandidate.get(candidate.id)
 
     // THE SYSTEM decides the nudge type per candidate (see systemDecidesMode):
