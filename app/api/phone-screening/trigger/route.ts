@@ -169,6 +169,21 @@ async function renudgeExistingParticipant(opts: {
     }
 
     await supabaseAdmin.from("phone_screening_participants").update(update).eq("id", participantId)
+
+    // Ensure the candidate's application is in ai_screen status
+    const { data: app } = await supabaseAdmin
+      .from("applications")
+      .select("id")
+      .eq("job_id", job.id)
+      .eq("candidate_id", candidate.id)
+      .maybeSingle()
+    if (app?.id) {
+      await supabaseAdmin
+        .from("applications")
+        .update({ status: "ai_screen", updated_at: now })
+        .eq("id", app.id)
+    }
+
     return { ok: true, kind: "nudge" }
   } catch (err: any) {
     return { ok: false, kind: effMode === "call_now" ? "call" : "nudge", error: err?.message || "Re-nudge failed" }
@@ -293,16 +308,17 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Batch-update existing applications to ai_screen (skip if already set)
+    // Batch-update existing applications to ai_screen (idempotent — safe to run even if already set)
     if (appIds.length > 0) {
       const { error: updateErr } = await supabaseAdmin
         .from("applications")
         .update({ status: "ai_screen", updated_at: now })
         .in("id", appIds)
-        .neq("status", "ai_screen")
       if (updateErr) {
-        logger.warn("Failed to sync application status to ai_screen", { error: updateErr.message })
+        logger.error("Failed to sync application status to ai_screen", { error: updateErr.message, appIds })
+        throw new Error(`Failed to update application status: ${updateErr.message}`)
       }
+      logger.info("Synced application status to ai_screen", { count: appIds.length })
     }
 
     // Candidate dedup: check if any candidates already have active participants for this job
