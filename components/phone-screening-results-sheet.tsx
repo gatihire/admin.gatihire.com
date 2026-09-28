@@ -11,7 +11,8 @@ import {
   DollarSign, User, Phone as PhoneIcon,
   ExternalLink, ThumbsUp, ThumbsDown, PhoneCall, Play, Pause,
   MessageSquare, BarChart3, Mic, Send, CheckCheck, MessageCircle,
-  ArrowDown, CircleDot, Smartphone, Volume2, Download, Bot, Settings
+  ArrowDown, CircleDot, Smartphone, Volume2, Download, Bot, Settings,
+  RefreshCw, UserX
 } from "lucide-react"
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -281,20 +282,39 @@ export function PhoneScreeningResultsSheet({
     }
   }
 
+  const handleRetryCall = async () => {
+    if (!participantId) return
+    setReviewBusy(true)
+    try {
+      const res = await fetch(`/api/phone-screening/participants/${participantId}/retry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      })
+      const json = await res.json()
+      if (!res.ok) throw new Error(json.error || "Failed to retry call")
+      toast({ title: "Call queued", description: "AI call will be placed shortly" })
+      setData((prev) => (prev ? { ...prev, status: "calling", review_status: "pending" } : prev))
+    } catch (e: any) {
+      toast({ title: "Failed", description: e.message, variant: "destructive" })
+    } finally {
+      setReviewBusy(false)
+    }
+  }
+
   const parsedSummary = data?.ai_summary
     ? (() => { try { return JSON.parse(data.ai_summary) as Record<string, unknown> } catch { return null } })()
     : null
 
-  const enriched = data?.enriched_summary as Record<string, unknown> | null | undefined
-
-  const verdict = data?.verdict_json
+  const verd = data?.verdict_json
     ? (typeof data.verdict_json === "string" ? JSON.parse(data.verdict_json) : data.verdict_json)
     : null
 
+  const enriched = data?.enriched_summary as Record<string, unknown> | null | undefined
+
   // Prefer enriched summary over basic verdict
-  const pluses: string[] = (enriched?.strengths as string[]) || (verdict?.pluses as string[]) || ((parsedSummary?.pluses as string[]) || [])
-  const minuses: string[] = (enriched?.concerns as string[]) || (verdict?.minuses as string[]) || ((parsedSummary?.minuses as string[]) || [])
-  const verdictExplanation = (enriched?.comprehensive_summary as string) || (verdict?.verdict_explanation as string) || (parsedSummary?.verdict_explanation as string) || ""
+  const pluses: string[] = (enriched?.strengths as string[]) || (verd?.pluses as string[]) || ((parsedSummary?.pluses as string[]) || [])
+  const minuses: string[] = (enriched?.concerns as string[]) || (verd?.minuses as string[]) || ((parsedSummary?.minuses as string[]) || [])
+  const verdictExplanation = (enriched?.comprehensive_summary as string) || (verd?.verdict_explanation as string) || (parsedSummary?.verdict_explanation as string) || ""
   const fitAssessment = (enriched?.fit_assessment as string) || ""
   const salaryAnalysis = (enriched?.salary_analysis as { current?: string; expected?: string; risk?: string; notes?: string }) || null
   const relocationAssessment = (enriched?.relocation_assessment as string) || ""
@@ -308,6 +328,19 @@ export function PhoneScreeningResultsSheet({
   } | null
 
   const whatsappHistory = data?.whatsapp_history || []
+
+  // TypeScript guard - data is checked in JSX but TS needs explicit narrowing
+  const d = data!
+  if (!d) return null
+
+  // Determine if we have any summary/verdict data
+  const hasSummaryData = verd || enriched || d.ai_summary || d.verdict_json
+
+  // Determine call outcome for action buttons
+  const isTerminal = ["completed", "failed", "unreachable", "failed_partial"].includes(d.status)
+  const isSuccessfulCompletion = d.status === "completed"
+  const isFailedOrPartial = ["failed", "unreachable", "failed_partial"].includes(d.status)
+  const alreadyReviewed = d.review_status === "approved" || d.review_status === "rejected"
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -382,7 +415,7 @@ export function PhoneScreeningResultsSheet({
               </div>
 
               {/* Verdict summary — always visible */}
-              {(verdict || enriched) && (verdictExplanation || pluses.length > 0 || minuses.length > 0 || fitAssessment) && (
+              {(verd || enriched) && (verdictExplanation || pluses.length > 0 || minuses.length > 0 || fitAssessment) && (
                 <div className="px-4 pb-3">
                   <div className="p-3 rounded-xl border border-zinc-200 bg-zinc-50/60 space-y-2">
                     {verdictExplanation && (
@@ -461,33 +494,105 @@ export function PhoneScreeningResultsSheet({
                 </div>
               )}
 
-              {/* Actions — always visible */}
-              {data.status === "completed" && data.review_status !== "approved" && data.review_status !== "rejected" && (
+              {/* Fallback when no AI summary/verdict available */}
+              {isTerminal && !hasSummaryData && !data.call_is_partial && (
                 <div className="px-4 pb-3">
-                  <div className="flex flex-col sm:flex-row gap-2 items-start">
-                    <Select value={approveStage} onValueChange={setApproveStage}>
-                      <SelectTrigger className="h-9 w-full sm:w-[190px] text-xs bg-white">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="shortlist">Shortlist</SelectItem>
-                        <SelectItem value="interview">Interview</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <div className="flex gap-2 w-full sm:w-auto">
-                      <Button size="sm" className="h-9 text-xs bg-green-600 hover:bg-green-700 gap-1 flex-1 sm:flex-none" onClick={() => submitReview("approve")} disabled={reviewBusy}>
-                        {reviewBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ThumbsUp className="h-3.5 w-3.5" />}
-                        Approve
+                  <div className="p-3 rounded-xl border border-zinc-200 bg-zinc-50/60 space-y-2">
+                    <div className="flex items-start gap-2">
+                      <Bot className="h-4 w-4 text-zinc-400 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="text-sm font-semibold text-zinc-700">AI screening summary not available</p>
+                        <p className="text-xs text-zinc-500 mt-0.5">
+                          The call completed but no structured analysis was generated. You can review the transcript
+                          and recording tabs below, or trigger a manual re-screen.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button size="sm" variant="outline" className="text-xs">
+                        <RefreshCw className="h-3.5 w-3.5 mr-1" />
+                        Re-run Screening
                       </Button>
-                      <Button size="sm" className="h-9 text-xs bg-red-600 hover:bg-red-700 gap-1 flex-1 sm:flex-none" onClick={() => submitReview("reject")} disabled={reviewBusy}>
-                        <ThumbsDown className="h-3.5 w-3.5" />
-                        Reject
+                      <Button size="sm" variant="outline" className="text-xs">
+                        <PhoneCall className="h-3.5 w-3.5 mr-1" />
+                        Manual Follow-up
                       </Button>
                     </div>
                   </div>
                 </div>
               )}
 
+              {/* Actions — always visible for terminal states */}
+              {isTerminal && !alreadyReviewed && (
+                <div className="px-4 pb-3">
+                  {/* Successful completion — Approve/Reject with Shortlist/Interview */}
+                  {isSuccessfulCompletion && (
+                    <div className="flex flex-col sm:flex-row gap-2 items-start">
+                      <Select value={approveStage} onValueChange={setApproveStage}>
+                        <SelectTrigger className="h-9 w-full sm:w-[190px] text-xs bg-white">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="shortlist">Shortlist</SelectItem>
+                          <SelectItem value="interview">Interview</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <div className="flex gap-2 w-full sm:w-auto">
+                        <Button size="sm" className="h-9 text-xs bg-green-600 hover:bg-green-700 gap-1 flex-1 sm:flex-none" onClick={() => submitReview("approve")} disabled={reviewBusy}>
+                          {reviewBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ThumbsUp className="h-3.5 w-3.5" />}
+                          Approve
+                        </Button>
+                        <Button size="sm" className="h-9 text-xs bg-red-600 hover:bg-red-700 gap-1 flex-1 sm:flex-none" onClick={() => submitReview("reject")} disabled={reviewBusy}>
+                          <ThumbsDown className="h-3.5 w-3.5" />
+                          Reject
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Failed/Unreachable/Partial — Manual Follow-up & Retry */}
+                  {isFailedOrPartial && (
+                    <div className="flex flex-col sm:flex-row gap-2 items-start">
+                      <div className="flex items-start gap-2 p-2.5 rounded-lg border border-red-100 bg-red-50/50 text-sm text-red-800 w-full">
+                        <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+                        <div>
+                          <span className="font-bold">
+                            {data.status === "unreachable" ? "Max retries reached — candidate unreachable" :
+                             data.status === "failed_partial" ? "Call disconnected mid-conversation" :
+                             "Call failed"}
+                          </span>
+                          <p className="text-xs text-red-700 mt-0.5">
+                            {data.status === "unreachable" ? "No answer after multiple attempts. Manual follow-up recommended." :
+                             data.status === "failed_partial" ? "Partial transcript captured. Review what was recorded or re-run screening." :
+                             "Technical failure or candidate unavailable. Manual follow-up or retry."}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex gap-2 w-full sm:w-auto">
+                        <Button size="sm" variant="outline" className="h-9 text-xs gap-1 flex-1 sm:flex-none" onClick={() => submitReview("reject")} disabled={reviewBusy}>
+                          <UserX className="h-3.5 w-3.5" />
+                          Manual Follow-up
+                        </Button>
+                        <Button size="sm" className="h-9 text-xs bg-zinc-600 hover:bg-zinc-700 gap-1 flex-1 sm:flex-none" onClick={() => handleRetryCall()} disabled={reviewBusy}>
+                          <RefreshCw className="h-3.5 w-3.5" />
+                          Retry Call
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Partial call — show partial transcript notice */}
+                  {data.call_is_partial && data.status === "completed" && (
+                    <div className="p-2.5 rounded-lg border border-orange-200 bg-orange-50/60 text-sm text-orange-900 mb-2">
+                      <AlertTriangle className="h-4 w-4 shrink-0" />
+                      <span className="font-bold">Partial transcript only.</span> The call disconnected before completion.
+                      Consider retrying for a full screening.
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Already reviewed status */}
               {data.review_status && data.review_status !== "pending" && (
                 <div className="px-4 pb-3">
                   <Badge variant="outline" className={`gap-1.5 px-3 py-1.5 text-xs font-bold ${

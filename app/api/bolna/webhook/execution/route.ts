@@ -6,6 +6,8 @@ import {
   findParticipant,
   handleCompletedExecution,
   handleFailedExecution,
+  resolveSyncTarget,
+  persistBolnaExecutionId,
 } from "@/lib/bolna-execution"
 import { logCandidateActivity } from "@/lib/activity-logger"
 
@@ -30,12 +32,23 @@ export async function POST(request: NextRequest) {
     }
 
     const status = payload.status || ""
-    const participant = await findParticipant(payload)
+
+    // Use robust participant resolution (execution ID + phone + context fallback)
+    const { participant, execution: resolvedExecution } = await resolveSyncTarget({
+      executionId: payload.id,
+      phone: payload.telephony_data?.to_number || (payload as any).user_number || null,
+    })
 
     if (!participant) {
-      // Could be a pre-call in-progress webhook with no execution id yet, or a
-      // scheduled/queued event before we persisted. Nothing to do.
+      logger.warn("Bolna webhook: no participant found", { executionId: payload.id })
       return NextResponse.json({ status: "ok" })
+    }
+
+    const execution = resolvedExecution || payload
+
+    // Persist execution ID if missing
+    if (execution.id && participant.id) {
+      await persistBolnaExecutionId(participant.id, execution.id)
     }
 
     if (!BOLNA_TERMINAL_STATUSES.has(status)) {
@@ -47,7 +60,6 @@ export async function POST(request: NextRequest) {
       if (status === "in-progress") {
         patch.status = "in_progress"
         patch.call_started_at = new Date().toISOString()
-        // Log call connected event
         logCandidateActivity({
           jobId: participant.jobs?.id || "",
           candidateId: participant.candidates?.id || "",
@@ -73,9 +85,9 @@ export async function POST(request: NextRequest) {
     }
 
     if (status === "completed") {
-      await handleCompletedExecution(participant.id, payload)
+      await handleCompletedExecution(participant.id, execution)
     } else {
-      await handleFailedExecution(participant, payload)
+      await handleFailedExecution(participant as any, execution)
     }
 
     return NextResponse.json({ status: "ok" })

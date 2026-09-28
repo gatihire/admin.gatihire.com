@@ -12,6 +12,7 @@ import {
   BOLNA_TERMINAL_STATUSES,
   type BolnaExecution,
 } from "@/lib/bolna"
+import { generateFallbackSummary } from "@/lib/fallback-summary"
 
 // Terminal-execution handling shared by the live webhook and the manual
 // sync/reconcile recovery routes. Everything here must be idempotent enough to
@@ -307,6 +308,36 @@ export async function handleCompletedExecution(
       }
     }
 
+  } else if (transcript) {
+    // Fallback: generate summary from transcript when Bolna doesn't provide verdict
+    try {
+      const { data: participantMeta } = await supabaseAdmin
+        .from("phone_screening_participants")
+        .select(`
+          candidate_id, job_id,
+          candidates: candidate_id (id, name, phone, current_role),
+          jobs: job_id (id, title, client_name)
+        `)
+        .eq("id", participantId)
+        .single()
+
+      if (participantMeta) {
+        const candidate = participantMeta.candidates as any
+        const job = participantMeta.jobs as any
+        const fallback = await generateFallbackSummary(participantId, transcript, candidate, job)
+        if (fallback) {
+          patch.verdict_json = fallback
+          patch.ai_summary = fallback.comprehensive_summary
+          patch.ai_recommendation = fallback.overall_verdict
+          patch.ai_score = fallback.confidence_score
+          patch.fallback_summary_used = true
+
+          await writeScreeningAnswers(participantId, fallback as any)
+        }
+      }
+    } catch (err: any) {
+      logger.warn("Fallback summary generation failed", { participantId, error: err.message })
+    }
   }
 
   // Log call completed event
