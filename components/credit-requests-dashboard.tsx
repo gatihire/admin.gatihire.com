@@ -140,14 +140,6 @@ export function CreditRequestsDashboard() {
         {
           ttlMs: 5 * 60_000,
           force: Boolean(opts?.force),
-          swr: true,
-          onData: (freshData) => {
-            const parsed = (freshData.requests || []).map((req: any) => ({
-              ...req,
-              orderDetails: parseOrderDetails(req.message),
-            }))
-            setRequests(parsed)
-          }
         }
       )
       const parsed = (data.requests || []).map((req: any) => ({
@@ -175,12 +167,6 @@ export function CreditRequestsDashboard() {
         {
           ttlMs: 5 * 60_000,
           force: Boolean(opts?.force),
-          swr: true,
-          onData: (freshData) => {
-            setClients(freshData.clients || [])
-            setClientsTotal(freshData.total || 0)
-            setClientsTotalPages(freshData.totalPages || 0)
-          }
         }
       )
       setClients(data.clients || [])
