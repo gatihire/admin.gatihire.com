@@ -477,6 +477,8 @@ export function DbMatchesTab({ jobId, onViewProfile, onCandidateAdded }: DbMatch
           candidateIds,
           createApplication: true,
           callMode,
+          origin: "outbound",
+          campaignConfig: { nudgeHours: 4, escalateHours: 8, maxCallAttempts: 2 },
         }),
       })
       const data = await res.json()
@@ -497,13 +499,14 @@ export function DbMatchesTab({ jobId, onViewProfile, onCandidateAdded }: DbMatch
 
       setSelectedIds(new Set())
       fetchMatches({ silent: true })
+      onCandidateAdded()
     } catch (err: any) {
       console.error("Outreach failed:", err)
       toast({ title: "Outreach failed", description: err.message, variant: "destructive" })
     } finally {
       setOutreachBusy(false)
     }
-  }, [jobId, outreachBusy, toast, fetchMatches])
+  }, [jobId, outreachBusy, toast, fetchMatches, onCandidateAdded])
 
   const addToPipeline = useCallback(async (candidateIds: string[]) => {
     if (candidateIds.length === 0) return
