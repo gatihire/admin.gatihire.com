@@ -11,6 +11,8 @@ import { generateJDQuestions } from "@/lib/jd-questions"
 import { buildAlreadyCollectedUserData, buildResumeInfo } from "@/lib/prompt-user-data"
 import { scheduleOutreachFollowup, scheduleBolnaCall, outreachNudgeHours, outreachEscalateHours } from "@/lib/scheduled-call"
 import { type CandidateOrigin, type CandidateFlow, deriveCandidateFlow } from "@/lib/origin"
+import { type InfoSource, stampSources, mergeSources } from "@/lib/info-provenance"
+import { updateParticipant } from "@/lib/participant-update"
 import { logger } from "@/lib/logger"
 
 /** Batch size for WhatsApp sends — delay between batches to avoid rate limits. */
@@ -31,13 +33,20 @@ export interface ScreeningCandidate {
   current_ctc?: string | null
   expected_ctc?: string | null
   notice_period?: string | null
-  willing_to_relocate?: string | null
+  /**
+   * The `candidates.willing_to_relocate` COLUMN is a boolean (246 true / 17
+   * false in production), while some intake paths write the string "yes"/"no".
+   * The old seed only compared against "yes"/"no", so every real boolean value
+   * failed the test and the answer was silently dropped — which is why cards
+   * showed an empty relocation field for candidates who had answered it.
+   */
+  willing_to_relocate?: string | boolean | null
   reason_for_switching?: string | null
 }
 
 // Flow A (portal applicants) have compensation + profile details captured in the
 // talent-portal apply form / candidate profile, so their already_collected_*
-// fields are pre-seeded instead of asking for the 7-field WhatsApp request.
+// fields are pre-seeded instead of asking for the 5-field WhatsApp request.
 // Only fields we genuinely know are set — anything unset stays "Not provided on
 // WhatsApp" in the call prompt and becomes a NEW-signal probe on the call.
 //
@@ -46,16 +55,33 @@ export interface ScreeningCandidate {
 // them. Putting them in info_data made the portal count WhatsApp-collected fields
 // we never actually collected. They reach the call via buildResumeInfo() so the
 // AI still treats them as known and does not ask.
+//
+// Every key written here is stamped "application" in the returned
+// info_sources, because that is where it came from. Without that stamp the UI
+// rendered these values under "Confirmed by the candidate on WhatsApp", which is
+// false — we never messaged them before they applied.
 function seedAlreadyCollectedInfo(candidate: ScreeningCandidate): Record<string, unknown> {
   const info: Record<string, unknown> = {}
   if (candidate.current_ctc) info.current_ctc = String(candidate.current_ctc)
   if (candidate.expected_ctc) info.expected_ctc = String(candidate.expected_ctc)
   if (candidate.notice_period) info.notice_period = String(candidate.notice_period)
   if (candidate.reason_for_switching) info.reason_for_switching = String(candidate.reason_for_switching)
-  if (candidate.willing_to_relocate === "yes" || candidate.willing_to_relocate === "no") {
-    info.willing_to_relocate = candidate.willing_to_relocate === "yes" ? "Yes" : "No"
+
+  // Accept the boolean column, plus the string forms some intake paths write,
+  // and ignore sentinels like "void" (an unanswered optional form question).
+  const relocation = candidate.willing_to_relocate
+  if (relocation === true || relocation === "yes" || relocation === "Yes" || relocation === "true") {
+    info.willing_to_relocate = "Yes"
+  } else if (relocation === false || relocation === "no" || relocation === "No" || relocation === "false") {
+    info.willing_to_relocate = "No"
   }
+
   return info
+}
+
+/** Provenance for whatever seedAlreadyCollectedInfo() just wrote. */
+function seedInfoSources(candidate: ScreeningCandidate): Record<string, InfoSource> {
+  return stampSources(Object.keys(seedAlreadyCollectedInfo(candidate)), "application")
 }
 
 /** The resume-only fields, kept separate so provenance stays honest. */
@@ -88,7 +114,10 @@ async function sendShortlistMessage(opts: {
   nudgeH: number
   escalateH: number
 }): Promise<OutboundSendResult> {
-  const { candidate, job, client, origin, participantId, campaignId, nudgeH, escalateH } = opts
+  // Filtering by the exact participant id is stricter than the previous
+  // campaign_id + candidate_id pair, which could have matched sibling rows for
+  // the same candidate.
+  const { candidate, job, client, origin, participantId, nudgeH, escalateH } = opts
   const whatsapp = getWhatsAppService()
   const seededInfo = seedAlreadyCollectedInfo(candidate)
   const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(
@@ -110,28 +139,39 @@ async function sendShortlistMessage(opts: {
     sentAt: now,
     status: "sent",
   }]
-  await supabaseAdmin
+  // Preserve any provenance already recorded (e.g. an earlier WhatsApp answer the
+  // candidate gave before this nudge) and add "application" for the seeded keys.
+  const { data: existing } = await supabaseAdmin
     .from("phone_screening_participants")
-    .update({
-      status: "whatsapp_sent",
-      screening_mode: "collect_info_first",
-      info_step: "confirmed",
-      info_data: seededInfo,
-      info_confirmed: false,
-      whatsapp_message_id: result.messageId || null,
-      whatsapp_sent_at: now,
-      whatsapp_delivery_status: "sent",
-      whatsapp_outbound_template: "shortlist_call_schedule",
-      whatsapp_outbound_params: { jobTitle: job.title, location: job.city || "", salaryBudget: formatSalaryRange(job) },
-      whatsapp_history: history,
-      call_payload_json: userData,
-      generated_questions: generatedQuestions.join("\n"),
-      gemini_prompt_used: geminiPromptUsed,
-      screening_context: screeningContextFor(job, client, origin),
-      updated_at: now,
-    })
-    .eq("campaign_id", campaignId)
-    .eq("candidate_id", candidate.id)
+    .select("info_sources")
+    .eq("id", participantId)
+    .maybeSingle()
+
+  // This one statement carries status, info_data, info_sources and the screening
+  // context. A single bad column rejects the WHOLE update, leaving the candidate
+  // looking un-nudged while the code believes the WhatsApp went out.
+  // updateParticipant retries without info_sources if that column has not been
+  // migrated yet, and throws for every other failure.
+  await updateParticipant(participantId, {
+    status: "whatsapp_sent",
+    screening_mode: "collect_info_first",
+    info_step: "confirmed",
+    info_data: seededInfo,
+    info_sources: mergeSources(existing?.info_sources, seedInfoSources(candidate)),
+    info_confirmed: false,
+    whatsapp_message_id: result.messageId || null,
+    whatsapp_sent_at: now,
+    whatsapp_delivery_status: "sent",
+    whatsapp_outbound_template: "shortlist_call_schedule",
+    whatsapp_outbound_params: { jobTitle: job.title, location: job.city || "", salaryBudget: formatSalaryRange(job) },
+    whatsapp_history: history,
+    call_payload_json: userData,
+    generated_questions: generatedQuestions.join("\n"),
+    gemini_prompt_used: geminiPromptUsed,
+    screening_context: screeningContextFor(job, client, origin),
+    updated_at: now,
+  })
+
   await scheduleOutreachFollowup(participantId, "nudge", nudgeH * 60 * 60)
   await scheduleOutreachFollowup(participantId, "escalate", escalateH * 60 * 60)
   return { sent: true, messageId: result.messageId }
@@ -428,9 +468,10 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
     // HR's mode only matters for outbound candidates.
     const mode = systemDecidesMode(callMode, flow)
     // Flow A (portal): info already captured in the apply form -> shortlist +
-    // schedule only, marked info as confirmed so no 7-field ask happens later.
+    // schedule only, marked info as confirmed so no 5-field ask happens later.
     const isPortal = flow === "portal"
     const isCollect = mode === "collect_info_first"
+    const seededInfo = isPortal ? seedAlreadyCollectedInfo(c) : null
     return {
       campaign_id: campaign.id,
       candidate_id: c.id,
@@ -444,7 +485,10 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
             : "whatsapp_sent",
       origin,
       info_step: isPortal ? "confirmed" : isCollect ? "collect_all" : null,
-      info_data: isPortal ? seedAlreadyCollectedInfo(c) : isCollect ? {} : null,
+      info_data: seededInfo ?? (isCollect ? {} : null),
+      // Written next to info_data by the same expression, so the two can never
+      // disagree about where a value came from.
+      info_sources: seededInfo ? stampSources(Object.keys(seededInfo), "application") : {},
       info_confirmed: isPortal ? false : isCollect ? false : null,
       screening_mode: mode,
     }

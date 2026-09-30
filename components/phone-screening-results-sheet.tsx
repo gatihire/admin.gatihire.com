@@ -704,7 +704,11 @@ export function PhoneScreeningResultsSheet({
                             <PreScreenVerdict result={data.screening_context.preScreenResult} />
                           )}
                           {data.info_data && Object.keys(data.info_data).length > 0 && (
-                            <CollectedInfoView infoData={data.info_data} fallback={(data as any).candidates} />
+                            <CollectedInfoView
+                              infoData={data.info_data}
+                              infoSources={(data as any).info_sources}
+                              fallback={(data as any).candidates}
+                            />
                           )}
                           {data.prescreen_decision && !data.screening_context?.preScreenResult && (
                             <p className="text-xs text-zinc-400">

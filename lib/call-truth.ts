@@ -276,7 +276,7 @@ export function getCallTruth(p: any): CallTruth {
   // Be explicit about why, because "waiting" vs "broken" is exactly what HR
   // could not tell apart before.
   if (status === "call_scheduled" || status === "scheduled") {
-    const due = scheduledAt || p.scheduled_at
+    const due = scheduledAt
     if (due && new Date(due).getTime() <= Date.now()) {
       return truth(
         "not_placed",
@@ -381,28 +381,46 @@ export function getCallTruth(p: any): CallTruth {
   )
 }
 
-/** Filter chips for the AI Screen stage, in the order a recruiter reads them. */
-export const CALL_TRUTH_FILTERS: Array<{ id: string; label: string; hint: string; match: (t: CallTruth) => boolean }> = [
-  { id: "all", label: "All", hint: "Every candidate in AI Screen", match: () => true },
+/**
+ * Filter chips for the AI Screen stage, in the order a recruiter reads them.
+ *
+ * ── These must be a true PARTITION ───────────────────────────────────────
+ * Every state produced by getCallTruth() must match EXACTLY ONE chip, so the
+ * per-chip counts always sum to the "All" count. They previously were not:
+ *
+ *   - "No call" tested `state === "not_placed" && bucket !== "waiting" &&
+ *     bucket !== "pending"`, which matched almost nothing, and "Needs review"
+ *     tested `bucket === "review"` which matched a slice of it — so a screen
+ *     full of no-call candidates showed 8 cards and a row of zeros, and HR
+ *     could not tell whether the filters or the data were broken.
+ *   - "scheduled" and "retry_pending" appeared in no chip at all.
+ *   - "rejected" was dead: getCallTruth() has never returned it.
+ *
+ * Order matters — the first matching chip wins (see `partitionId`) — so the more
+ * specific buckets are tested before the catch-all.
+ */
+export const CALL_TRUTH_FILTERS: Array<{
+  id: string
+  label: string
+  hint: string
+  match: (t: CallTruth) => boolean
+}> = [
   {
-    id: "no_call",
-    label: "No call",
-    hint: "Nudged or approved but no call was ever placed — needs action",
-    match: (t) => t.state === "not_placed" && t.bucket !== "waiting" && t.bucket !== "pending",
+    id: "all",
+    label: "All",
+    hint: "Every candidate in AI Screen",
+    match: () => true,
   },
   {
-    id: "awaiting",
-    label: "Awaiting outcome",
-    hint: "Call placed with the provider, but they have not reported back yet",
-    match: (t) => t.state === "awaiting_provider" || t.state === "ringing",
-  },
-  { id: "answered", label: "On call", hint: "Currently on a call", match: (t) => t.state === "answered" },
-  { id: "completed", label: "Completed", hint: "Call picked up and finished", match: (t) => t.state === "completed" },
-  {
-    id: "no_answer",
-    label: "No answer",
-    hint: "Rang out, voicemail, or busy",
-    match: (t) => t.state === "no_answer" || t.state === "busy" || t.state === "voicemail",
+    id: "review",
+    label: "Needs a decision",
+    hint: "A human has to decide — the AI has an opinion, and nothing has been sent",
+    // Ahead of "no_call" on purpose. Rows waiting on an HR decision are also
+    // technically not_placed, so testing not_placed first would hide every
+    // pending decision in the no-call bucket — exactly the rows that get lost.
+    // `partial` is excluded because it has its own chip and is a call outcome,
+    // not a pending decision.
+    match: (t) => t.bucket === "review" && t.state !== "partial",
   },
   {
     id: "partial",
@@ -411,13 +429,66 @@ export const CALL_TRUTH_FILTERS: Array<{ id: string; label: string; hint: string
     match: (t) => t.state === "partial",
   },
   {
+    id: "no_call",
+    label: "No call placed",
+    hint: "Nothing has been placed — no call made, and none is due yet",
+    // `bucket !== "review"` keeps this disjoint from "Needs a decision": rows
+    // waiting on an HR decision are also technically not_placed, and counting
+    // them twice would break the invariant that the chips sum to "All".
+    match: (t) => t.state === "not_placed" && t.bucket !== "review",
+  },
+  {
+    id: "booked",
+    label: "Call booked",
+    hint: "A call time is booked and has not arrived yet",
+    match: (t) => t.state === "scheduled" || t.state === "retry_pending",
+  },
+  {
+    id: "awaiting",
+    label: "Awaiting outcome",
+    hint: "Call placed with the provider, but they have not reported back yet",
+    match: (t) => t.state === "awaiting_provider",
+  },
+  {
+    id: "on_call",
+    label: "On call",
+    hint: "The provider is connecting, or someone has picked up",
+    match: (t) => t.state === "ringing" || t.state === "answered",
+  },
+  {
+    id: "completed",
+    label: "Completed",
+    hint: "Call picked up and finished",
+    match: (t) => t.state === "completed",
+  },
+  {
+    id: "no_answer",
+    label: "No answer",
+    hint: "Rang out with nobody picking up, or the line was busy",
+    match: (t) => t.state === "no_answer" || t.state === "busy",
+  },
+  {
+    id: "voicemail",
+    label: "Voicemail",
+    hint: "Answered by a voicemail or IVR, not a person",
+    match: (t) => t.state === "voicemail",
+  },
+  {
     id: "failed",
-    label: "Failed",
-    hint: "Failed on our side — the candidate was never reached",
+    label: "Failed on us",
+    hint: "Failed at the provider or carrier — the candidate was never reached",
     match: (t) => t.state === "our_side_failed" || t.state === "rejected",
   },
-  { id: "review", label: "Needs review", hint: "Needs a human decision", match: (t) => t.bucket === "review" },
 ]
+
+/** The single chip a truth belongs to, for counting and highlighting. */
+export function callTruthFilterId(t: CallTruth): string {
+  for (const f of CALL_TRUTH_FILTERS) {
+    if (f.id === "all") continue
+    if (f.match(t)) return f.id
+  }
+  return "all"
+}
 
 /**
  * Bucket mapping for the pre-existing sub-section model (pending / waiting /

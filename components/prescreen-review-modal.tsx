@@ -3,26 +3,21 @@
 import { useState } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import {
+  AlertTriangle,
   CheckCircle2,
   Clock,
   DollarSign,
-  FileText,
+  HelpCircle,
   Loader2,
-  MapPin,
-  MessageSquare,
-  Search,
+  MessageCircleQuestion,
   ShieldCheck,
   X,
   XCircle,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useToast } from "@/hooks/use-toast"
-
-interface PrescreenCheck {
-  field: string
-  verdict: "pass" | "review" | "fail"
-  detail: string
-}
+import { CollectedInfoView, PreScreenVerdict } from "@/components/candidate-collected-info"
+import type { InfoSource } from "@/lib/info-provenance"
 
 export interface ReviewCandidate {
   participantId: string
@@ -32,58 +27,59 @@ export interface ReviewCandidate {
   currentCompany?: string
   phone?: string
   email?: string
-  // Parsed info
-  currentCtc?: string
-  expectedCtc?: string
-  totalExperience?: number
-  noticePeriod?: string
-  location?: string
-  willingToRelocate?: boolean | null
-  reasonForSwitching?: string
-  // AI prescreen
-  aiPrescreenDecision?: string
-  aiPrescreenReason?: string
-  checks?: PrescreenCheck[]
+  // Raw collected info + where each field came from. The modal shows these
+  // rather than a reconstructed message, so a value from the apply form is never
+  // presented as something the candidate said on WhatsApp.
+  infoData?: Record<string, unknown> | null
+  infoSources?: Record<string, unknown> | null
+  resumeFallback?: Record<string, unknown> | null
+  // Structured AI verdict
+  preScreenResult?: {
+    decision?: string
+    reasons?: string[]
+    summary?: string
+    evaluatedAt?: string
+    skippedChecks?: string[]
+  } | null
+  aiSuggestsRejection?: boolean
+  aiSuggestsRejectionAt?: string
   // Job info
   jobTitle?: string
+  jobCity?: string
   jobSalaryMin?: number
   jobSalaryMax?: number
   jobExpMin?: number
   jobExpMax?: number
-  jobCity?: string
   // Timing
   infoReceivedAt?: string
+  clarificationQuestion?: string | null
+  clarificationAskedAt?: string | null
 }
+
+type Decision = "approved" | "rejected" | "clarify"
 
 interface PrescreenReviewModalProps {
   candidate: ReviewCandidate | null
   open: boolean
   onClose: () => void
   onReviewed: () => void
-  // Bulk support
-  onBulkApprove?: (participantIds: string[]) => void
-  onBulkReject?: (participantIds: string[]) => void
   totalCount?: number
   currentIndex?: number
   onNext?: () => void
   onPrev?: () => void
 }
 
-function formatTimeSince(iso: string | null): string {
+function formatTimeSince(iso: string | null | undefined): string {
   if (!iso) return "unknown"
   const diff = Date.now() - new Date(iso).getTime()
+  if (Number.isNaN(diff)) return "unknown"
   const mins = Math.floor(diff / 60000)
+  if (mins < 1) return "just now"
   if (mins < 60) return `${mins}m ago`
   const hrs = Math.floor(mins / 60)
   if (hrs < 24) return `${hrs}h ago`
   const days = Math.floor(hrs / 24)
   return `${days}d ago`
-}
-
-const verdictStyles = {
-  pass: { icon: CheckCircle2, color: "text-emerald-600", bg: "bg-emerald-50", border: "border-emerald-200" },
-  review: { icon: Search, color: "text-amber-600", bg: "bg-amber-50", border: "border-amber-200" },
-  fail: { icon: XCircle, color: "text-red-600", bg: "bg-red-50", border: "border-red-200" },
 }
 
 export function PrescreenReviewModal({
@@ -98,54 +94,80 @@ export function PrescreenReviewModal({
 }: PrescreenReviewModalProps) {
   const { toast } = useToast()
   const [loading, setLoading] = useState(false)
-  const [showReject, setShowReject] = useState(false)
-  const [rejectNote, setRejectNote] = useState("")
+  const [decision, setDecision] = useState<Decision | null>(null)
+  const [note, setNote] = useState("")
 
   if (!candidate) return null
 
-  const approve = async () => {
+  const submit = async (d: Decision) => {
+    const trimmed = note.trim()
+    // Rejection needs a recorded reason and clarification needs a real question.
+    // Both are enforced server-side too; catching it here saves a round trip.
+    if (d === "rejected" && !trimmed) {
+      toast({ title: "Add a reason", description: "A rejection needs a reason on the record.", variant: "destructive" })
+      return
+    }
+    if (d === "clarify" && !trimmed) {
+      toast({ title: "Write the question", description: "Type what you want to ask the candidate.", variant: "destructive" })
+      return
+    }
+
     setLoading(true)
     try {
       const res = await fetch("/api/phone-screening/review", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ participantId: candidate.participantId, decision: "approved" }),
+        body: JSON.stringify({ participantId: candidate.participantId, decision: d, note: trimmed || undefined }),
       })
       const data = await res.json()
-      if (!res.ok) throw new Error(data.error || "Failed to approve")
-      toast({ title: "Candidate approved", description: "Schedule link sent via WhatsApp" })
+      if (!res.ok) throw new Error(data.error || "Failed to save the decision")
+
+      const failed = (data.results || []).find((r: any) => !r.success)
+      if (failed?.error) throw new Error(failed.error)
+
+      toast({
+        title: d === "approved" ? "Moved to call" : d === "rejected" ? "Candidate passed" : "Question sent",
+        description:
+          d === "approved"
+            ? "Schedule link sent and a call is booked"
+            : d === "rejected"
+              ? "Candidate notified. Your reason is on the record."
+              : "Waiting for their reply — no call booked yet",
+      })
+      setDecision(null)
+      setNote("")
       onReviewed()
       onClose()
     } catch (err: any) {
-      toast({ title: "Failed to approve", description: err.message, variant: "destructive" })
+      toast({ title: "Could not save", description: err.message, variant: "destructive" })
     } finally {
       setLoading(false)
     }
   }
 
-  const reject = async () => {
-    setLoading(true)
-    try {
-      const res = await fetch("/api/phone-screening/review", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ participantId: candidate.participantId, decision: "rejected", note: rejectNote.trim() || undefined }),
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || "Failed to reject")
-      toast({ title: "Candidate passed", description: "Candidate notified via WhatsApp" })
-      onReviewed()
-      onClose()
-    } catch (err: any) {
-      toast({ title: "Failed to reject", description: err.message, variant: "destructive" })
-    } finally {
-      setLoading(false)
-    }
-  }
+  const aiSaysReject = candidate.aiSuggestsRejection === true
+  const outstandingQuestion =
+    candidate.clarificationQuestion && !candidate.clarificationAskedAt
+      ? candidate.clarificationQuestion
+      : null
 
-  const passCount = candidate.checks?.filter(c => c.verdict === "pass").length || 0
-  const reviewCount = candidate.checks?.filter(c => c.verdict === "review").length || 0
-  const failCount = candidate.checks?.filter(c => c.verdict === "fail").length || 0
+  const notesByDecision: Record<Decision, { label: string; placeholder: string; cta: string }> = {
+    approved: {
+      label: "Note (optional)",
+      placeholder: "e.g. Confirmed the CTC expectation is workable",
+      cta: "Confirm — send schedule link & book call",
+    },
+    rejected: {
+      label: "Reason for passing (required)",
+      placeholder: "e.g. Expects 18L, band tops out at 12L",
+      cta: "Confirm pass — notify candidate",
+    },
+    clarify: {
+      label: "What do you need to ask? (required)",
+      placeholder: "e.g. Is the 14L expectation negotiable, or is that their floor?",
+      cta: "Send question",
+    },
+  }
 
   return (
     <AnimatePresence>
@@ -168,7 +190,7 @@ export function PrescreenReviewModal({
             <div className="sticky top-0 z-10 flex items-center justify-between border-b border-gray-100 bg-white/95 backdrop-blur px-6 py-4">
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
-                  <h2 className="text-lg font-bold text-gray-900 truncate">Prescreen Review</h2>
+                  <h2 className="text-lg font-bold text-gray-900 truncate">Review screening</h2>
                   {totalCount != null && currentIndex != null && (
                     <span className="text-xs text-gray-400 shrink-0">{currentIndex + 1} of {totalCount}</span>
                   )}
@@ -193,152 +215,74 @@ export function PrescreenReviewModal({
             </div>
 
             {/* Body */}
-            <div className="px-6 py-5 space-y-5 max-h-[65vh] overflow-y-auto">
-              {/* Pending timer */}
+            <div className="px-6 py-5 space-y-5 max-h-[62vh] overflow-y-auto">
               {candidate.infoReceivedAt && (
                 <div className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5">
                   <Clock className="h-4 w-4 text-amber-600" />
                   <span className="text-sm font-medium text-amber-800">
-                    Waiting for review — {formatTimeSince(candidate.infoReceivedAt)}
+                    Waiting on your decision — details received {formatTimeSince(candidate.infoReceivedAt)}
                   </span>
                 </div>
               )}
 
-              {/* AI Verdict */}
-              <div className={`flex items-center gap-3 rounded-xl border px-4 py-3 ${
-                failCount > 0 ? "border-red-200 bg-red-50" : "border-amber-200 bg-amber-50"
-              }`}>
-                <ShieldCheck className={`h-5 w-5 ${failCount > 0 ? "text-red-600" : "text-amber-600"}`} />
-                <div>
-                  <p className={`text-sm font-bold ${failCount > 0 ? "text-red-800" : "text-amber-800"}`}>
-                    {failCount > 0 ? "Auto-filtered — HR override available" : "Needs HR review"}
-                  </p>
-                  {candidate.aiPrescreenReason && (
-                    <p className="text-xs text-gray-600 mt-0.5">{candidate.aiPrescreenReason}</p>
-                  )}
-                </div>
-                <div className="ml-auto flex items-center gap-1.5 text-xs">
-                  <span className="text-emerald-600 font-medium">{passCount} pass</span>
-                  <span className="text-gray-300">·</span>
-                  <span className="text-amber-600 font-medium">{reviewCount} review</span>
-                  <span className="text-gray-300">·</span>
-                  <span className="text-red-600 font-medium">{failCount} fail</span>
-                </div>
-              </div>
-
-              {/* WhatsApp conversation */}
-              <div className="rounded-2xl border border-gray-200 bg-gray-50/60 p-4">
-                <div className="flex items-center gap-2 mb-3">
-                  <MessageSquare className="h-4 w-4 text-gray-400" />
-                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">WhatsApp conversation</p>
-                </div>
-                <div className="space-y-2">
-                  <div className="rounded-xl rounded-tl-sm bg-indigo-50 border border-indigo-100 px-3 py-2 max-w-[85%]">
-                    <p className="text-xs text-indigo-800">Hi {candidate.name}, please share: CTC, Expected CTC, Experience, Notice period, City, Willing to relocate (yes/no), Reason for switching</p>
-                  </div>
-                  <div className="rounded-xl rounded-tr-sm bg-white border border-gray-200 px-3 py-2 max-w-[85%] ml-auto">
-                    <p className="text-xs text-gray-700">
-                      {[
-                        candidate.currentCtc,
-                        candidate.expectedCtc,
-                        candidate.totalExperience != null ? `${candidate.totalExperience} years` : null,
-                        candidate.noticePeriod,
-                        candidate.location,
-                        candidate.willingToRelocate != null ? (candidate.willingToRelocate ? "yes" : "no") : null,
-                        candidate.reasonForSwitching,
-                      ].filter(Boolean).join(", ") || "No response parsed"}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Parsed details */}
-              <div className="rounded-2xl border border-gray-200 bg-white p-4">
-                <div className="flex items-center gap-2 mb-3">
-                  <FileText className="h-4 w-4 text-gray-400" />
-                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Parsed details</p>
-                </div>
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                  {candidate.currentCtc && (
-                    <div className="rounded-lg border border-gray-100 bg-gray-50 p-2">
-                      <p className="text-[10px] text-gray-400 font-medium">Current CTC</p>
-                      <p className="text-sm font-semibold text-gray-800">{candidate.currentCtc}</p>
-                    </div>
-                  )}
-                  {candidate.expectedCtc && (
-                    <div className="rounded-lg border border-gray-100 bg-gray-50 p-2">
-                      <p className="text-[10px] text-gray-400 font-medium">Expected CTC</p>
-                      <p className="text-sm font-semibold text-gray-800">{candidate.expectedCtc}</p>
-                    </div>
-                  )}
-                  {candidate.totalExperience != null && (
-                    <div className="rounded-lg border border-gray-100 bg-gray-50 p-2">
-                      <p className="text-[10px] text-gray-400 font-medium">Experience</p>
-                      <p className="text-sm font-semibold text-gray-800">{candidate.totalExperience} yrs</p>
-                    </div>
-                  )}
-                  {candidate.noticePeriod && (
-                    <div className="rounded-lg border border-gray-100 bg-gray-50 p-2">
-                      <p className="text-[10px] text-gray-400 font-medium">Notice</p>
-                      <p className="text-sm font-semibold text-gray-800">{candidate.noticePeriod}</p>
-                    </div>
-                  )}
-                  {candidate.location && (
-                    <div className="rounded-lg border border-gray-100 bg-gray-50 p-2">
-                      <p className="text-[10px] text-gray-400 font-medium">Location</p>
-                      <p className="text-sm font-semibold text-gray-800">{candidate.location}</p>
-                    </div>
-                  )}
-                  {candidate.willingToRelocate != null && (
-                    <div className="rounded-lg border border-gray-100 bg-gray-50 p-2">
-                      <p className="text-[10px] text-gray-400 font-medium">Relocate</p>
-                      <p className="text-sm font-semibold text-gray-800">{candidate.willingToRelocate ? "Yes" : "No"}</p>
-                    </div>
-                  )}
-                  {candidate.reasonForSwitching && (
-                    <div className="rounded-lg border border-gray-100 bg-gray-50 p-2 col-span-2 sm:col-span-3">
-                      <p className="text-[10px] text-gray-400 font-medium">Reason for switching</p>
-                      <p className="text-sm font-semibold text-gray-800">{candidate.reasonForSwitching}</p>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* AI check breakdown */}
-              {candidate.checks && candidate.checks.length > 0 && (
-                <div className="rounded-2xl border border-gray-200 bg-white p-4">
-                  <div className="flex items-center gap-2 mb-3">
-                    <ShieldCheck className="h-4 w-4 text-gray-400" />
-                    <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">AI assessment breakdown</p>
-                  </div>
-                  <div className="space-y-2">
-                    {candidate.checks.map((check, i) => {
-                      const style = verdictStyles[check.verdict]
-                      const Icon = style.icon
-                      return (
-                        <div key={i} className={`flex items-start gap-2.5 rounded-lg border px-3 py-2 ${style.border} ${style.bg}`}>
-                          <Icon className={`h-4 w-4 mt-0.5 shrink-0 ${style.color}`} />
-                          <div className="min-w-0">
-                            <p className={`text-xs font-semibold capitalize ${style.color}`}>{check.field.replace(/_/g, " ")}</p>
-                            <p className="text-xs text-gray-600">{check.detail}</p>
-                          </div>
-                        </div>
-                      )
-                    })}
+              {outstandingQuestion && (
+                <div className="flex items-start gap-2 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3">
+                  <MessageCircleQuestion className="h-4 w-4 text-sky-600 mt-0.5 shrink-0" />
+                  <div className="text-sm text-sky-900">
+                    <p className="font-semibold">Question sent, waiting on their reply</p>
+                    <p className="text-sky-700 mt-0.5">{outstandingQuestion}</p>
                   </div>
                 </div>
               )}
+
+              {/* Advisory banner: the AI's recommendation is never a decision. */}
+              <div
+                className={`flex items-start gap-3 rounded-xl border px-4 py-3 ${
+                  aiSaysReject ? "border-red-200 bg-red-50" : "border-amber-200 bg-amber-50"
+                }`}
+              >
+                <ShieldCheck className={`h-5 w-5 mt-0.5 shrink-0 ${aiSaysReject ? "text-red-600" : "text-amber-600"}`} />
+                <div className="min-w-0">
+                  <p className={`text-sm font-bold ${aiSaysReject ? "text-red-800" : "text-amber-800"}`}>
+                    {aiSaysReject ? "AI suggests this may not be a fit" : "AI flagged this for review"}
+                  </p>
+                  <p className="text-xs text-gray-600 mt-0.5">
+                    {aiSaysReject
+                      ? "That is advice only — this candidate has not been told anything. You decide."
+                      : "The AI did not filter them out. Confirm and the call gets booked."}
+                  </p>
+                </div>
+              </div>
+
+              {/* Structured verdict + per-field provenance */}
+              {candidate.preScreenResult && (
+                <PreScreenVerdict result={candidate.preScreenResult} />
+              )}
+
+              <div className="rounded-2xl border border-gray-200 bg-white p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="h-4 w-4 text-gray-400" />
+                    <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">What they told us</p>
+                  </div>
+                </div>
+                <CollectedInfoView
+                  infoData={candidate.infoData}
+                  infoSources={candidate.infoSources as Record<string, InfoSource> | null}
+                  fallback={candidate.resumeFallback}
+                />
+              </div>
 
               {/* Job requirements */}
               <div className="rounded-2xl border border-gray-200 bg-white p-4">
                 <div className="flex items-center gap-2 mb-3">
                   <DollarSign className="h-4 w-4 text-gray-400" />
-                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Job requirements</p>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Role requirements</p>
                 </div>
                 <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                   {candidate.jobSalaryMin != null && candidate.jobSalaryMax != null && (
                     <div className="rounded-lg border border-gray-100 bg-gray-50 p-2">
-                      <p className="text-[10px] text-gray-400 font-medium">Salary</p>
+                      <p className="text-[10px] text-gray-400 font-medium">Salary band</p>
                       <p className="text-sm font-semibold text-gray-800">{candidate.jobSalaryMin}–{candidate.jobSalaryMax}</p>
                     </div>
                   )}
@@ -359,35 +303,83 @@ export function PrescreenReviewModal({
             </div>
 
             {/* Footer */}
-            <div className="sticky bottom-0 border-t border-gray-100 bg-white px-6 py-4">
-              {!showReject ? (
-                <div className="flex items-center gap-3">
-                  <Button onClick={approve} disabled={loading} className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white h-11">
-                    {loading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <CheckCircle2 className="h-4 w-4 mr-2" />}
-                    Approve — Send Schedule Link
-                  </Button>
-                  <Button onClick={() => setShowReject(true)} disabled={loading} variant="outline" className="h-11 border-red-200 text-red-600 hover:bg-red-50">
-                    <XCircle className="h-4 w-4 mr-2" /> Reject
-                  </Button>
-                </div>
+            <div className="sticky bottom-0 border-t border-gray-100 bg-white px-6 py-4 space-y-3">
+              {!decision ? (
+                <>
+                  <div className="flex items-center gap-3">
+                    <Button
+                      onClick={() => setDecision("approved")}
+                      disabled={loading}
+                      className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white h-11"
+                    >
+                      <CheckCircle2 className="h-4 w-4 mr-2" />
+                      Proceed to call
+                    </Button>
+                    <Button
+                      onClick={() => setDecision("clarify")}
+                      disabled={loading}
+                      variant="outline"
+                      className="h-11 border-sky-200 text-sky-700 hover:bg-sky-50"
+                    >
+                      <HelpCircle className="h-4 w-4 mr-2" /> Ask a question
+                    </Button>
+                    <Button
+                      onClick={() => setDecision("rejected")}
+                      disabled={loading}
+                      variant="outline"
+                      className="h-11 border-red-200 text-red-600 hover:bg-red-50"
+                    >
+                      <XCircle className="h-4 w-4 mr-2" /> Pass
+                    </Button>
+                  </div>
+                  <p className="text-[11px] text-gray-400 text-center">
+                    Nothing is sent to the candidate until you choose.
+                  </p>
+                </>
               ) : (
                 <div className="space-y-2">
-                  <label className="text-xs font-medium text-gray-600">Reason for passing (optional)</label>
+                  <label className="text-xs font-medium text-gray-600">{notesByDecision[decision].label}</label>
                   <textarea
                     autoFocus
-                    rows={2}
-                    value={rejectNote}
-                    onChange={(e) => setRejectNote(e.target.value)}
+                    rows={3}
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
                     className="w-full resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                    placeholder="e.g. Salary mismatch, relocation concern…"
+                    placeholder={notesByDecision[decision].placeholder}
                   />
+                  {decision === "rejected" && (
+                    <p className="flex items-start gap-1.5 text-[11px] text-red-600">
+                      <AlertTriangle className="h-3 w-3 mt-0.5 shrink-0" />
+                      This tells the candidate the role isn't a fit. The reason is stored against your name.
+                    </p>
+                  )}
+                  {decision === "clarify" && (
+                    <p className="text-[11px] text-sky-700">
+                      Sends one WhatsApp message and waits. No call is booked until they reply and you decide again.
+                    </p>
+                  )}
                   <div className="flex gap-2">
-                    <Button onClick={reject} disabled={loading} className="flex-1 bg-red-600 hover:bg-red-700 text-white">
+                    <Button
+                      onClick={() => submit(decision)}
+                      disabled={loading}
+                      className={`flex-1 text-white ${
+                        decision === "approved"
+                          ? "bg-emerald-600 hover:bg-emerald-700"
+                          : decision === "rejected"
+                            ? "bg-red-600 hover:bg-red-700"
+                            : "bg-sky-600 hover:bg-sky-700"
+                      }`}
+                    >
                       {loading ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-                      Confirm pass
+                      {notesByDecision[decision].cta}
                     </Button>
-                    <Button onClick={() => { setShowReject(false); setRejectNote("") }} variant="outline" className="flex-1">
-                      Cancel
+                    <Button
+                      onClick={() => { setDecision(null); setNote("") }}
+                      variant="outline"
+                      className="flex-1"
+                      disabled={loading}
+                    >
+                      Back
                     </Button>
                   </div>
                 </div>

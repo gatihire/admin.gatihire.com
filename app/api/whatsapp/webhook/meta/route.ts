@@ -12,6 +12,8 @@ import {
   sendSessionMessage
 } from "@/lib/info-collector-v2"
 import { evaluatePreScreenWithAI, buildCandidateInfoFromCollected } from "@/lib/pre-screen"
+import { mergeSources, stampSources, isMeaningfulValue } from "@/lib/info-provenance"
+import { updateParticipant } from "@/lib/participant-update"
 import { buildResumeInfo } from "@/lib/prompt-user-data"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { scheduleOrPlaceCall } from "@/lib/scheduled-call"
@@ -260,8 +262,25 @@ async function handleInteractiveMessage(participant: any, interactive: any) {
       buttonTitle 
     })
     
-    const { handleInteractiveButton } = await import('@/lib/info-collector-v2')
-    await handleInteractiveButton(participant.id, buttonId, buttonTitle)
+    // Isolate the handler so a failure returns a 5xx that Meta will RETRY,
+    // instead of throwing out of this function and letting the whole webhook
+    // 200 with the reply unprocessed.
+    //
+    // A candidate tapped "Call Now", the message was delivered and read, and
+    // nothing happened: no call_attempts, no bolna_execution_id, no history
+    // entry. Any throw here used to bubble up and the delivery was silently
+    // swallowed, so the tap vanished with no trace and no way to replay it.
+    try {
+      const { handleInteractiveButton } = await import('@/lib/info-collector-v2')
+      await handleInteractiveButton(participant.id, buttonId, buttonTitle)
+    } catch (err: any) {
+      logger.error("Failed to handle button reply — returning 500 so Meta retries", {
+        participantId: participant.id,
+        buttonId,
+        error: err?.message || String(err),
+      })
+      throw err
+    }
   } else if (interactive.type === "nfm_reply") {
     // Structured answers from the collect_info_form WhatsApp Flow. Only act
     // while the participant is actually being asked for info — ignore stale
@@ -628,6 +647,7 @@ async function finalizeCollectedInfo(
   mergedInfoData: Record<string, any>,
   infoSource: "collect_all" | "collect_form",
   sourceText: string,
+  answeredFields?: Record<string, any>,
 ) {
   const phoneNumber = participant.candidates?.phone
 
@@ -671,33 +691,65 @@ async function finalizeCollectedInfo(
     reasons: preScreenResult.reasons,
   })
 
-  // Update participant with collected info and pre-screen result
+  // Update participant with collected info and pre-screen result.
+  //
+  // info_sources is written in the SAME update as info_data: every key the
+  // candidate just supplied is "whatsapp", while anything still sitting from the
+  // apply form keeps its original "application" provenance via mergeSources.
+  // Without this the UI labels apply-form values as WhatsApp-confirmed.
   const now = new Date().toISOString()
-  await supabaseAdmin
+  const { data: currentRow } = await supabaseAdmin
     .from("phone_screening_participants")
-    .update({
-      info_data: mergedInfoData,
-      // 'confirmed' is a sentinel that isInInfoFlow explicitly excludes (it
-      // excludes 'confirmed' and 'collect_all', NOT 'confirm'). The old
-      // 'confirm' value left participants stuck in the step-by-step re-ask.
-      info_step: 'confirmed',
-      info_confirmed: false,
-      whatsapp_reply_text: sourceText.slice(0, 500),
-      whatsapp_reply_at: now,
-      info_received_at: now,
-      screening_context: {
-        ...participant.screening_context,
-        infoReceivedVia: infoSource,
-        preScreenResult: {
-          decision: preScreenResult.decision,
-          reasons: preScreenResult.reasons,
-          summary: preScreenResult.summary,
-          evaluatedAt: new Date().toISOString(),
-        }
-      },
-      updated_at: now
-    })
+    .select("info_sources")
     .eq("id", participant.id)
+    .maybeSingle()
+
+  // Only the fields the candidate supplied in THIS message/reply are WhatsApp.
+  //
+  // mergedInfoData still holds values seeded from the apply form, so stamping
+  // all of its keys marked apply-form answers as "confirmed on WhatsApp" and
+  // relabelled them in the UI. answeredFields is what was just parsed.
+  const answeredNow = Object.keys(answeredFields ?? {}).filter((k) => {
+    const v = (answeredFields ?? {})[k]
+    return isMeaningfulValue(v)
+  })
+
+  logger.info("Provenance for this collection", {
+    participantId: participant.id,
+    infoSource,
+    stampedAsWhatsapp: answeredNow,
+    keptFromApplication: Object.keys(mergedInfoData).filter((k) => !answeredNow.includes(k)),
+  })
+
+  // This single update carries info_data, info_sources, the pre-screen result and
+  // the reply text. If ANY of it fails the candidate's answers plus the pre-screen
+  // verdict are lost while the webhook would still return 200 — silent data loss
+  // with no trace. updateParticipant retries without info_sources if that column
+  // has not been migrated yet, and throws for every other failure so Meta retries.
+  await updateParticipant(participant.id, {
+    info_data: mergedInfoData,
+    info_sources: mergeSources(currentRow?.info_sources, stampSources(answeredNow, "whatsapp")),
+    // 'confirmed' is a sentinel that isInInfoFlow explicitly excludes (it
+    // excludes 'confirmed' and 'collect_all', NOT 'confirm'). The old
+    // 'confirm' value left participants stuck in the step-by-step re-ask.
+    info_step: 'confirmed',
+    info_confirmed: false,
+    whatsapp_reply_text: sourceText.slice(0, 500),
+    whatsapp_reply_at: now,
+    info_received_at: now,
+    screening_context: {
+      ...participant.screening_context,
+      infoReceivedVia: infoSource,
+      preScreenResult: {
+        decision: preScreenResult.decision,
+        reasons: preScreenResult.reasons,
+        summary: preScreenResult.summary,
+        skippedChecks: preScreenResult.skippedChecks,
+        evaluatedAt: new Date().toISOString(),
+      }
+    },
+    updated_at: now,
+  })
 
   // Branch based on pre-screen decision
   switch (preScreenResult.decision) {
@@ -761,7 +813,7 @@ async function finalizeCollectedInfo(
       const { getWhatsAppService } = await import('@/lib/whatsapp')
       const sendResult = await getWhatsAppService().sendInteractiveButtons({
         phoneNumber,
-        body: "Thanks for sharing your details! To take this forward, Ayush AIR needs a quick 5-10 minute call to understand your background. When should Ayush AIR call you?",
+        body: "Thanks for sharing your details! To take this forward, our AI recruiter needs a quick 5-10 minute call to understand your background. When should we call you?",
         footer: "Reply 'call now' or pick a slot",
         buttons: [
           { id: "call_now", title: "Call Now" },
@@ -801,13 +853,63 @@ async function finalizeCollectedInfo(
     }
 
     case 'filtered_out': {
-      // Inform candidate they don't match
+      // ── NEVER tell the candidate they were rejected. ──────────────────────
+      // This branch used to set status "filtered_out" and immediately send
+      // "this role may not be the best match for your profile". Nothing human
+      // ever saw it.
+      //
+      // That is indefensible when the verdict is computed from parsed free text:
+      // a real candidate was rejected because his ₹11,40,000/yr expectation was
+      // compared against a job band stored as 40,000-70,000 PER MONTH — a 1000x
+      // units error — and he received a rejection message that no recruiter
+      // approved, for a role he may well have been a strong match for.
+      //
+      // So the AI's opinion is recorded and surfaced to HR, and the candidate
+      // hears NOTHING until a human decides. The row goes to the "AI suggests
+      // not suitable" queue, where one click either sends the schedule buttons
+      // (proceed to call) or sends the rejection with a reason (reject).
+      //
+      // Note the candidate is deliberately NOT blocked from the call here. They
+      // have already engaged with us, so silence is the least harmful option —
+      // but "no decision" is a decision HR has to notice, which is why this is
+      // recorded as an explicit pending review rather than a terminal status.
+      const reviewedAt = new Date().toISOString()
+      const { data: latest } = await supabaseAdmin
+        .from("phone_screening_participants")
+        .select("screening_context")
+        .eq("id", participant.id)
+        .maybeSingle()
+
       await supabaseAdmin
         .from("phone_screening_participants")
-        .update({ status: "filtered_out", updated_at: new Date().toISOString() })
+        .update({
+          status: "needs_review",
+          screening_context: {
+            ...(latest?.screening_context || participant.screening_context || {}),
+            // The AI recommendation is kept verbatim under preScreenResult
+            // (already written above). These flags mark that a human decision is
+            // outstanding, so the AI Screen can show an explicit queue.
+            aiSuggestsRejection: true,
+            aiSuggestsRejectionAt: reviewedAt,
+            pendingDecision: "ai_recommends_reject",
+          },
+          updated_at: reviewedAt,
+        })
         .eq("id", participant.id)
 
-      await sendSessionMessage(phoneNumber, "Thank you for your interest! Based on the details you shared, this role may not be the best match for your profile at this time. We'll keep your details on file for future opportunities.")
+      await appendToHistory(participant.id, {
+        at: reviewedAt,
+        kind: "pre_screen_review",
+        status: "pending",
+        detail:
+          "AI suggests this candidate may not be a fit. Nothing has been sent to the candidate — " +
+          "a recruiter must confirm before they hear anything.",
+      })
+
+      logger.info("AI suggested rejection — escalated to HR, candidate NOT messaged", {
+        participantId: participant.id,
+        reasons: preScreenResult.reasons,
+      })
       break
     }
   }
@@ -846,7 +948,7 @@ async function handleFlowFormReply(participant: any, nfmReply: any) {
 
     const mergedInfoData = { ...participant.info_data, ...fields }
     const sourceText = JSON.stringify({ ...mergedInfoData, flow_token: nfmReply?.flow_token || null })
-    await finalizeCollectedInfo(participant, mergedInfoData, "collect_form", sourceText)
+    await finalizeCollectedInfo(participant, mergedInfoData, "collect_form", sourceText, fields)
   } catch (error: any) {
     logger.error("Error handling flow form reply", {
       participantId: participant.id,
@@ -879,7 +981,7 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
     // Merge with existing info_data
     const mergedInfoData = { ...participant.info_data, ...allFields }
 
-    await finalizeCollectedInfo(participant, mergedInfoData, "collect_all", messageBody)
+    await finalizeCollectedInfo(participant, mergedInfoData, "collect_all", messageBody, allFields)
 
   } catch (error: any) {
     logger.error("Error handling collect_all reply", { 

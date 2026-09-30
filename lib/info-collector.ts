@@ -395,16 +395,20 @@ export async function handleDetailedInfoReply(
       const callDelaySec = 60
       const scheduled = await scheduleBolnaCall(participantId, callDelaySec)
       if (scheduled.scheduled) {
-        await supabaseAdmin
+        // scheduled_call_at is the real column. Writing scheduled_at (which does
+        // not exist) failed silently, so the QStash callback fired at a row whose
+        // guard refused it and the candidate was never actually dialled.
+        const { error: bookErr } = await supabaseAdmin
           .from("phone_screening_participants")
           .update({
             status: "call_scheduled",
-            scheduled_at: new Date(Date.now() + callDelaySec * 1000).toISOString(),
+            scheduled_call_at: new Date(Date.now() + callDelaySec * 1000).toISOString(),
             updated_at: new Date().toISOString(),
           })
           .eq("id", participantId)
         logger.info("Auto-scheduled AI call after info collection", {
-          participantId, candidateId: participant.candidate_id, delaySec: callDelaySec
+          participantId, candidateId: participant.candidate_id, delaySec: callDelaySec,
+          persisted: !bookErr, error: bookErr?.message
         })
       } else {
         logger.error("Failed to auto-schedule call after info collection", {

@@ -1,5 +1,6 @@
 import { supabaseAdmin } from '@/lib/supabase';
 import { logger } from '@/lib/logger';
+import { mergeSources, stampSources } from '@/lib/info-provenance';
 import { getWhatsAppService } from '@/lib/whatsapp';
 import { scheduleOrPlaceCall } from '@/lib/scheduled-call';
 import { 
@@ -49,6 +50,8 @@ interface ParticipantWithExtras {
   status: string;
   info_step: string;
   info_data: Record<string, any>;
+  /** Per-field provenance; see lib/info-provenance. */
+  info_sources: Record<string, any>;
   info_confirmed: boolean;
   whatsapp_message_id: string | null;
   origin: string;
@@ -253,6 +256,9 @@ async function handleStepByStepReply(participantId: string, replyText: string): 
           .from('phone_screening_participants')
           .update({
             info_data: mergedInfoData,
+            // Every field parsed out of THIS reply was typed by the candidate on
+            // WhatsApp, so it supersedes whatever the apply form seeded.
+            info_sources: mergeSources(participant.info_sources, stampSources(Object.keys(allFields), 'whatsapp')),
             info_step: 'confirmed',
             info_confirmed: false,
             updated_at: new Date().toISOString()
@@ -271,6 +277,7 @@ async function handleStepByStepReply(participantId: string, replyText: string): 
           .from('phone_screening_participants')
           .update({
             info_data: mergedInfoData,
+            info_sources: mergeSources(participant.info_sources, stampSources(Object.keys(allFields), 'whatsapp')),
             info_step: nextMissing,
             info_confirmed: false,
             updated_at: new Date().toISOString()
@@ -307,13 +314,17 @@ async function handleStepByStepReply(participantId: string, replyText: string): 
       return { success: true, action: 'next_step' };
     }
     
-    // Valid response - save and move to next step
+    // Valid response - save and move to next step.
+    // info_sources is written in the same update: a value the candidate just
+    // typed on WhatsApp is "whatsapp", including when it overwrites a value
+    // seeded from the apply form.
     const nextStep = getNextStep(currentStepKey);
-    
+
     await supabaseAdmin
       .from('phone_screening_participants')
       .update({
         info_data: { ...participant.info_data, [currentStepKey]: extraction.normalized_value },
+        info_sources: mergeSources(participant.info_sources, stampSources([currentStepKey], 'whatsapp')),
         info_step: nextStep || 'confirmed',
         info_confirmed: false,
         updated_at: new Date().toISOString()

@@ -222,18 +222,12 @@ const NEXT_ACTION_CONFIG: Record<string, { label: string; cta: string; icon: any
 function buildReviewCandidate(participant: any, application: Application): ReviewCandidate {
   const c = participant?.candidates || {}
   const job = participant?.jobs || {}
-  // Prefer structured fields collected via WhatsApp (info_data), fall back to candidate columns
-  const info = participant?.info_data || {}
-  const checks = participant?.prescreen_reason
-    ? participant.prescreen_reason.split("; ").map((r: string) => {
-        const [field, detail] = r.split(" (")
-        const detailClean = detail?.replace(/\)$/, "") || r
-        const isFail = r.includes("mismatch") || r.includes("insufficient") || r.includes("long") || r.includes("overqualified") || r.includes("below_range") || r.includes("above_range")
-        const isPass = r.includes("passed") || r.includes("within") || r.includes("same city") || r.includes("willing") || r.includes("acceptable")
-        return { field: field.replace(/_/g, " "), verdict: isFail ? "fail" as const : isPass ? "pass" as const : "review" as const, detail: detailClean }
-      })
-    : []
 
+  // Hand the modal the raw collected info plus its provenance map, rather than
+  // flattened per-field values. The modal has to be able to tell HR "this came
+  // from their application" vs "they said this on WhatsApp" — and it must not
+  // invent a WhatsApp transcript, because most of these values never crossed
+  // WhatsApp at all.
   return {
     participantId: participant?.id || "",
     candidateId: application.candidate_id,
@@ -242,16 +236,17 @@ function buildReviewCandidate(participant: any, application: Application): Revie
     currentCompany: c.current_company || null,
     phone: c.phone || null,
     email: c.email || null,
-    currentCtc: (info.current_ctc as string) || c.current_ctc || null,
-    expectedCtc: (info.expected_ctc as string) || c.expected_ctc || null,
-    totalExperience: (info.total_experience as string) || c.total_experience_years || null,
-    noticePeriod: (info.notice_period as string) || c.notice_period || null,
-    location: (info.location as string) || c.location_preference || c.location || null,
-    willingToRelocate: (info.willing_to_relocate != null ? /^(yes|y|true|1)$/i.test(String(info.willing_to_relocate)) : null) ?? c.willing_to_relocate ?? null,
-    reasonForSwitching: (info.reason_for_switching as string) || c.reason_for_switching || null,
-    aiPrescreenDecision: participant?.prescreen_decision || null,
-    aiPrescreenReason: participant?.prescreen_reason || null,
-    checks,
+    infoData: participant?.info_data || null,
+    infoSources: participant?.info_sources || null,
+    resumeFallback: {
+      total_experience: c.total_experience_years ?? c.total_experience ?? null,
+      location: c.location_preference || c.location || null,
+    },
+    preScreenResult: participant?.screening_context?.preScreenResult || null,
+    aiSuggestsRejection:
+      participant?.ai_suggests_rejection ?? participant?.screening_context?.aiSuggestsRejection ?? null,
+    aiSuggestsRejectionAt:
+      participant?.ai_suggests_rejection_at ?? participant?.screening_context?.aiSuggestsRejectionAt ?? null,
     jobTitle: job.title || null,
     jobSalaryMin: job.salary_min || null,
     jobSalaryMax: job.salary_max || null,
@@ -259,6 +254,8 @@ function buildReviewCandidate(participant: any, application: Application): Revie
     jobExpMax: job.experience_max_years || null,
     jobCity: job.city || null,
     infoReceivedAt: participant?.info_received_at || null,
+    clarificationQuestion: participant?.clarification_question || null,
+    clarificationAskedAt: participant?.clarification_asked_at || null,
   }
 }
 
@@ -299,17 +296,27 @@ function getActionForCard(application: Application, callStatus?: string, partici
     if (callStatus === "waiting") {
       const sentAt = participant?.whatsapp_sent_at || participant?.info_request_sent_at
       if (sentAt) {
-        const elapsed = formatRetryTime(sentAt) // This shows time since sent
-        return { label: `Waiting for candidate response — sent ${elapsed} ago`, cta: "Waiting", icon: Send, color: "bg-amber-50 border-amber-200 text-amber-800", action: null }
+        const elapsed = formatElapsedSince(sentAt)
+        return { label: `Waiting for candidate response — sent ${elapsed}`, cta: "Waiting", icon: Send, color: "bg-amber-50 border-amber-200 text-amber-800", action: null }
       }
       return { label: "WhatsApp sent — waiting for candidate to respond", cta: "Waiting", icon: Send, color: "bg-amber-50 border-amber-200 text-amber-800", action: null }
     }
 
     // REVIEW (AI prescreen flagged for HR)
     if (callStatus === "review") {
+      const aiSaysReject = participant?.screening_context?.aiSuggestsRejection
+      if (aiSaysReject) {
+        return {
+          label: "AI suggests this candidate may not be a fit — the candidate has NOT been told anything. Confirm before rejecting.",
+          cta: "Review & Decide",
+          icon: ShieldCheck,
+          color: "bg-red-50 border-red-200 text-red-800",
+          action: "review_info",
+        }
+      }
       return { label: "AI prescreen flagged — needs your review before scheduling", cta: "Review Info", icon: ShieldCheck, color: "bg-amber-50 border-amber-200 text-amber-800", action: "review_info" }
     }
-    
+
     // PENDING
     if (callStatus === "pending") return { label: "Not yet contacted — ready to start screening", cta: "Start Screening", icon: Play, color: "bg-zinc-50 border-zinc-200 text-zinc-800", action: "start_call" }
   }
@@ -318,6 +325,10 @@ function getActionForCard(application: Application, callStatus?: string, partici
   return config
 }
 
+/**
+ * Time counting DOWN to a future moment — "in 25 min". Used for retries and
+ * booked call slots.
+ */
 function formatRetryTime(nextRetryAt: string): string {
   const diff = new Date(nextRetryAt).getTime() - Date.now()
   if (diff <= 0) return "now"
@@ -325,6 +336,31 @@ function formatRetryTime(nextRetryAt: string): string {
   if (minutes < 60) return `${minutes} min`
   const hours = Math.floor(minutes / 60)
   return `${hours}h ${minutes % 60}m`
+}
+
+/**
+ * Time ELAPSED since a past moment — "2h ago".
+ *
+ * This was the same function as formatRetryTime, which is why the waiting state
+ * rendered "Waiting for candidate response — sent now ago": it was counting
+ * down to a timestamp in the past, immediately hit the `diff <= 0` branch, and
+ * returned "now". Every waiting card showed the same useless string.
+ */
+function formatElapsedSince(pastIso: string): string {
+  const then = new Date(pastIso).getTime()
+  if (Number.isNaN(then)) return "recently"
+  const diff = Date.now() - then
+  if (diff < 0) return "just now"
+  const minutes = Math.floor(diff / 60000)
+  if (minutes < 1) return "moments ago"
+  if (minutes < 60) return `${minutes} min ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) {
+    const rem = minutes % 60
+    return rem ? `${hours}h ${rem}m ago` : `${hours}h ago`
+  }
+  const days = Math.floor(hours / 24)
+  return days === 1 ? "yesterday" : `${days} days ago`
 }
 
 export function CandidatesTab({ jobId, applications, loading, activeStage, activeCallSubFilter, clientDecisions, participants: participantsProp, fitScores: fitScoresProp, missingFitCount = 0, backfillRunning = false, onStageSelect, onCallSubFilterChange, onStageChange, onApplicationUpdated, onViewProfile, onRefresh }: CandidatesTabProps) {
@@ -1475,7 +1511,12 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                     {participant.screening_context?.preScreenResult && (
                       <PreScreenVerdict result={participant.screening_context.preScreenResult} />
                     )}
-                    <CollectedInfoView infoData={participant.info_data} compact fallback={application.candidates} />
+                    <CollectedInfoView
+                      infoData={participant.info_data}
+                      infoSources={participant.info_sources}
+                      compact
+                      fallback={application.candidates}
+                    />
                   </div>
                 )}
               </div>

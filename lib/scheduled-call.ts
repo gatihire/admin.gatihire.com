@@ -165,9 +165,6 @@ interface ParticipantRow {
   whatsapp_sent_at?: string | null
   next_retry_at?: string | null
   scheduled_call_at?: string | null
-  /** Legacy due-time column written by older scheduling paths. Still honoured
-   *  so participants stranded before the scheduled_call_at fix stay callable. */
-  scheduled_at?: string | null
   campaign_id?: string | null
   candidates?: {
     id: string
@@ -197,7 +194,7 @@ export async function placeCallForParticipant(
     .from("phone_screening_participants")
     .select(`
       id, status, call_attempts, call_payload_json, info_data,
-      whatsapp_sent_at, next_retry_at, scheduled_call_at, scheduled_at, campaign_id,
+      whatsapp_sent_at, next_retry_at, scheduled_call_at, campaign_id,
       candidates: candidate_id (id, name, phone, total_experience, location)
     `)
     .eq("id", participantId)
@@ -227,9 +224,7 @@ export async function placeCallForParticipant(
     // or scheduled with an elapsed time) or a retry window for an already-attempted
     // call has passed (failed). whatsapp_sent alone NEVER triggers a call.
     if (row.status === "call_scheduled" || row.status === "scheduled") {
-      // scheduled_at is the legacy due-time column some writers used; accept it
-      // so an already-scheduled callback is never skipped as "not due yet".
-      const scheduledTime = row.scheduled_call_at || row.next_retry_at || row.scheduled_at
+      const scheduledTime = row.scheduled_call_at || row.next_retry_at
       if (!scheduledTime || new Date(scheduledTime).getTime() > Date.now()) {
         return { success: false, skipped: true, error: "Callback not due yet" }
       }
@@ -378,11 +373,10 @@ export async function scheduleOrPlaceCall(
 
     // Direct placement failed — book a real callback so this is never lost.
     const dueAt = new Date(Date.now() + CALLBACK_RETRY_DELAY_SECONDS * 1000).toISOString()
-    await supabaseAdmin
+    const { error: bookErr } = await supabaseAdmin
       .from("phone_screening_participants")
       .update({
         status: "call_scheduled",
-        scheduled_at: dueAt,
         scheduled_call_at: dueAt,
         next_retry_at: dueAt,
         updated_at: new Date().toISOString(),
@@ -400,7 +394,6 @@ export async function scheduleOrPlaceCall(
         .from("phone_screening_participants")
         .update({
           status: "failed",
-          scheduled_at: null,
           scheduled_call_at: null,
           next_retry_at: null,
           callback_preference: `Call callback could not be queued: ${scheduled.error || "QStash publish failed"}`,
@@ -408,6 +401,17 @@ export async function scheduleOrPlaceCall(
         })
         .eq("id", participantId)
       logger.error("Call callback could not be queued", { participantId, error: scheduled.error })
+    }
+
+    // A failed booking write means the QStash message will fire into a row whose
+    // guard rejects it ("Callback not due yet"), so the candidate is never
+    // dialled. Surface it rather than returning a normal result.
+    if (bookErr) {
+      logger.error("Failed to persist booked callback — call will not fire", {
+        participantId,
+        error: bookErr.message,
+      })
+      return { success: false, scheduled: false, error: `Could not book callback: ${bookErr.message}` }
     }
 
     return {
@@ -418,11 +422,10 @@ export async function scheduleOrPlaceCall(
   }
 
   const dueAt = new Date(Date.now() + delay * 1000).toISOString()
-  await supabaseAdmin
+  const { error: bookErr } = await supabaseAdmin
     .from("phone_screening_participants")
     .update({
       status: "call_scheduled",
-      scheduled_at: dueAt,
       scheduled_call_at: dueAt,
       updated_at: new Date().toISOString(),
     })
@@ -437,13 +440,21 @@ export async function scheduleOrPlaceCall(
       .from("phone_screening_participants")
       .update({
         status: "failed",
-        scheduled_at: null,
         scheduled_call_at: null,
         callback_preference: `Call could not be scheduled: ${result.error || "QStash publish failed"}`,
         updated_at: new Date().toISOString(),
       })
       .eq("id", participantId)
     logger.error("Call could not be scheduled", { participantId, delaySec: delay, error: result.error })
+  }
+
+  if (bookErr) {
+    logger.error("Failed to persist scheduled call — callback will not fire", {
+      participantId,
+      delaySec: delay,
+      error: bookErr.message,
+    })
+    return { success: false, scheduled: false, error: `Could not schedule call: ${bookErr.message}` }
   }
 
   return { success: false, scheduled: result.scheduled, error: result.error }

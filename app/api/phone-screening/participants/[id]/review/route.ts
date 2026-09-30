@@ -42,8 +42,12 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     }
 
     const now = new Date().toISOString()
+    // The column's CHECK (20260802_call_pipeline.sql) only allows
+    // 'pending' | 'approved' | 'rejected'. This used to write the request's
+    // verb directly ("approve"/"reject"), so every review POST failed the
+    // constraint and returned 500 — the review queue could never be cleared.
     const reviewPatch: any = {
-      review_status: decision,
+      review_status: decision === "approve" ? "approved" : "rejected",
       reviewed_by: ctx.authUser.id,
       reviewed_at: now,
       updated_at: now,
