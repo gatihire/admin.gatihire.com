@@ -12,8 +12,9 @@ import {
   sendSessionMessage
 } from "@/lib/info-collector-v2"
 import { evaluatePreScreenWithAI, buildCandidateInfoFromCollected } from "@/lib/pre-screen"
+import { buildResumeInfo } from "@/lib/prompt-user-data"
 import { getWhatsAppService } from "@/lib/whatsapp"
-import { scheduleBolnaCall } from "@/lib/scheduled-call"
+import { scheduleOrPlaceCall } from "@/lib/scheduled-call"
 import { classifyIntent } from "@/lib/ai-intent-classifier"
 import { toE164 } from "@/lib/phone"
 import crypto from "crypto"
@@ -182,7 +183,7 @@ async function handleIncomingMessage(message: any, contact: any) {
         .from("phone_screening_participants")
         .select(`
           *,
-          candidates:candidate_id (id, name, phone, email),
+          candidates:candidate_id (id, name, phone, email, total_experience, location),
           jobs:job_id (id, title, client_name, city, location, salary_min, salary_max, experience_min_years, experience_max_years)
         `)
         .in("candidate_id", matchedCandidateIds)
@@ -498,35 +499,30 @@ async function dispatchIntent(participant: any, classification: { intent: string
 async function scheduleCall(participant: any, delayMs: number) {
   const scheduledTime = new Date(Date.now() + delayMs)
 
-  logger.info("Scheduling call", { 
-    participantId: participant.id, 
-    delayMs, 
+  logger.info("Scheduling call", {
+    participantId: participant.id,
+    delayMs,
     scheduledTime: scheduledTime.toISOString(),
-    currentStatus: participant.status 
+    currentStatus: participant.status
   })
 
-  await supabaseAdmin
-    .from("phone_screening_participants")
-    .update({
-      status: "call_scheduled",
-      scheduled_at: scheduledTime.toISOString(),
-      updated_at: new Date().toISOString()
+  // scheduleOrPlaceCall owns the DB write (both due-time columns) and the
+  // delivery decision: due now → direct placement, otherwise QStash. It also
+  // books a callback if a direct placement fails, so "call now" can never end
+  // up as a database row with no actual call behind it.
+  const result = await scheduleOrPlaceCall(participant.id, Math.max(0, Math.round(delayMs / 1000)))
+
+  if (result.success) {
+    logger.info("Call placed immediately", { participantId: participant.id })
+  } else if (result.skipped) {
+    logger.info("Call already in flight — not duplicating", {
+      participantId: participant.id,
+      reason: result.error,
     })
-    .eq("id", participant.id)
-
-  logger.info("Call scheduled in DB", { 
-    participantId: participant.id, 
-    scheduledTime: scheduledTime.toISOString() 
-  })
-
-  // Schedule via QStash
-  const delaySeconds = Math.max(0, Math.round(delayMs / 1000))
-  logger.info("Scheduling via QStash", { participantId: participant.id, delaySeconds })
-  const result = await scheduleBolnaCall(participant.id, delaySeconds)
-  if (!result.scheduled) {
-    logger.error("Failed to schedule call via QStash", { participantId: participant.id, error: result.error })
-  } else {
+  } else if (result.scheduled) {
     logger.info("Successfully scheduled via QStash", { participantId: participant.id })
+  } else {
+    logger.error("Failed to schedule or place call", { participantId: participant.id, error: result.error })
   }
 }
 
@@ -657,8 +653,13 @@ async function finalizeCollectedInfo(
   // Run AI pre-screen evaluation on the normalized numeric CandidateInfo
   // (extracted strings like "8 LPA"/"5 years" never satisfied the numeric
   // checks, so every candidate used to sail through as "proceed").
+  //
+  // Total experience and current location are trusted from the resume and are no
+  // longer seeded into info_data, so overlay them here for the evaluation only.
+  // Without this the experience-band check would run against a blank value.
+  const resumeInfo = buildResumeInfo(participant.candidates || {})
   const preScreenResult = await evaluatePreScreenWithAI(
-    buildCandidateInfoFromCollected(mergedInfoData),
+    buildCandidateInfoFromCollected({ ...resumeInfo, ...mergedInfoData }),
     jobRequirements,
     preScreenConfig
   )

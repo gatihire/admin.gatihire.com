@@ -15,6 +15,7 @@ import {
   Lightbulb
 } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { getCallTruth } from "@/lib/call-truth"
 import { Badge } from "@/components/ui/badge"
 
 interface Participant {
@@ -24,6 +25,7 @@ interface Participant {
   whatsapp_response: string | null
   whatsapp_reply_text: string | null
   bolna_status: string | null
+  bolna_execution_id?: string | null
   call_attempts: number
   retry_count: number
   next_retry_at: string | null
@@ -46,6 +48,8 @@ interface AnalyticsSummary {
   callSuccessRate: number
   avgAttemptsBeforeSuccess: number
   commonFailures: Array<{ reason: string; count: number; percentage: number }>
+  /** Calls the provider confirmed as completed (picked up + finished). */
+  callsCompleted: number
   recommendation: string
 }
 
@@ -62,6 +66,7 @@ export function RootCauseAnalytics({ participants }: RootCauseAnalyticsProps) {
         callSuccessRate: 0,
         avgAttemptsBeforeSuccess: 0,
         commonFailures: [],
+        callsCompleted: 0,
         recommendation: "No candidates in pipeline yet.",
       }
     }
@@ -78,43 +83,32 @@ export function RootCauseAnalytics({ participants }: RootCauseAnalyticsProps) {
     const failureReasons: Record<string, number> = {}
     
     participants.forEach((p) => {
-      // Determine group using same logic as callSubSection
-      let group = "pending"
-      
-      // DONE
-      if (p.status === "completed") group = "done"
-      
-      // FAILED
-      if (p.status === "not_interested" || p.status === "unreachable") group = "failed"
-      if (p.status === "failed" && !p.next_retry_at) group = "failed"
-      if (p.bolna_status === "canceled" || p.bolna_status === "stopped") group = "failed"
-      
-      // CALLING
-      if (p.status === "in_progress" || p.status === "calling" || p.status === "call_scheduled") group = "calling"
-      if (p.status === "failed" && p.next_retry_at) group = "calling"
-      
-      // ENGAGED
-      if (p.whatsapp_response || p.whatsapp_reply_text) { group = "engaged"; responded++ }
-      if (p.status === "info_received" || p.info_received_at) { group = "engaged"; infoReceived++ }
-      if (p.status === "interested" || p.status === "call_me_now") group = "engaged"
-      
-      // WAITING
-      if (p.status === "info_requested" || p.info_request_sent_at) { group = "waiting"; infoRequested++ }
-      if (p.status === "whatsapp_sent" || p.whatsapp_delivery_status || p.whatsapp_sent_at) group = "waiting"
-      
+      // Same derivation the cards use, so the analytics never disagree with
+      // what a recruiter sees on the pipeline.
+      const truth = getCallTruth(p)
+      const group = truth.bucket
+
       byGroup[group] = (byGroup[group] || 0) + 1
-      
-      // Call tracking
-      totalAttempts += p.call_attempts || 0
-      if (p.bolna_status === "completed") {
+
+      // Count a call as placed only when the provider gave us an execution id —
+      // incremented counters alone proved nothing about a real dial.
+      if (p.bolna_execution_id) {
+        totalAttempts += p.call_attempts || 1
+      }
+
+      if (truth.state === "completed") {
         callsCompleted++
         successfulCalls++
       }
-      
-      // Failure reasons
+
+      if (p.whatsapp_response || p.whatsapp_reply_text) responded++
+      if (p.status === "info_received" || p.info_received_at) infoReceived++
+      if (p.status === "info_requested" || p.info_request_sent_at) infoRequested++
+
+      // Attribute the failure to the real cause, distinguishing "the candidate
+      // didn't answer" from "the call never got out".
       if (group === "failed") {
-        const reason = p.bolna_status || p.status
-        failureReasons[reason] = (failureReasons[reason] || 0) + 1
+        failureReasons[truth.state] = (failureReasons[truth.state] || 0) + 1
       }
     })
     
@@ -138,7 +132,7 @@ export function RootCauseAnalytics({ participants }: RootCauseAnalyticsProps) {
     let recommendation = ""
     const failedCount = byGroup.failed || 0
     const waitingCount = byGroup.waiting || 0
-    const noAnswerCount = failureReasons["no-answer"] || failureReasons["no_answer"] || 0
+    const noAnswerCount = failureReasons["no_answer"] || 0
     
     if (failedCount > total * 0.3) {
       recommendation = `${Math.round((failedCount / total) * 100)}% failure rate. Consider varying call times or adding more WhatsApp follow-ups.`
@@ -160,20 +154,23 @@ export function RootCauseAnalytics({ participants }: RootCauseAnalyticsProps) {
       callSuccessRate,
       avgAttemptsBeforeSuccess,
       commonFailures,
+      callsCompleted,
       recommendation,
     }
   }, [participants])
   
   if (analytics.total === 0) return null
   
+  // Keys are call-truth states, so a failure is always attributed to a cause we
+  // can actually prove (the candidate didn't pick up vs the call never got out).
   const failureReasonLabels: Record<string, string> = {
-    no_answer: "No Answer",
-    "no-answer": "No Answer",
-    busy: "Line Busy",
-    disconnected: "Call Dropped",
-    failed: "Call Failed",
-    unreachable: "Unreachable",
-    not_interested: "Not Interested",
+    no_answer: "Rang out, no answer",
+    busy: "Line busy",
+    voicemail: "Went to voicemail",
+    partial: "Hung up mid-call",
+    our_side_failed: "Failed on our side",
+    rejected: "Rejected by provider",
+    not_placed: "No call was ever placed",
   }
   
   return (
@@ -206,7 +203,7 @@ export function RootCauseAnalytics({ participants }: RootCauseAnalyticsProps) {
             </div>
             <p className="text-2xl font-bold text-blue-800">{analytics.callSuccessRate.toFixed(1)}%</p>
             <p className="text-[10px] text-blue-600 mt-0.5">
-              {analytics.byGroup.done || 0} completed
+              {analytics.callsCompleted} completed of the calls the provider actually placed
             </p>
           </div>
           

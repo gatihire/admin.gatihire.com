@@ -21,6 +21,7 @@ import { CandidateActivityTimeline } from "./candidate-activity-timeline"
 import { CandidateTimeline } from "./candidate-timeline"
 import { CandidateMetricsBar } from "./candidate-metrics-bar"
 import { CollectedInfoView, PreScreenVerdict } from "./candidate-collected-info"
+import { getCallTruth, CALL_TRUTH_FILTERS } from "@/lib/call-truth"
 import { RootCauseAnalytics } from "./root-cause-analytics"
 import {
   Loader2, User, MapPin, Briefcase, Eye, Sparkles, Mail, Phone, ChevronDown, ChevronUp,
@@ -69,7 +70,9 @@ interface Application {
 }
 
 type FilterValue = "all" | "inbound" | "outbound" | "database" | "board-app"
-type CallSubFilter = "all" | "pending" | "waiting" | "engaged" | "calling" | "done" | "failed" | "review" | "rejected" | "waitlist" | "on_hold" | "passed" | "move_next"
+/** AI Screen chips are driven by call-truth ids (see CALL_TRUTH_FILTERS) plus the
+ *  interview-stage sub-sections, which use their own vocabulary. */
+type CallSubFilter = string
 
 interface CandidateCardProps {
   application: Application
@@ -83,7 +86,9 @@ interface CandidateCardProps {
   fitScore?: number
   callNowBusy?: boolean
   nudgeBusy?: boolean
+  verifyBusy?: boolean
   onCallNow?: () => void
+  onVerifyStatus?: () => void
   onNudgeStart?: () => void
   onNudgeEnd?: () => void
   onSelect: (id: string) => void
@@ -128,33 +133,9 @@ const STATUS_COLUMNS = [
   { id: "rejected", label: "Rejected", color: "bg-red-600", lightColor: "bg-red-50 text-red-600" },
 ]
 
-const CALL_SUB_SECTIONS = [
-  { id: "pending", label: "Pending", hint: "Not yet contacted", icon: "clock" },
-  { id: "waiting", label: "Waiting", hint: "WhatsApp sent or info requested — waiting for response", icon: "send" },
-  { id: "engaged", label: "Engaged", hint: "Candidate replied or info collected — ready to call", icon: "message" },
-  { id: "review", label: "Review", hint: "AI prescreen flagged — needs HR decision before scheduling", icon: "shield" },
-  { id: "calling", label: "Calling", hint: "AI call in progress or auto-retry scheduled", icon: "phone" },
-  { id: "done", label: "Done", hint: "Screening complete — review results", icon: "check" },
-  { id: "failed", label: "Failed", hint: "No answer / busy / disconnected — manual follow-up needed", icon: "alert" },
-] as const
-
-const CALL_STATUS_COLORS: Record<string, string> = {
-  pending: "bg-zinc-100 text-zinc-600",
-  waiting: "bg-amber-50 text-amber-700",
-  engaged: "bg-green-50 text-green-700",
-  calling: "bg-blue-50 text-blue-700",
-  done: "bg-emerald-50 text-emerald-700",
-  failed: "bg-red-50 text-red-700",
-}
-
-const CALL_STATUS_ICONS: Record<string, any> = {
-  pending: Clock,
-  waiting: Send,
-  engaged: MessageCircle,
-  calling: PhoneCall,
-  done: CheckCircle,
-  failed: AlertCircle,
-}
+// The old "Pending / Waiting / Engaged / Calling / Done / Failed" chips are gone:
+// they were derived from wall-clock time and from statuses the provider had not
+// confirmed. Call-truth filters (lib/call-truth.ts) replace them.
 
 const INTERVIEW_SUB_SECTIONS = [
   { id: "all", label: "All", hint: "All candidates in interview stage" },
@@ -212,63 +193,15 @@ function toDateTimeLocal(iso: string | null): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
+// Bucket for the AI Screen stage. Every decision comes from real provider data
+// via getCallTruth — never from how long a row has been sitting in a status.
 function callSubSection(participant: any): string {
-  const status = participant?.status
+  // An HR decision outranks the call state: an approved/rejected review is the
+  // terminal answer for that candidate.
   const review = participant?.review_status
-  const delivery = participant?.whatsapp_delivery_status
-  const reply = participant?.whatsapp_response || participant?.whatsapp_reply_text
-  const bolnaStatus = participant?.bolna_status
-  const retryCount = participant?.retry_count || 0
-  const nextRetryAt = participant?.next_retry_at
-  const lastAttemptAt = participant?.last_attempt_at
-  const infoRequestSentAt = participant?.info_request_sent_at
-  const infoReceivedAt = participant?.info_received_at
-  const whatsappSentAt = participant?.whatsapp_sent_at
-
-  // ── DONE (terminal success) ──
   if (review === "approved") return "done"
-  if (status === "completed") return "done"
-
-  // ── FAILED (terminal failure) ──
   if (review === "rejected") return "failed"
-  if (status === "not_interested") return "failed"
-  if (status === "unreachable") return "failed"
-  if (status === "failed_partial") return "failed"  // partial call, needs review
-  if (status === "failed" && !nextRetryAt) return "failed"  // no retry = terminal
-  if (bolnaStatus === "canceled" || bolnaStatus === "stopped") return "failed"
-
-  // ── CALLING (active call or retrying) ──
-  if (status === "in_progress" || status === "calling" || status === "call_scheduled") return "calling"
-  if (status === "failed" && nextRetryAt) return "calling"  // has retry = still trying
-  if (bolnaStatus === "no-answer" || bolnaStatus === "busy") {
-    // Call failed but may retry
-    if (nextRetryAt) return "calling"
-    return "failed"  // no more retries
-  }
-  // Auto-timeout: if call has been in calling/in_progress for >3 minutes
-  if ((status === "calling" || status === "in_progress") && lastAttemptAt) {
-    const elapsed = Date.now() - new Date(lastAttemptAt).getTime()
-    const THREE_MINUTES = 3 * 60 * 1000
-    if (elapsed > THREE_MINUTES) {
-      return nextRetryAt ? "calling" : "failed"
-    }
-  }
-
-  // ── ENGAGED (replied or info received) ──
-  if (reply) return "engaged"
-  if (status === "info_received" || infoReceivedAt) return "engaged"
-  if (status === "interested" || status === "call_me_now") return "engaged"
-
-  // ── WAITING (sent but no reply yet) ──
-  if (status === "info_requested" || infoRequestSentAt) return "waiting"
-  if (status === "whatsapp_sent" || delivery === "delivered" || delivery === "sent" || delivery === "read") return "waiting"
-  if (whatsappSentAt) return "waiting"
-
-  // ── NEEDS REVIEW (AI prescreen flagged for HR) ──
-  if (status === "needs_review") return "review"
-
-  // ── PENDING ──
-  return "pending"
+  return getCallTruth(participant).bucket
 }
 
 function interviewSubSection(entry: InterviewEntry | undefined): string {
@@ -603,8 +536,8 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
         return interviewSubSection(entry) === callSubFilter
       }
       if (activeStage !== "ai_screen" || callSubFilter === "all") return true
-      const participant = participantDataByCandidate[a.candidate_id]
-      return callSubSection(participant) === callSubFilter
+      const t = getCallTruth(participantDataByCandidate[a.candidate_id])
+      return CALL_TRUTH_FILTERS.find((f) => f.id === callSubFilter)?.match(t) ?? true
     })
     .sort((a, b) => {
       // Sort by fit_score descending (best first), then by applied_at descending
@@ -685,10 +618,51 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || "Failed to place call")
-      toast({ title: "Call placed", description: "AI call triggered for this candidate" }); fetchParticipants(); onRefresh()
+      if (data.callPlaced === false) {
+        toast({ title: "No call was placed", description: "The provider did not accept the call. Use Verify to check the provider status.", variant: "destructive" })
+      } else {
+        toast({
+          title: "Call accepted by the provider",
+          description: data.executionId
+            ? `Execution ${String(data.executionId).slice(0, 12)}… — awaiting the outcome`
+            : "Placed — awaiting the outcome",
+        })
+      }
+      fetchParticipants(); onRefresh()
     } catch (err: any) {
-      toast({ title: "Failed to place call", description: err.message, variant: "destructive" })
+      toast({ title: "Call was not placed", description: err.message, variant: "destructive" })
     } finally { setCallNowCandidate(null) }
+  }
+
+  // Re-poll the telephony provider for one participant so HR sees the real
+  // outcome instead of waiting on a webhook (or a stale "awaiting" badge).
+  const [verifyCandidate, setVerifyCandidate] = useState<string | null>(null)
+  const verifyCallStatus = async (candidateId: string) => {
+    const participantId = participantIdByCandidate[candidateId]
+    if (!participantId) { toast({ title: "No screening record", description: "This candidate has no phone-screening entry yet", variant: "destructive" }); return }
+    setVerifyCandidate(candidateId)
+    try {
+      const res = await fetch("/api/phone-screening/reconcile", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ participantId }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || "Could not verify")
+      if (data.success) {
+        toast({ title: "Provider confirmed", description: `Reported status: ${data.status}` })
+      } else if (data.noExecutionFound) {
+        toast({ title: "No call was placed", description: data.message, variant: "destructive" })
+      } else if (data.inProgress) {
+        toast({ title: "Call still open at the provider", description: data.message })
+      } else if (data.dryRun) {
+        toast({ title: "Dry run", description: data.message })
+      } else {
+        toast({ title: "No terminal status yet", description: data.message || "The provider has not reported an outcome" })
+      }
+      fetchParticipants(); onRefresh()
+    } catch (err: any) {
+      toast({ title: "Could not verify with provider", description: err.message, variant: "destructive" })
+    } finally { setVerifyCandidate(null) }
   }
 
   const bulkMove = async () => {
@@ -849,16 +823,15 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
           </div>
         )}
 
-        {/* ── AI Screen Sub-Filters ── */}
+        {/* ── AI Screen Call-Outcome Filters ── */}
         {activeStage === "ai_screen" && (
           <div className="space-y-2 px-1">
             <div className="flex flex-wrap items-center gap-1.5">
-              {CALL_SUB_SECTIONS.map((sub) => {
-                const count = (activeStage === "ai_screen" ? baseFiltered : applications.filter((a) => a.status === activeStage))
-                  .filter((a) => {
-                    const participant = participantDataByCandidate[a.candidate_id]
-                    return callSubSection(participant) === sub.id
-                  }).length
+              {CALL_TRUTH_FILTERS.map((sub) => {
+                const count = baseFiltered.filter((a) => {
+                  const t = getCallTruth(participantDataByCandidate[a.candidate_id])
+                  return sub.match(t)
+                }).length
                 return (
                   <button
                     key={sub.id}
@@ -878,12 +851,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
               )}
             </div>
             <p className="text-xs text-zinc-400 leading-relaxed">
-              <span className="font-semibold text-zinc-500">Pending</span> → <span className="font-semibold text-zinc-500">Waiting</span> → <span className="font-semibold text-zinc-500">Engaged</span> → <span className="font-semibold text-zinc-500">Calling</span> → <span className="font-semibold text-zinc-500">Done</span>
-              {callSubFilter === "waiting" && <span className="ml-2 text-amber-600">• Waiting for candidate to respond</span>}
-              {callSubFilter === "engaged" && <span className="ml-2 text-green-600">• Candidate ready to call</span>}
-              {callSubFilter === "calling" && <span className="ml-2 text-blue-600">• AI call in progress or retrying</span>}
-              {callSubFilter === "done" && <span className="ml-2 text-emerald-600">• Screening complete — review results</span>}
-              {callSubFilter === "failed" && <span className="ml-2 text-red-600">• Needs manual follow-up</span>}
+              Every badge reflects what the call provider actually reported — a call is only shown as placed once the provider accepted it, and an outcome is only shown once the provider confirmed it.
             </p>
           </div>
         )}
@@ -1148,7 +1116,9 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
                     fitScore={fitScores[app.candidate_id]}
                     callNowBusy={callNowCandidate === app.candidate_id}
                     nudgeBusy={nudgeBusyCandidate === app.candidate_id}
+                    verifyBusy={verifyCandidate === app.candidate_id}
                     onCallNow={() => callCandidateNow(app.candidate_id)}
+                    onVerifyStatus={() => verifyCallStatus(app.candidate_id)}
                     onNudgeStart={() => setNudgeBusyCandidate(app.candidate_id)}
                     onNudgeEnd={() => { setNudgeBusyCandidate(null); fetchParticipants(); onRefresh() }}
                     onSelect={() => toggleSelect(app.id)}
@@ -1301,7 +1271,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
    CANDIDATE CARD — Premium Redesign
    ═══════════════════════════════════════════════════════════════════ */
 
-function CandidateCard({ application, jobId, callStatus, participant, aiInfo, clientDecision, selected, isNew, fitScore, callNowBusy, nudgeBusy, onCallNow, onNudgeStart, onNudgeEnd, onSelect, onViewProfile, onViewResults, onReviewInfo, onStageChange, onApplicationUpdated, interviewEntry, interviewDraft, onInterviewUpdate, onInterviewDraftChange }: CandidateCardProps) {
+function CandidateCard({ application, jobId, callStatus, participant, aiInfo, clientDecision, selected, isNew, fitScore, callNowBusy, nudgeBusy, verifyBusy, onCallNow, onVerifyStatus, onNudgeStart, onNudgeEnd, onSelect, onViewProfile, onViewResults, onReviewInfo, onStageChange, onApplicationUpdated, interviewEntry, interviewDraft, onInterviewUpdate, onInterviewDraftChange }: CandidateCardProps) {
   const c = application.candidates
   const { toast } = useToast()
   const [notesDraft, setNotesDraft] = useState<string>(application.notes || "")
@@ -1313,6 +1283,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
   const [detailsExpanded, setDetailsExpanded] = useState(false)
 
   const nextAction = useMemo(() => getActionForCard(application, callStatus, participant), [application.status, callStatus, participant])
+  const callTruth = useMemo(() => getCallTruth(participant), [participant])
   const aiScore = aiInfo?.score
   const hasMatchScore = application.match_score !== null && application.match_score !== undefined
 
@@ -1467,44 +1438,36 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                     Applied {formatDistanceToNow(new Date(application.applied_at), { addSuffix: true })}
                   </span>
                 </div>
-                {/* WhatsApp Status Badge + Metrics */}
-                {participant && (
-                  <div className="mt-2">
-                    <div className="flex items-center gap-1.5">
-                      <Badge
-                        className={`text-[10px] font-semibold px-2 py-0.5 ${
-                          callStatus === "done" ? "bg-green-100 text-green-700 border-green-200" :
-                          callStatus === "engaged" ? "bg-emerald-100 text-emerald-700 border-emerald-200" :
-                          callStatus === "calling" ? "bg-blue-100 text-blue-700 border-blue-200" :
-                          callStatus === "waiting" ? "bg-amber-100 text-amber-700 border-amber-200" :
-                          callStatus === "failed" ? "bg-red-100 text-red-700 border-red-200" :
-                          "bg-zinc-100 text-zinc-600 border-zinc-200"
-                        }`}
-                      >
-                        {callStatus === "done" && <CheckCircle className="h-3 w-3 mr-1" />}
-                        {callStatus === "engaged" && <MessageCircle className="h-3 w-3 mr-1" />}
-                        {callStatus === "calling" && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
-                        {callStatus === "waiting" && <Send className="h-3 w-3 mr-1" />}
-                        {callStatus === "failed" && <AlertCircle className="h-3 w-3 mr-1" />}
-                        <span className="capitalize">{(callStatus || "pending").replace(/_/g, " ")}</span>
-                      </Badge>
-                      {participant.whatsapp_delivery_status && (
-                        <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${
-                          participant.whatsapp_delivery_status === "read" ? "text-green-600 border-green-200" :
-                          participant.whatsapp_delivery_status === "delivered" ? "text-blue-600 border-blue-200" :
-                          participant.whatsapp_delivery_status === "sent" ? "text-zinc-500 border-zinc-200" :
-                          "text-red-500 border-red-200"
-                        }`}>
-                          {participant.whatsapp_delivery_status === "read" && <CheckCheck className="h-3 w-3 mr-0.5" />}
-                          {participant.whatsapp_delivery_status === "delivered" && <Check className="h-3 w-3 mr-0.5" />}
-                          <span className="capitalize">{participant.whatsapp_delivery_status}</span>
-                        </Badge>
-                      )}
-                    </div>
-                    {/* Metrics Bar */}
-                    <CandidateMetricsBar participant={participant} callStatus={callStatus || "pending"} />
-                  </div>
-                )}
+                    {/* Call truth — states exactly what happened, sourced from the provider */}
+                    {participant && (
+                      <div className="mt-2">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[10px] font-bold bg-white ${callTruth.toneClasses} border-current/25`}>
+                            <span className={`h-1.5 w-1.5 rounded-full ${callTruth.dotClasses}`} />
+                            {callTruth.label}
+                          </span>
+                          {participant.whatsapp_delivery_status && (
+                            <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${
+                              participant.whatsapp_delivery_status === "read" ? "text-green-600 border-green-200" :
+                              participant.whatsapp_delivery_status === "delivered" ? "text-blue-600 border-blue-200" :
+                              participant.whatsapp_delivery_status === "sent" ? "text-zinc-500 border-zinc-200" :
+                              "text-red-500 border-red-200"
+                            }`}>
+                              {participant.whatsapp_delivery_status === "read" && <CheckCheck className="h-3 w-3 mr-0.5" />}
+                              {participant.whatsapp_delivery_status === "delivered" && <Check className="h-3 w-3 mr-0.5" />}
+                              <span className="capitalize">{participant.whatsapp_delivery_status}</span>
+                            </Badge>
+                          )}
+                        </div>
+                        <p className="mt-1 text-[11px] leading-snug text-zinc-500">{callTruth.detail}</p>
+                        {participant.bolna_execution_id && (
+                          <p className="mt-0.5 text-[10px] font-mono text-zinc-400">
+                            execution {String(participant.bolna_execution_id).slice(0, 12)}…
+                          </p>
+                        )}
+                        <CandidateMetricsBar participant={participant} callStatus={callStatus || "pending"} />
+                      </div>
+                    )}
 
                 {/* Structured reply: fields ingested via Gemini */}
                 {participant && participant.info_data && Object.keys(participant.info_data).length > 0 && (
@@ -1530,9 +1493,11 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                     size="sm"
                     variant="outline"
                     className="h-7 text-xs font-bold shrink-0 bg-white/80 hover:bg-white border-current/20"
+                    disabled={callNowBusy}
                     onClick={handleNextAction}
                   >
-                    {nextAction.cta}
+                    {callNowBusy && <Loader2 className="h-3 w-3 mr-1 animate-spin" />}
+                    {callNowBusy ? "Calling…" : nextAction.cta}
                   </Button>
                 ) : (
                   <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-white/50 border border-current/20">
@@ -1553,6 +1518,24 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                 </TooltipTrigger>
                 <TooltipContent>View profile</TooltipContent>
               </Tooltip>
+
+              {/* Verify with the call provider — re-poll for the real outcome */}
+              {participant && application.status === "ai_screen" && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 w-8 p-0 rounded-lg"
+                      disabled={verifyBusy}
+                      onClick={() => onVerifyStatus?.()}
+                    >
+                      {verifyBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Check the call provider for the real outcome</TooltipContent>
+                </Tooltip>
+              )}
 
               {/* AI Analysis button — shows match score or AI screening score */}
               {(aiScore != null || application.match_score != null) && (

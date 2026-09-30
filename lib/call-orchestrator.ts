@@ -8,7 +8,7 @@ import { supabaseAdmin } from "@/lib/supabase"
 import { placeBolnaCall } from "@/lib/bolna"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { generateJDQuestions } from "@/lib/jd-questions"
-import { buildAlreadyCollectedUserData } from "@/lib/prompt-user-data"
+import { buildAlreadyCollectedUserData, buildResumeInfo } from "@/lib/prompt-user-data"
 import { scheduleOutreachFollowup, scheduleBolnaCall, outreachNudgeHours, outreachEscalateHours } from "@/lib/scheduled-call"
 import { type CandidateOrigin, type CandidateFlow, deriveCandidateFlow } from "@/lib/origin"
 import { logger } from "@/lib/logger"
@@ -40,21 +40,26 @@ export interface ScreeningCandidate {
 // fields are pre-seeded instead of asking for the 7-field WhatsApp request.
 // Only fields we genuinely know are set — anything unset stays "Not provided on
 // WhatsApp" in the call prompt and becomes a NEW-signal probe on the call.
+//
+// Total experience and current location are deliberately NOT seeded here: they
+// come from the resume, we trust them, and we never ask the candidate to confirm
+// them. Putting them in info_data made the portal count WhatsApp-collected fields
+// we never actually collected. They reach the call via buildResumeInfo() so the
+// AI still treats them as known and does not ask.
 function seedAlreadyCollectedInfo(candidate: ScreeningCandidate): Record<string, unknown> {
   const info: Record<string, unknown> = {}
   if (candidate.current_ctc) info.current_ctc = String(candidate.current_ctc)
   if (candidate.expected_ctc) info.expected_ctc = String(candidate.expected_ctc)
   if (candidate.notice_period) info.notice_period = String(candidate.notice_period)
-  if (candidate.total_experience != null && String(candidate.total_experience) !== "") {
-    info.total_experience = String(candidate.total_experience)
-  }
-  if (candidate.location) info.location = String(candidate.location)
   if (candidate.reason_for_switching) info.reason_for_switching = String(candidate.reason_for_switching)
   if (candidate.willing_to_relocate === "yes" || candidate.willing_to_relocate === "no") {
     info.willing_to_relocate = candidate.willing_to_relocate === "yes" ? "Yes" : "No"
   }
   return info
 }
+
+/** The resume-only fields, kept separate so provenance stays honest. */
+export { buildResumeInfo } from '@/lib/prompt-user-data'
 
 type OutboundSendResult = { sent: boolean; error?: string; messageId?: string }
 
@@ -279,7 +284,7 @@ async function buildCallUserData(
       ? (candidate.technical_skills as string[]).join(", ")
       : candidate.technical_skills || "",
     resume_text: candidate.resume_text || "",
-    ...buildAlreadyCollectedUserData(infoData),
+    ...buildAlreadyCollectedUserData(infoData, buildResumeInfo(candidate)),
     job_title: job.title || "",
     client_name: job.client_name || "",
     hiring_company_name: job.client_name || client?.name || "",

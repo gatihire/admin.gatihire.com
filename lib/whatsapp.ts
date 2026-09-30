@@ -703,10 +703,19 @@ export class WhatsAppService {
     return result
   }
 
-  // WhatsApp Flows form — the structured 7-field replacement for
-  // detailed_info_request. The template's FLOW button opens the native
-  // truckinzy_candidate_screening form; submissions come back to the webhook
-  // as interactive nfm_reply with response_json, correlated via flow_token.
+  // WhatsApp Flow form — the structured replacement for detailed_info_request.
+  // The template's FLOW button opens the candidate screening form; submissions
+  // come back to the webhook as interactive nfm_reply with response_json,
+  // correlated via flow_token.
+  //
+  // The v2 form asks only the 5 fields we actually need the candidate to confirm
+  // (CTC, expected CTC, notice period, relocation, reason for switching). Total
+  // experience and current location are trusted from the resume, so asking for
+  // them only produced friction and inflated "collected" counts.
+  //
+  // v2 is tried first and we fall back to the approved 7-field v1 on
+  // template-level errors, so it goes live the moment Meta approves it — no
+  // deploy, and no candidate is left without a form while it is pending.
   async sendCollectInfoForm(params: {
     phoneNumber: string
     candidateName: string
@@ -714,37 +723,59 @@ export class WhatsAppService {
     companyName: string
     flowToken: string
   }): Promise<SendMessageResult> {
-    const templateName = process.env.WHATSAPP_TEMPLATE_COLLECT_INFO_FORM || "collect_info_form"
+    const preferred = (process.env.WHATSAPP_TEMPLATE_COLLECT_INFO_FORM || "").trim()
+    const candidates: Array<{ templateName: string; screen: string }> = [
+      { templateName: preferred, screen: "DETAILS_SCREEN" },
+      { templateName: "collect_info_form_v2", screen: "DETAILS_SCREEN" },
+      { templateName: "collect_info_form", screen: "DETAILS_SCREEN" },
+    ].filter((c) => !!c.templateName)
 
-    return this.sendTemplateMessage({
-      to: params.phoneNumber,
-      languageCode: "en_US",
-      templateName,
-      components: [
-        {
-          type: "body",
-          parameters: [
-            { type: "text", text: params.candidateName },
-            { type: "text", text: params.jobTitle },
-            { type: "text", text: params.companyName },
-          ],
-        },
-        {
-          type: "button",
-          sub_type: "flow",
-          index: "0",
-          parameters: [
+    let lastResult: SendMessageResult | null = null
+    for (const { templateName, screen } of candidates) {
+      const attempts = [{ languageCode: "en_US" }, { languageCode: "en" }]
+      for (const a of attempts) {
+        lastResult = await this.sendTemplateMessage({
+          to: params.phoneNumber,
+          languageCode: a.languageCode,
+          templateName,
+          components: [
             {
-              type: "action",
-              action: {
-                flow_token: params.flowToken,
-                flow_action_data: { screen: "DETAILS_SCREEN" },
-              },
+              type: "body",
+              parameters: [
+                { type: "text", text: params.candidateName },
+                { type: "text", text: params.jobTitle },
+                { type: "text", text: params.companyName },
+              ],
+            },
+            {
+              type: "button",
+              sub_type: "flow",
+              index: "0",
+              parameters: [
+                {
+                  type: "action",
+                  action: {
+                    flow_token: params.flowToken,
+                    flow_action_data: { screen },
+                  },
+                },
+              ],
             },
           ],
-        },
-      ],
-    })
+        })
+        if (lastResult.success) return lastResult
+      }
+      const code = Number((lastResult || {}).errorCode || 0)
+      const retryable = [
+        131042, // Message template in non-approved state
+        131047, // Template paused / not ready
+        132000, // Missing template text
+        132001, // Template name does not exist in the translation
+      ].includes(code)
+      if (!retryable) break
+    }
+
+    return lastResult || { success: false, error: "Failed to send the details form" }
   }
 
   // Flow 5: Screening Decision (filtered out)

@@ -9,6 +9,7 @@ import {
   persistBolnaExecutionId,
 } from "@/lib/bolna-execution"
 import { getBolnaExecution, findLatestExecutionByPhone, BOLNA_TERMINAL_STATUSES } from "@/lib/bolna"
+import { scheduleBolnaCall } from "@/lib/scheduled-call"
 import { logCandidateActivity } from "@/lib/activity-logger"
 
 export const runtime = "nodejs"
@@ -55,9 +56,18 @@ async function reconcileSingle(params: {
   }
 
   if (!result.execution) {
+    // No execution exists for this participant, so we can positively state that
+    // no call was placed. Say so plainly instead of returning a bare 404 that
+    // HR cannot act on.
     return NextResponse.json(
-      { error: "Participant found but no Bolna execution", participantId: result.participant.id },
-      { status: 404 }
+      {
+        success: false,
+        noExecutionFound: true,
+        participantId: result.participant.id,
+        message:
+          "No call was ever placed for this candidate — the provider has no execution for them. Use Retry or Call now.",
+      },
+      { status: 200 }
     )
   }
 
@@ -70,10 +80,30 @@ async function reconcileSingle(params: {
   const isTerminal = BOLNA_TERMINAL_STATUSES.has(status)
 
   if (!isTerminal) {
+    // Persist the live status we just learned from the provider so the card
+    // reflects it immediately (e.g. "On the call now" rather than "awaiting").
+    const livePatch: Record<string, unknown> = {
+      bolna_status: status,
+      updated_at: new Date().toISOString(),
+    }
+    if (status === "in-progress") {
+      livePatch.status = "in_progress"
+      livePatch.call_started_at = new Date().toISOString()
+    } else if (status === "initiated" || status === "ringing") {
+      livePatch.status = "calling"
+    }
+    await supabaseAdmin
+      .from("phone_screening_participants")
+      .update(livePatch)
+      .eq("id", result.participant.id)
+
     return NextResponse.json({
-      message: "Execution not in terminal status",
+      success: false,
+      inProgress: true,
+      message: `The provider reports this call as “${status}” — no final outcome yet.`,
       status,
       participantId: result.participant.id,
+      executionId: result.execution.id,
     })
   }
 
@@ -159,20 +189,29 @@ async function reconcileStuck(dryRun?: boolean) {
       if (!execution) {
         // No execution found - mark as failed to allow retry
         if (!dryRun) {
+          const retryAt = new Date(Date.now() + 15 * 60 * 1000)
           await supabaseAdmin
             .from("phone_screening_participants")
             .update({
               status: "failed",
-              next_retry_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+              next_retry_at: retryAt.toISOString(),
               updated_at: new Date().toISOString(),
             })
             .eq("id", p.id)
+          // next_retry_at alone never fires a call — schedule the retry delivery,
+          // otherwise the participant sits "failed" with a retry time nothing reads.
+          const scheduled = await scheduleBolnaCall(p.id, 15 * 60)
+          if (!scheduled.scheduled) {
+            logger.error("Reconcile: failed to schedule retry", { participantId: p.id, error: scheduled.error })
+          }
         }
         results.push({
           participantId: p.id,
           candidateName: candidate?.name || "Unknown",
           status: p.status,
-          action: "no_execution_found -> marked failed for retry",
+          action: dryRun
+            ? "no_execution_found -> would mark failed and schedule retry"
+            : "no_execution_found -> marked failed for retry",
         })
         continue
       }

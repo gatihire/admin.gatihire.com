@@ -20,6 +20,7 @@ import {
 import { useToast } from "@/hooks/use-toast"
 import { cn } from "@/lib/utils"
 import { CollectedInfoView, PreScreenVerdict } from "@/components/candidate-collected-info"
+import { getCallTruth } from "@/lib/call-truth"
 
 interface TranscriptSegment {
   id: string
@@ -336,10 +337,12 @@ export function PhoneScreeningResultsSheet({
   // Determine if we have any summary/verdict data
   const hasSummaryData = verd || enriched || d.ai_summary || d.verdict_json
 
-  // Determine call outcome for action buttons
-  const isTerminal = ["completed", "failed", "unreachable", "failed_partial"].includes(d.status)
-  const isSuccessfulCompletion = d.status === "completed"
-  const isFailedOrPartial = ["failed", "unreachable", "failed_partial"].includes(d.status)
+  // Determine call outcome for action buttons — driven by the same truth
+  // derivation the cards use, so the sheet never contradicts the pipeline.
+  const callTruth = getCallTruth(d)
+  const isTerminal = callTruth.terminal
+  const isSuccessfulCompletion = callTruth.state === "completed"
+  const isFailedOrPartial = callTruth.state === "our_side_failed" || callTruth.state === "partial" || callTruth.state === "not_placed"
   const alreadyReviewed = d.review_status === "approved" || d.review_status === "rejected"
 
   return (
@@ -556,16 +559,8 @@ export function PhoneScreeningResultsSheet({
                       <div className="flex items-start gap-2 p-2.5 rounded-lg border border-red-100 bg-red-50/50 text-sm text-red-800 w-full">
                         <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
                         <div>
-                          <span className="font-bold">
-                            {data.status === "unreachable" ? "Max retries reached — candidate unreachable" :
-                             data.status === "failed_partial" ? "Call disconnected mid-conversation" :
-                             "Call failed"}
-                          </span>
-                          <p className="text-xs text-red-700 mt-0.5">
-                            {data.status === "unreachable" ? "No answer after multiple attempts. Manual follow-up recommended." :
-                             data.status === "failed_partial" ? "Partial transcript captured. Review what was recorded or re-run screening." :
-                             "Technical failure or candidate unavailable. Manual follow-up or retry."}
-                          </p>
+                          <span className="font-bold">{callTruth.label}</span>
+                          <p className="text-xs text-red-700 mt-0.5">{callTruth.detail}</p>
                         </div>
                       </div>
                       <div className="flex gap-2 w-full sm:w-auto">

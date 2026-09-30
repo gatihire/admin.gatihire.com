@@ -1,7 +1,7 @@
 import { supabaseAdmin } from '@/lib/supabase';
 import { logger } from '@/lib/logger';
 import { getWhatsAppService } from '@/lib/whatsapp';
-import { scheduleBolnaCall, scheduleCall } from '@/lib/scheduled-call';
+import { scheduleOrPlaceCall } from '@/lib/scheduled-call';
 import { 
   INFO_STEPS, 
   STEP_KEYS, 
@@ -368,8 +368,18 @@ async function markScheduledAndFire(participantId: string, scheduledAt: Date): P
     return { success: false, error: updateError.message };
   }
 
-  const delayMs = Math.max(0, scheduledAt.getTime() - Date.now());
-  await scheduleCall({ id: participantId }, delayMs);
+  // A slot that is already due (or due within the next minute) is placed
+  // directly — "Call Now" means now. A failed direct placement falls through to
+  // a real enqueued callback inside the helper instead of being dropped.
+  const delaySec = Math.max(0, Math.round((scheduledAt.getTime() - Date.now()) / 1000));
+  const placed = await scheduleOrPlaceCall(participantId, delaySec);
+  if (placed.success || placed.skipped) return { success: true };
+
+  // scheduleOrPlaceCall reports scheduled:false when nothing is actually queued,
+  // so we must not confirm a call that cannot happen.
+  if (!placed.scheduled) {
+    return { success: false, error: placed.error || 'Call could not be scheduled' };
+  }
   return { success: true };
 }
 

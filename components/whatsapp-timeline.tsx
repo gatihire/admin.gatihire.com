@@ -1,25 +1,18 @@
 "use client"
 
 import { useState } from "react"
-import { 
-  MessageCircle, 
-  Send, 
-  CheckCheck, 
-  Check, 
-  Clock, 
-  Phone, 
-  PhoneOff,
-  AlertCircle,
+import {
+  MessageCircle,
+  Send,
   User,
-  Bot,
   ChevronDown,
   ChevronUp,
-  ExternalLink
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import { getCallTruth } from "@/lib/call-truth"
 
 interface WhatsAppMessage {
   messageId: string | null
@@ -43,6 +36,7 @@ interface WhatsAppTimelineProps {
     call_attempts: number
     retry_count: number
     bolna_status: string | null
+    bolna_execution_id?: string | null
     last_attempt_at: string | null
   }
   candidateName: string
@@ -65,14 +59,6 @@ const TEMPLATE_LABELS: Record<string, string> = {
   post_call_followup: "Post-call Followup",
 }
 
-const STATUS_ICONS: Record<string, any> = {
-  sent: Send,
-  delivered: Check,
-  read: CheckCheck,
-  failed: AlertCircle,
-  pending: Clock,
-}
-
 const STATUS_COLORS: Record<string, string> = {
   sent: "text-blue-500",
   delivered: "text-green-500",
@@ -85,7 +71,6 @@ export function WhatsAppTimeline({ participant, candidateName }: WhatsAppTimelin
   const [isOpen, setIsOpen] = useState(false)
   
   const history = participant.whatsapp_history || []
-  const hasInfoFlow = participant.info_request_sent_at || participant.info_received_at
   
   // Build timeline events
   const events: Array<{
@@ -94,7 +79,6 @@ export function WhatsAppTimeline({ participant, candidateName }: WhatsAppTimelin
     template?: string
     status?: string
     content: string
-    icon: any
     color: string
   }> = []
   
@@ -106,7 +90,6 @@ export function WhatsAppTimeline({ participant, candidateName }: WhatsAppTimelin
       template: msg.template,
       status: msg.status,
       content: TEMPLATE_LABELS[msg.template] || msg.template,
-      icon: STATUS_ICONS[msg.status] || Send,
       color: STATUS_COLORS[msg.status] || "text-blue-500",
     })
   })
@@ -117,7 +100,6 @@ export function WhatsAppTimeline({ participant, candidateName }: WhatsAppTimelin
       time: participant.whatsapp_sent_at || new Date().toISOString(),
       type: "received",
       content: participant.whatsapp_reply_text || participant.whatsapp_response || "Replied",
-      icon: MessageCircle,
       color: "text-green-500",
     })
   }
@@ -128,7 +110,6 @@ export function WhatsAppTimeline({ participant, candidateName }: WhatsAppTimelin
       time: participant.info_request_sent_at,
       type: "info",
       content: "Info request sent",
-      icon: Send,
       color: "text-amber-500",
     })
   }
@@ -137,19 +118,18 @@ export function WhatsAppTimeline({ participant, candidateName }: WhatsAppTimelin
       time: participant.info_received_at,
       type: "received",
       content: "Info received from candidate",
-      icon: CheckCheck,
       color: "text-green-500",
     })
   }
   
-  // Add call events
-  if (participant.call_attempts > 0) {
+  // Add call events — only once the provider has confirmed a call exists.
+  const truth = getCallTruth(participant)
+  if (participant.bolna_execution_id) {
     events.push({
       time: participant.last_attempt_at || new Date().toISOString(),
       type: "call",
-      content: `Call attempt ${participant.call_attempts}${participant.bolna_status ? ` (${participant.bolna_status})` : ""}`,
-      icon: participant.bolna_status === "completed" ? Phone : PhoneOff,
-      color: participant.bolna_status === "completed" ? "text-green-500" : "text-orange-500",
+      content: truth.detail,
+      color: truth.state === "completed" ? "text-green-500" : truth.toneClasses,
     })
   }
   
@@ -187,7 +167,6 @@ export function WhatsAppTimeline({ participant, candidateName }: WhatsAppTimelin
               
               <div className="space-y-3">
                 {events.map((event, index) => {
-                  const Icon = event.icon
                   const isOutbound = event.type === "sent" || event.type === "info"
                   
                   return (

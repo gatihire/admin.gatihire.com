@@ -4,7 +4,7 @@ import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { logger } from "@/lib/logger"
 import { invalidateSessionCache } from "@/lib/utils"
 import { logCandidateActivity } from "@/lib/activity-logger"
-import { scheduleBolnaCall } from "@/lib/scheduled-call"
+import { scheduleOrPlaceCall } from "@/lib/scheduled-call"
 import { sendSessionMessage } from "@/lib/info-collector-v2"
 
 export const runtime = "nodejs"
@@ -51,6 +51,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         .from("phone_screening_participants")
         .update({
           status: "call_scheduled",
+          // Must set scheduled_call_at (not just scheduled_at) or the QStash
+          // trigger's guard sees no due time and skips the call.
+          scheduled_call_at: new Date(Date.now() + 60 * 1000).toISOString(),
+          next_retry_at: new Date(Date.now() + 60 * 1000).toISOString(),
           screening_context: {
             ...participant.screening_context,
             preScreenReview: {
@@ -69,8 +73,33 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         await sendSessionMessage(phoneNumber, `✅ Great news! Your profile has been reviewed and approved. Our AI recruiter will call you shortly to conduct the screening for ${jobTitle} at ${companyName}.`)
       }
 
-      // Schedule call via QStash (60 seconds delay)
-      await scheduleBolnaCall(id, 60)
+      // Place the call directly — the candidate was just told it is coming, so
+      // waiting on a queue message (and silently skipping if the publish fails)
+      // is what left approved candidates with no call at all. If the provider
+      // rejects the placement, scheduleOrPlaceCall books a real callback and we
+      // still tell HR the truth about it.
+      const placed = await scheduleOrPlaceCall(id, 0)
+      if (!placed.success && !placed.skipped) {
+        logger.error("Failed to place call after pre-screen approval", {
+          participantId: id,
+          error: placed.error,
+          callbackScheduled: !!placed.scheduled,
+        })
+        return NextResponse.json(
+          {
+            error: placed.error || "Failed to place call",
+            callPlaced: false,
+            retryScheduled: !!placed.scheduled,
+          },
+          { status: 502 }
+        )
+      }
+      if (placed.skipped) {
+        logger.info("Call already in flight after pre-screen approval", {
+          participantId: id,
+          reason: placed.error,
+        })
+      }
 
     } else if (decision === "filter_out") {
       // Move to pre_screen_filtered_out

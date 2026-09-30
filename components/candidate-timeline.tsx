@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import { getCallTruth } from "@/lib/call-truth"
 
 interface WhatsAppMessage {
   messageId: string | null
@@ -58,6 +59,8 @@ interface CandidateTimelineProps {
     call_started_at: string | null
     call_ended_at: string | null
     call_duration_seconds: number | null
+    bolna_execution_id?: string | null
+    updated_at?: string | null
     ai_score: number | null
     ai_summary: string | null
     ai_recommendation: string | null
@@ -134,21 +137,22 @@ export function CandidateTimeline({ participant, candidateName }: CandidateTimel
     })
   }
   
-  // Call attempts
-  if (participant.call_attempts > 0) {
+  // Call attempts — only rendered once a call was actually accepted by the
+  // provider. Never claim "no answer" just because no status came back.
+  if (participant.bolna_execution_id && (participant.call_attempts > 0 || participant.last_attempt_at)) {
     const attemptTime = participant.last_attempt_at || new Date().toISOString()
+    const truth = getCallTruth(participant)
     const isCompleted = participant.bolna_status === "completed"
-    
+    const isSuccess = truth.state === "completed"
+
     events.push({
       time: attemptTime,
       type: isCompleted ? "call_completed" : "call_attempt",
-      content: isCompleted 
-        ? `Call completed${participant.call_duration_seconds ? ` (${Math.round(participant.call_duration_seconds / 60)} min)` : ""}`
-        : `Call attempt ${participant.call_attempts}/2 — ${participant.bolna_status || "no answer"}`,
+      content: truth.detail,
       details: participant.ai_summary || undefined,
-      status: isCompleted ? "success" : "failed",
+      status: isSuccess ? "success" : truth.tone === "danger" || truth.tone === "warning" ? "failed" : "pending",
     })
-    
+
     // AI results if call completed
     if (isCompleted && participant.ai_score != null) {
       events.push({
@@ -158,6 +162,15 @@ export function CandidateTimeline({ participant, candidateName }: CandidateTimel
         status: "success",
       })
     }
+  } else if (participant.call_attempts === 0) {
+    // Be explicit that nothing was placed — this is the state HR could not see.
+    const truth = getCallTruth(participant)
+    events.push({
+      time: participant.updated_at || new Date().toISOString(),
+      type: "call_failed",
+      content: truth.detail,
+      status: truth.tone === "danger" ? "failed" : "pending",
+    })
   }
   
   // Retry scheduled

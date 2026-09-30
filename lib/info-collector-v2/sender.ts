@@ -230,28 +230,30 @@ async function sendConfirmationAndScheduleCall(
       })
       .eq('id', participant.id);
     
-    const { scheduleBolnaCall } = await import('@/lib/scheduled-call');
-    const callDelaySec = 60;
-    const scheduled = await scheduleBolnaCall(participant.id, callDelaySec);
-    
-    if (scheduled.scheduled) {
+    // Candidate confirmed their details and was told a call is coming — place it
+    // directly rather than via the queue so the confirmation and the call are one
+    // continuous experience. If the provider rejects it, scheduleOrPlaceCall books
+    // a real callback so the call is never silently lost.
+    const { scheduleOrPlaceCall } = await import('@/lib/scheduled-call');
+    const placed = await scheduleOrPlaceCall(participant.id, 0);
+
+    if (placed.success) {
       await supabaseAdmin
         .from('phone_screening_participants')
-        .update({
-          status: 'call_scheduled',
-          scheduled_at: new Date(Date.now() + callDelaySec * 1000).toISOString(),
-          updated_at: new Date().toISOString()
-        })
+        .update({ status: 'calling', updated_at: new Date().toISOString() })
         .eq('id', participant.id);
-      
-      logger.info('Auto-scheduled AI call after confirmation', { 
-        participantId: participant.id, 
-        delaySec: callDelaySec 
+
+      logger.info('Placed AI call after confirmation', { participantId: participant.id });
+    } else if (placed.skipped) {
+      logger.info('Call after confirmation skipped', {
+        participantId: participant.id,
+        reason: placed.error,
       });
     } else {
-      logger.error('Failed to auto-schedule call after confirmation', { 
-        participantId: participant.id, 
-        error: scheduled.error 
+      logger.error('Failed to place call after confirmation', {
+        participantId: participant.id,
+        error: placed.error,
+        callbackScheduled: !!placed.scheduled,
       });
     }
   }

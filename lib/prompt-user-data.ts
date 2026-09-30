@@ -13,11 +13,39 @@ export const ALREADY_COLLECTED_KEY_MAP: Record<string, string> = {
   reason_for_switching: "already_collected_reason_for_switching",
 }
 
-export function buildAlreadyCollectedUserData(infoData: Record<string, unknown> | null | undefined): Record<string, unknown> {
+/**
+ * The two fields we never ask for on WhatsApp: they come from the resume, are
+ * trusted as-is, and are kept OUT of info_data so the "collected on WhatsApp"
+ * count never includes data the candidate was never asked to confirm.
+ */
+export const RESUME_ONLY_KEYS = ["total_experience", "location"] as const
+
+export function buildResumeInfo(candidate: {
+  total_experience?: string | number | null
+  location?: string | null
+}): Record<string, unknown> {
+  const info: Record<string, unknown> = {}
+  if (candidate.total_experience != null && String(candidate.total_experience) !== "") {
+    info.total_experience = String(candidate.total_experience)
+  }
+  if (candidate.location) info.location = String(candidate.location)
+  return info
+}
+
+export function buildAlreadyCollectedUserData(
+  infoData: Record<string, unknown> | null | undefined,
+  /**
+   * Resume-sourced values for the fields we never ask on WhatsApp. Without this
+   * overlay the AI would see "Not provided on WhatsApp" for total experience and
+   * current location and start asking for them on the call.
+   */
+  resumeInfo?: Record<string, unknown> | null
+): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   const data = infoData && typeof infoData === "object" ? infoData : {}
+  const resume = resumeInfo && typeof resumeInfo === "object" ? resumeInfo : {}
   for (const [key, promptKey] of Object.entries(ALREADY_COLLECTED_KEY_MAP)) {
-    const value = data[key]
+    const value = data[key] ?? resume[key]
     out[promptKey] = value !== undefined && value !== null && value !== "" ? String(value) : "Not provided on WhatsApp"
   }
   return out

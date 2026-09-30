@@ -8,7 +8,7 @@
 
 import { Client } from "@upstash/qstash"
 import { supabaseAdmin } from "@/lib/supabase"
-import { placeBolnaCall } from "@/lib/bolna"
+import { placeBolnaCall, BOLNA_TERMINAL_STATUSES } from "@/lib/bolna"
 import { buildAlreadyCollectedUserData } from "@/lib/prompt-user-data"
 import { logger } from "@/lib/logger"
 
@@ -48,6 +48,27 @@ export const MAX_CALL_ATTEMPTS = 2
 
 // QStash accepts delays up to 24 hours.
 const MAX_DELAY_SEC = 24 * 60 * 60
+
+// A call that is due this soon is placed directly rather than queued — the
+// candidate has usually just told us they are free right now.
+const DIRECT_PLACE_WINDOW_SECONDS = 60
+
+// When a direct placement fails, how long until the queued callback retries.
+const CALLBACK_RETRY_DELAY_SECONDS = 5 * 60
+
+/** Provider statuses after which a new execution is legitimate. */
+function isTerminalProviderStatus(status?: string | null): boolean {
+  return BOLNA_TERMINAL_STATUSES.has(String(status || "").toLowerCase())
+}
+
+/** Exported so callers can tell "still ringing" from "we never got an answer". */
+export { isTerminalProviderStatus }
+
+/** Provider statuses meaning a call is genuinely still open right now. */
+function isLiveProviderStatus(status?: string | null): boolean {
+  const s = String(status || "").trim().toLowerCase()
+  return !s ? false : ["queued", "initiated", "ringing", "in-progress", "in_progress", "inprogress"].includes(s)
+}
 
 function getQStashToken(): string {
   return process.env.QSTASH_TOKEN || ""
@@ -144,8 +165,17 @@ interface ParticipantRow {
   whatsapp_sent_at?: string | null
   next_retry_at?: string | null
   scheduled_call_at?: string | null
+  /** Legacy due-time column written by older scheduling paths. Still honoured
+   *  so participants stranded before the scheduled_call_at fix stay callable. */
+  scheduled_at?: string | null
   campaign_id?: string | null
-  candidates?: { id: string; name?: string | null; phone?: string | null } | null
+  candidates?: {
+    id: string
+    name?: string | null
+    phone?: string | null
+    total_experience?: string | number | null
+    location?: string | null
+  } | null
 }
 
 /**
@@ -167,8 +197,8 @@ export async function placeCallForParticipant(
     .from("phone_screening_participants")
     .select(`
       id, status, call_attempts, call_payload_json, info_data,
-      whatsapp_sent_at, next_retry_at, scheduled_call_at, campaign_id,
-      candidates: candidate_id (id, name, phone)
+      whatsapp_sent_at, next_retry_at, scheduled_call_at, scheduled_at, campaign_id,
+      candidates: candidate_id (id, name, phone, total_experience, location)
     `)
     .eq("id", participantId)
     .maybeSingle()
@@ -197,7 +227,9 @@ export async function placeCallForParticipant(
     // or scheduled with an elapsed time) or a retry window for an already-attempted
     // call has passed (failed). whatsapp_sent alone NEVER triggers a call.
     if (row.status === "call_scheduled" || row.status === "scheduled") {
-      const scheduledTime = row.scheduled_call_at || row.next_retry_at
+      // scheduled_at is the legacy due-time column some writers used; accept it
+      // so an already-scheduled callback is never skipped as "not due yet".
+      const scheduledTime = row.scheduled_call_at || row.next_retry_at || row.scheduled_at
       if (!scheduledTime || new Date(scheduledTime).getTime() > Date.now()) {
         return { success: false, skipped: true, error: "Callback not due yet" }
       }
@@ -227,7 +259,10 @@ export async function placeCallForParticipant(
   }
 
   const payload = row.call_payload_json
-  const collected = buildAlreadyCollectedUserData(row.info_data)
+  const collected = buildAlreadyCollectedUserData(row.info_data, {
+    total_experience: candidate.total_experience ?? undefined,
+    location: candidate.location ?? undefined,
+  })
   const userData =
     payload && Object.keys(payload).length > 0
       ? { ...payload, ...collected, participant_id: participantId }
@@ -266,4 +301,150 @@ export async function placeCallForParticipant(
 export async function scheduleCall(participant: any, delayMs: number): Promise<void> {
   const delaySeconds = Math.max(0, Math.round(delayMs / 1000));
   await scheduleBolnaCall(participant.id, delaySeconds);
+}
+
+/**
+ * Place a call now, bypassing QStash entirely. Used by "Call Now" actions where
+ * waiting on a queue message means the candidate hears nothing for seconds after
+ * saying yes. `placeCallForParticipant` still owns the DB bookkeeping, so this
+ * stays consistent with the scheduled path.
+ *
+ * Duplicate protection: HR buttons, WhatsApp "call me now" replies and bulk
+ * actions can all fire for the same candidate. If a call is already with the
+ * provider and no outcome has come back yet, we refuse a second execution rather
+ * than double-dialling the candidate.
+ */
+export async function placeCallImmediately(
+  participantId: string,
+  opts?: { force?: boolean }
+): Promise<PlaceCallResult> {
+  if (opts?.force) {
+    return placeCallForParticipant(participantId, { guard: false });
+  }
+
+  const { data: existing } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .select("bolna_execution_id, bolna_status, next_retry_at, scheduled_call_at")
+    .eq("id", participantId)
+    .maybeSingle()
+
+  const prior = (existing as
+    | { bolna_execution_id?: string | null; bolna_status?: string | null; next_retry_at?: string | null; scheduled_call_at?: string | null }
+    | null) || {}
+
+  if (prior.bolna_execution_id && isLiveProviderStatus(prior.bolna_status)) {
+    return {
+      success: false,
+      skipped: true,
+      error: `A call is already with the provider (${prior.bolna_status}) — waiting for its outcome`,
+    }
+  }
+
+  // A prior call finished, but a retry/callback is already booked. Dialling now
+  // would create a second concurrent execution, so defer to the booked retry.
+  const booked = [prior.next_retry_at, prior.scheduled_call_at].find((t) => {
+    if (!t) return false
+    const ms = new Date(t).getTime()
+    return Number.isFinite(ms) && ms > Date.now()
+  })
+  if (booked) {
+    return {
+      success: false,
+      skipped: true,
+      error: `A call is already booked for ${new Date(booked).toISOString()}`,
+    }
+  }
+
+  return placeCallForParticipant(participantId, { guard: false });
+}
+
+/**
+ * Schedule a call, preferring a direct placement when it is already due.
+ *
+ * Every caller previously re-implemented this and each one had a different bug:
+ * some recorded a due time but never enqueued the QStash message, so the call was
+ * "scheduled" in the database and then silently never happened. This is the one
+ * path: try now, and on failure persist the due time AND enqueue the callback.
+ */
+export async function scheduleOrPlaceCall(
+  participantId: string,
+  delaySeconds: number
+): Promise<PlaceCallResult & { scheduled?: boolean }> {
+  const delay = Math.max(0, Math.round(delaySeconds))
+
+  if (delay <= DIRECT_PLACE_WINDOW_SECONDS) {
+    const placed = await placeCallImmediately(participantId)
+    if (placed.success || placed.skipped) return placed
+
+    // Direct placement failed — book a real callback so this is never lost.
+    const dueAt = new Date(Date.now() + CALLBACK_RETRY_DELAY_SECONDS * 1000).toISOString()
+    await supabaseAdmin
+      .from("phone_screening_participants")
+      .update({
+        status: "call_scheduled",
+        scheduled_at: dueAt,
+        scheduled_call_at: dueAt,
+        next_retry_at: dueAt,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", participantId)
+
+    const scheduled = await scheduleBolnaCall(participantId, CALLBACK_RETRY_DELAY_SECONDS)
+
+    // If the enqueue itself failed there is nothing waiting to fire. Leaving the
+    // row as "call_scheduled" would show HR a booked call that can never happen —
+    // exactly the silent stranding this function exists to prevent. Fail the row
+    // instead so it surfaces as "no call placed" and HR can retry.
+    if (!scheduled.scheduled) {
+      await supabaseAdmin
+        .from("phone_screening_participants")
+        .update({
+          status: "failed",
+          scheduled_at: null,
+          scheduled_call_at: null,
+          next_retry_at: null,
+          callback_preference: `Call callback could not be queued: ${scheduled.error || "QStash publish failed"}`,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", participantId)
+      logger.error("Call callback could not be queued", { participantId, error: scheduled.error })
+    }
+
+    return {
+      success: false,
+      scheduled: scheduled.scheduled,
+      error: scheduled.error || placed.error,
+    }
+  }
+
+  const dueAt = new Date(Date.now() + delay * 1000).toISOString()
+  await supabaseAdmin
+    .from("phone_screening_participants")
+    .update({
+      status: "call_scheduled",
+      scheduled_at: dueAt,
+      scheduled_call_at: dueAt,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", participantId)
+
+  const result = await scheduleBolnaCall(participantId, delay)
+
+  // Same stranding risk on the delayed path: only keep the booked state if the
+  // QStash message actually exists to deliver it.
+  if (!result.scheduled) {
+    await supabaseAdmin
+      .from("phone_screening_participants")
+      .update({
+        status: "failed",
+        scheduled_at: null,
+        scheduled_call_at: null,
+        callback_preference: `Call could not be scheduled: ${result.error || "QStash publish failed"}`,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", participantId)
+    logger.error("Call could not be scheduled", { participantId, delaySec: delay, error: result.error })
+  }
+
+  return { success: false, scheduled: result.scheduled, error: result.error }
 }

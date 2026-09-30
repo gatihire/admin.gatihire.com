@@ -14,6 +14,7 @@ import {
   User
 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
+import { getCallTruth, getMaxAttempts } from "@/lib/call-truth"
 
 interface ParticipantData {
   whatsapp_sent_at: string | null
@@ -28,6 +29,8 @@ interface ParticipantData {
   info_request_sent_at: string | null
   info_received_at: string | null
   bolna_status: string | null
+  bolna_execution_id?: string | null
+  max_call_attempts?: number | null
   created_at: string
 }
 
@@ -63,7 +66,7 @@ function formatTimeUntil(dateStr: string): string {
   return `in ${Math.floor(diffHours / 24)}d`
 }
 
-export function CandidateMetricsBar({ participant, callStatus }: CandidateMetricsBarProps) {
+export function CandidateMetricsBar({ participant }: CandidateMetricsBarProps) {
   const metrics = useMemo(() => {
     if (!participant) return null
     
@@ -145,18 +148,30 @@ export function CandidateMetricsBar({ participant, callStatus }: CandidateMetric
     })
   }
 
-  // Call attempts
-  if (metrics.callAttempts > 0) {
+  // Call state — derived only from provider-confirmed data. An incremented
+  // counter alone is not proof a call was placed, so it is never shown as one.
+  const truth = getCallTruth(participant)
+  if (truth.state !== "not_placed" || truth.bucket !== "waiting" && truth.bucket !== "pending") {
     items.push({
-      icon: metrics.bolnaStatus === "completed" ? Phone : PhoneOff,
-      label: "Calls",
-      value: `${metrics.callAttempts} attempt${metrics.callAttempts !== 1 ? "s" : ""}`,
-      color: metrics.bolnaStatus === "completed" ? "text-green-500" : "text-orange-500",
+      icon: truth.state === "completed" || truth.state === "answered" ? Phone : PhoneOff,
+      label: "Call",
+      value: truth.label,
+      color: truth.toneClasses,
+    })
+  }
+
+  if (truth.state === "no_answer" || truth.state === "busy" || truth.state === "awaiting_provider" || truth.state === "ringing") {
+    const max = getMaxAttempts(participant)
+    items.push({
+      icon: Phone,
+      label: "Attempts",
+      value: `${metrics.callAttempts} of ${max}`,
+      color: "text-zinc-500",
     })
   }
   
   // Next retry
-  if (metrics.nextRetry && callStatus === "calling") {
+  if (metrics.nextRetry) {
     items.push({
       icon: RefreshCw,
       label: "Next retry",
