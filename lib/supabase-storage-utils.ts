@@ -21,42 +21,43 @@ function extractStoragePath(input: string, bucketName: string) {
  */
 export async function checkFileExistsInSupabase(fileName: string): Promise<{ exists: boolean; url?: string; path?: string }> {
   try {
-    // List all files in the bucket using admin client to bypass RLS
+    // Resumes are stored content-addressed under a folder ("resumes/<hash>.pdf").
+    // The previous version always listed the bucket root and compared against the
+    // whole path, so nested files were never matched and this always reported
+    // "not found" — even when the exact object existed.
+    const cleanPath = fileName.replace(/^\/+/, '')
+    const parts = cleanPath.split('/')
+    const searchFolder = parts.length > 1 ? parts.slice(0, -1).join('/') : ''
+    const searchName = parts[parts.length - 1]
+
     const { data: files, error } = await supabaseAdmin.storage
       .from(BUCKET_NAME)
-      .list()
-    
+      .list(searchFolder, { limit: 1000 })
+
     if (error) {
       console.error('Error listing files in storage:', error)
       return { exists: false }
     }
-    
-    // Check if a file with the same name exists
-    const existingFile = files.find(file => {
-      // Check exact match
-      if (file.name === fileName) return true
-      
-      // Check if fileName is a path and matches the end of the path
-      const fileNameParts = fileName.split('/')
-      const simpleFileName = fileNameParts[fileNameParts.length - 1]
-      return file.name === simpleFileName
-    })
-    
+
+    // Directories come back with a null id; only real objects are comparable.
+    const existingFile = (files || []).find(
+      (file) => file.id !== null && file.name === searchName,
+    )
+
     if (existingFile) {
-      console.log(`✅ File already exists in Supabase storage: ${existingFile.name}`)
-      
-      // Get the public URL
+      console.log(`✅ File already exists in Supabase storage: ${cleanPath}`)
+
       const { data: { publicUrl } } = supabaseAdmin.storage
         .from(BUCKET_NAME)
-        .getPublicUrl(existingFile.name)
-      
-      return { 
-        exists: true, 
-        url: publicUrl, 
-        path: existingFile.name 
+        .getPublicUrl(cleanPath)
+
+      return {
+        exists: true,
+        url: publicUrl,
+        path: cleanPath,
       }
     }
-    
+
     return { exists: false }
   } catch (error) {
     // If we can't check, assume it doesn't exist and proceed with upload

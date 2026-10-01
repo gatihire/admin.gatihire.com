@@ -89,6 +89,7 @@ interface ParticipantDetail {
   call_payload_json?: Record<string, unknown> | null
   generated_questions?: string | null
   info_data?: Record<string, unknown> | null
+  info_sources?: Record<string, string> | null
   info_step?: string | null
   info_confirmed?: boolean | null
   prescreen_decision?: string | null
@@ -196,10 +197,12 @@ export function PhoneScreeningResultsSheet({
   participantId,
   open,
   onOpenChange,
+  onReviewed,
 }: {
   participantId: string | null
   open: boolean
   onOpenChange: (open: boolean) => void
+  onReviewed?: () => void
 }) {
   const [loading, setLoading] = useState(false)
   const [data, setData] = useState<ParticipantDetail | null>(null)
@@ -273,9 +276,21 @@ export function PhoneScreeningResultsSheet({
       if (!res.ok) throw new Error(json.error || "Failed to save decision")
       toast({
         title: decision === "approve" ? "Approved" : "Rejected",
-        description: decision === "approve" ? `Moved to ${approveStage}` : "Candidate moved to rejected",
+        description:
+          decision === "approve"
+            ? approveStage === "shortlist"
+              ? "Candidate shortlisted — now shareable with the client"
+              : "Candidate moved to interview"
+            : "Candidate moved to rejected",
       })
-      setData((prev) => (prev ? { ...prev, review_status: decision } : prev))
+      // The column stores "approved"/"rejected" (not the request verb), and the
+      // "already reviewed" badge keys off those exact values. Writing the verb
+      // here left the approve/reject buttons on screen after a successful
+      // decision, which read as "the button didn't work".
+      setData((prev) =>
+        prev ? { ...prev, review_status: decision === "approve" ? "approved" : "rejected" } : prev,
+      )
+      onReviewed?.()
     } catch (e: any) {
       toast({ title: "Failed", description: e.message, variant: "destructive" })
     } finally {
@@ -330,6 +345,32 @@ export function PhoneScreeningResultsSheet({
 
   const whatsappHistory = data?.whatsapp_history || []
 
+  // Salary / notice / relocation are usually gathered BEFORE the call, over
+  // WhatsApp or from the board-app application. The call is only meant to
+  // confirm fit, so preferring the call-derived values meant the summary showed
+  // "not disclosed" even when we already held the candidate's numbers. Prefer
+  // what we already know; fall back to the call only when we don't.
+  const collected = (data?.info_data || {}) as Record<string, unknown>
+  const collectedSources = (data?.info_sources || {}) as Record<string, string>
+  const cand = (data?.candidates || {}) as Record<string, any>
+  const pick = (...vals: unknown[]) =>
+    vals.find((v) => typeof v === "string" && v.trim() && v.trim().toLowerCase() !== "not disclosed") as
+      | string
+      | undefined
+
+  const preCallCurrent = pick(collected.current_ctc, cand.current_ctc, cand.current_salary)
+  const preCallExpected = pick(collected.expected_ctc, cand.expected_ctc, cand.expected_salary)
+  const preCallNotice = pick(collected.notice_period, cand.notice_period)
+  const preCallRelocate = pick(collected.willing_to_relocate, cand.willing_to_relocate)
+  const hasPreCall = Boolean(preCallCurrent || preCallExpected || preCallNotice || preCallRelocate)
+  const sourceLabel = (field: string) => {
+    const s = collectedSources[field] || (cand[field] ? "application" : "")
+    if (s === "whatsapp") return "WhatsApp"
+    if (s === "resume") return "resume"
+    if (s === "application") return "application"
+    return ""
+  }
+
   // TypeScript guard - data is checked in JSX but TS needs explicit narrowing
   const d = data!
   if (!d) return null
@@ -347,7 +388,7 @@ export function PhoneScreeningResultsSheet({
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full sm:max-w-[540px] overflow-y-auto p-0">
+      <SheetContent className="w-full sm:max-w-[560px] p-0 flex flex-col overflow-hidden">
         {loading ? (
           <div className="flex items-center justify-center h-full py-20">
             <Loader2 className="h-6 w-6 animate-spin text-zinc-400" />
@@ -355,9 +396,14 @@ export function PhoneScreeningResultsSheet({
         ) : !data ? (
           <div className="text-center py-20 text-zinc-400 font-semibold text-sm">No data available</div>
         ) : (
-          <div className="flex flex-col h-full">
-            {/* FIXED TOP: Header + Score + Verdict + Actions */}
-            <div className="shrink-0 border-b border-zinc-200 bg-white">
+          // Single scroll container. Previously the header was `shrink-0` inside a
+          // fixed-height flex column, so a tall verdict block squeezed the tab
+          // content area to zero height — the tabs were clickable but showed
+          // nothing. Now the header scrolls away, the tabs stick to the top, and
+          // the tab panel is always rendered in normal flow beneath them.
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            {/* Header + Score + Verdict + Actions */}
+            <div className="border-b border-zinc-200 bg-white">
               <div className="p-4 pb-0">
                 <SheetHeader className="mb-3">
                   <SheetTitle className="flex items-center gap-3">
@@ -457,7 +503,35 @@ export function PhoneScreeningResultsSheet({
                         <span className="text-[10px] text-zinc-400">Confidence: {Math.round(confidenceScore * 100)}%</span>
                       )}
                     </div>
-                    {salaryAnalysis && (salaryAnalysis.current || salaryAnalysis.expected) && (
+                    {hasPreCall && (
+                      <div className="pt-2 border-t border-zinc-200">
+                        <p className="text-[10px] font-bold text-zinc-400 uppercase mb-1">
+                          Candidate details
+                          <span className="ml-1.5 font-medium normal-case text-zinc-400">(pre-call — WhatsApp / application)</span>
+                        </p>
+                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
+                          {preCallCurrent && (
+                            <span>Current CTC: <span className="font-semibold text-zinc-700">{preCallCurrent}</span>
+                              {sourceLabel("current_ctc") && <span className="ml-1 text-[10px] text-zinc-400">· {sourceLabel("current_ctc")}</span>}
+                            </span>
+                          )}
+                          {preCallExpected && (
+                            <span>Expected CTC: <span className="font-semibold text-zinc-700">{preCallExpected}</span>
+                              {sourceLabel("expected_ctc") && <span className="ml-1 text-[10px] text-zinc-400">· {sourceLabel("expected_ctc")}</span>}
+                            </span>
+                          )}
+                          {preCallNotice && (
+                            <span>Notice: <span className="font-semibold text-zinc-700">{preCallNotice}</span></span>
+                          )}
+                          {preCallRelocate && (
+                            <span>Relocate: <span className="font-semibold text-zinc-700">{preCallRelocate}</span></span>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    {/* Only surface the call's own salary/relocation read when we do
+                        not already hold it — otherwise it just repeats "not disclosed". */}
+                    {!hasPreCall && salaryAnalysis && (salaryAnalysis.current || salaryAnalysis.expected) && (
                       <div className="pt-2 border-t border-zinc-200">
                         <p className="text-[10px] font-bold text-zinc-400 uppercase mb-1">Salary Analysis</p>
                         <div className="flex flex-wrap gap-3 text-xs">
@@ -468,7 +542,7 @@ export function PhoneScreeningResultsSheet({
                         {salaryAnalysis.notes && <p className="text-xs text-zinc-500 mt-1">{salaryAnalysis.notes}</p>}
                       </div>
                     )}
-                    {relocationAssessment && (
+                    {!preCallRelocate && relocationAssessment && (
                       <div className="pt-2 border-t border-zinc-200">
                         <p className="text-[10px] font-bold text-zinc-400 uppercase mb-1">Relocation</p>
                         <p className="text-xs text-zinc-600">{relocationAssessment}</p>
@@ -575,6 +649,32 @@ export function PhoneScreeningResultsSheet({
                       </div>
                     </div>
                   )}
+                  {/* Even when the call failed or was cut short, HR can still move
+                      the candidate forward — the call is one input, not the whole
+                      decision. */}
+                  {isFailedOrPartial && (
+                    <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center mt-2">
+                      <Select value={approveStage} onValueChange={setApproveStage}>
+                        <SelectTrigger className="h-9 w-full sm:w-[190px] text-xs bg-white">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="shortlist">Shortlist</SelectItem>
+                          <SelectItem value="interview">Interview</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-9 text-xs gap-1 border-green-200 text-green-700 hover:bg-green-50"
+                        onClick={() => submitReview("approve")}
+                        disabled={reviewBusy}
+                      >
+                        {reviewBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ThumbsUp className="h-3.5 w-3.5" />}
+                        Approve anyway
+                      </Button>
+                    </div>
+                  )}
 
                   {/* Partial call — show partial transcript notice */}
                   {data.call_is_partial && data.status === "completed" && (
@@ -599,38 +699,47 @@ export function PhoneScreeningResultsSheet({
                 </div>
               )}
 
-              {/* Tabs */}
-              <div className="px-4">
-                <div className="flex border-b border-zinc-200 -mb-px overflow-x-auto">
-                  {TABS.map((tab) => {
-                    const Icon = tab.icon
-                    const count = tab.id === "whatsapp" ? whatsappHistory.length :
-                                  tab.id === "transcript" ? data.transcripts.length :
-                                  tab.id === "qa" ? data.answers.length :
-                                  tab.id === "recording" ? (data.recording_url ? 1 : 0) :
-                                  tab.id === "jd_fit" ? (jdFit ? 1 : 0) : 0
-                    return (
-                      <button
-                        key={tab.id}
-                        onClick={() => setActiveTab(tab.id)}
-                        className={cn(
-                          "flex items-center gap-1.5 px-3 py-2.5 text-xs font-semibold border-b-2 transition-colors -mb-px whitespace-nowrap",
-                          activeTab === tab.id
-                            ? "border-zinc-900 text-zinc-900"
-                            : "border-transparent text-zinc-400 hover:text-zinc-600"
-                        )}
-                      >
-                        <Icon className="h-3.5 w-3.5" />
-                        {tab.label}
-                      </button>
-                    )
-                  })}
-                </div>
+            </div>
+
+            {/* Tabs — sticky so the panel opened below is always in view */}
+            <div className="sticky top-0 z-20 bg-white/95 backdrop-blur border-b border-zinc-200 px-2">
+              <div className="flex overflow-x-auto">
+                {TABS.map((tab) => {
+                  const Icon = tab.icon
+                  const count = tab.id === "whatsapp" ? whatsappHistory.length :
+                                tab.id === "transcript" ? data.transcripts.length :
+                                tab.id === "qa" ? data.answers.length :
+                                tab.id === "recording" ? (data.recording_url ? 1 : 0) :
+                                tab.id === "jd_fit" ? (jdFit ? 1 : 0) : 0
+                  return (
+                    <button
+                      key={tab.id}
+                      onClick={() => setActiveTab(tab.id)}
+                      className={cn(
+                        "flex items-center gap-1.5 px-2.5 py-2.5 text-xs font-semibold border-b-2 transition-colors -mb-px whitespace-nowrap",
+                        activeTab === tab.id
+                          ? "border-zinc-900 text-zinc-900"
+                          : "border-transparent text-zinc-400 hover:text-zinc-600"
+                      )}
+                    >
+                      <Icon className="h-3.5 w-3.5" />
+                      {tab.label}
+                      {count > 0 && (
+                        <span className={cn(
+                          "ml-0.5 rounded-full px-1.5 py-px text-[10px] font-bold",
+                          activeTab === tab.id ? "bg-zinc-900 text-white" : "bg-zinc-100 text-zinc-500"
+                        )}>
+                          {count}
+                        </span>
+                      )}
+                    </button>
+                  )
+                })}
               </div>
             </div>
 
-            {/* SCROLLABLE TAB CONTENT */}
-            <div className="flex-1 overflow-y-auto p-4">
+            {/* TAB CONTENT — rendered in normal flow, so a click always reveals it */}
+            <div className="p-4">
               {/* WhatsApp Flow Tab */}
               {activeTab === "whatsapp" && (
                 <div>

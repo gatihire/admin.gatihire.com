@@ -1287,6 +1287,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
           participantId={resultParticipantId}
           open={!!resultParticipantId}
           onOpenChange={(open) => { if (!open) setResultParticipantId(null) }}
+          onReviewed={() => { fetchParticipants(); onRefresh() }}
         />
 
         <PrescreenReviewModal

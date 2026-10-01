@@ -78,8 +78,13 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
     const fileArrayBuffer = await rawFile.arrayBuffer()
     const fileHash = crypto.createHash("sha256").update(Buffer.from(fileArrayBuffer)).digest("hex")
+    const fileExt = rawFile.name.split(".").pop() || "pdf"
+    // Resumes are content-addressed, so the storage key can be derived from the
+    // bytes alone. Compute it before the existence check so the check looks in
+    // the right folder ("resumes/<hash>.pdf", not the bucket root).
+    const contentAddressedPath = `resumes/${fileHash}.${fileExt}`
 
-    const existingFile = await checkFileExistsInSupabase(fileHash)
+    const existingFile = await checkFileExistsInSupabase(contentAddressedPath)
 
     const file = {
       name: rawFile.name,
@@ -106,13 +111,17 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       filePath = existingFile.path || ""
     } else {
       const fileBuffer = Buffer.from(fileArrayBuffer)
-      const ext = rawFile.name.split(".").pop() || "pdf"
-      filePath = `resumes/${fileHash}.${ext}`
-      const { data: uploadData, error: uploadError } = await supabaseAdmin.storage
+      filePath = contentAddressedPath
+      // The path is the content hash, so re-uploading identical bytes is a
+      // no-op. `upsert: false` made re-uploading the same resume (e.g. after the
+      // candidate row was deleted) fail with "The resource already exists" and
+      // 500 before the candidate was ever inserted. Overwriting with identical
+      // bytes is harmless; upsert keeps the operation idempotent.
+      const { error: uploadError } = await supabaseAdmin.storage
         .from("resume-files")
         .upload(filePath, fileBuffer, {
           contentType: rawFile.type,
-          upsert: false,
+          upsert: true,
         })
 
       if (uploadError) {
@@ -121,7 +130,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
       const urlData = supabaseAdmin.storage
         .from("resume-files")
-        .getPublicUrl(uploadData.path)
+        .getPublicUrl(filePath)
 
       fileUrl = urlData.data.publicUrl
     }
