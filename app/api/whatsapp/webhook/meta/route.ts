@@ -232,22 +232,39 @@ async function handleIncomingMessage(message: any, contact: any) {
     logger.info("Duplicate WhatsApp message, skipping", { participantId: participant.id, messageId: message.id })
     return
   }
-  if (msgKey) {
-    participant.screening_context = {
-      ...(participant.screening_context || {}),
-      processedMessages: { ...seen, [msgKey]: new Date().toISOString() },
-    }
-    await supabaseAdmin
-      .from("phone_screening_participants")
-      .update({ screening_context: participant.screening_context, updated_at: new Date().toISOString() })
-      .eq("id", participant.id)
-  }
-  
   // Handle different message types
+  //
+  // The message is recorded as processed only AFTER the handler succeeds. It
+  // used to be stamped first, which meant any handler failure marked the
+  // message done and then returned 5xx: Meta retried, the retry hit the
+  // duplicate guard above and returned 200 without acting on it. A candidate
+  // tapped "Call Now", the write failed once, and the tap was then permanently
+  // discarded — which is exactly the silent no-call this guard was meant to
+  // prevent.
   if (messageType === "interactive") {
     await handleInteractiveMessage(participant, message.interactive)
   } else if (messageType === "text") {
     await handleTextMessage(participant, message.text)
+  }
+
+  if (msgKey) {
+    const latest = await supabaseAdmin
+      .from("phone_screening_participants")
+      .select("screening_context")
+      .eq("id", participant.id)
+      .maybeSingle()
+    const currentCtx = (latest.data?.screening_context || {}) as Record<string, any>
+    const currentSeen = (currentCtx.processedMessages || {}) as Record<string, string>
+    await supabaseAdmin
+      .from("phone_screening_participants")
+      .update({
+        screening_context: {
+          ...currentCtx,
+          processedMessages: { ...currentSeen, [msgKey]: new Date().toISOString() },
+        },
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", participant.id)
   }
 }
 

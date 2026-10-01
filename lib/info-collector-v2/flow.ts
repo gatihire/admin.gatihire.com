@@ -394,6 +394,20 @@ async function markScheduledAndFire(participantId: string, scheduledAt: Date): P
   return { success: true };
 }
 
+/**
+ * Turn a scheduling failure into a throw.
+ *
+ * markScheduledAndFire reports failure in its return value rather than throwing,
+ * which is convenient for its other callers but easy to discard by accident. A
+ * discarded failure means the candidate's tap is acknowledged with no call
+ * placed, so we raise instead and let the webhook's 5xx trigger a retry.
+ */
+function assertScheduled(result: { success: boolean; error?: string }): void {
+  if (!result.success) {
+    throw new Error(result.error || 'Call could not be scheduled');
+  }
+}
+
 async function handleIncomingCallNow(participantId: string): Promise<{ success: boolean; error?: string }> {
   try {
     return await markScheduledAndFire(participantId, new Date());
@@ -449,36 +463,43 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
         break;
       }
         
+      // Every slot button must propagate a scheduling failure. These cases used
+      // to await markScheduledAndFire and discard its result, so a slot that
+      // could not actually be queued reported success and the tap was lost —
+      // the recruiter saw "read" and no call. Throwing lets the webhook return
+      // 5xx so Meta redelivers and the booking is retried.
       case 'call_now':
-        await markScheduledAndFire(participant.id, new Date());
+        await assertScheduled(await markScheduledAndFire(participant.id, new Date()));
         break;
         
       case 'in_10_min':
-        await markScheduledAndFire(participant.id, new Date(Date.now() + 10 * 60 * 1000));
+        await assertScheduled(await markScheduledAndFire(participant.id, new Date(Date.now() + 10 * 60 * 1000)));
         break;
         
       case 'in_20_min':
-        await markScheduledAndFire(participant.id, new Date(Date.now() + 20 * 60 * 1000));
+        await assertScheduled(await markScheduledAndFire(participant.id, new Date(Date.now() + 20 * 60 * 1000)));
         break;
         
       case 'in_30_min':
-        await markScheduledAndFire(participant.id, new Date(Date.now() + 30 * 60 * 1000));
+        await assertScheduled(await markScheduledAndFire(participant.id, new Date(Date.now() + 30 * 60 * 1000)));
         break;
         
-      case 'today_evening':
+      case 'today_evening': {
         const now = new Date();
         const evening = new Date(now);
         evening.setUTCHours(12, 30, 0, 0);
         if (evening <= now) evening.setDate(evening.getDate() + 1);
-        await markScheduledAndFire(participant.id, evening);
+        await assertScheduled(await markScheduledAndFire(participant.id, evening));
         break;
+      }
         
-      case 'tomorrow_morning':
+      case 'tomorrow_morning': {
         const tomorrow = new Date();
         tomorrow.setDate(tomorrow.getDate() + 1);
         tomorrow.setUTCHours(3, 30, 0, 0);
-        await markScheduledAndFire(participant.id, tomorrow);
+        await assertScheduled(await markScheduledAndFire(participant.id, tomorrow));
         break;
+      }
         
       case 'provide_details': {
         await initializeInfoCollection({

@@ -264,19 +264,52 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       await supabaseAdmin.from("candidates").update({ uploaded_by_auth_user_id: ctx.authUser.id }).eq("id", candidateId)
     }
 
-    const { data: application } = await supabaseAdmin
+    // Link the candidate to this job.
+    //
+    // Two problems with the previous version:
+    //  1. `.single()` after an upsert with ignoreDuplicates throws
+    //     "Cannot coerce the result to a single JSON object" whenever the row
+    //     already exists, because ignoreDuplicates returns no row to select.
+    //     Re-uploading a resume for a candidate already on this job therefore
+    //     500'd AFTER the candidate had been created or updated, so the UI
+    //     showed a failure while the candidate row silently persisted with no
+    //     application — the resume never appeared in the pipeline.
+    //  2. The error was never checked, so a genuine failure to link also
+    //     returned 200 with a null applicationId.
+    const { data: application, error: applicationError } = await supabaseAdmin
       .from("applications")
       .upsert({
         job_id: jobId,
         candidate_id: candidateId,
-        status: duplicate ? "applied" : "applied",
+        status: "applied",
         source,
         origin,
         created_by: ctx.authUser.id,
         attribution: "recruiter_upload",
       }, { onConflict: "job_id,candidate_id", ignoreDuplicates: true })
       .select()
-      .single()
+      .maybeSingle()
+
+    // PGRST116 is PostgREST's "zero rows returned", which is the expected
+    // outcome when ignoreDuplicates skipped an existing application. Anything
+    // else means the candidate is not actually on this job and must not be
+    // reported as a success.
+    const duplicateApplication = applicationError && applicationError.code === "PGRST116"
+    if (applicationError && !duplicateApplication) {
+      console.error("Failed to link candidate to job", {
+        jobId,
+        candidateId,
+        error: applicationError.message,
+      })
+      return NextResponse.json(
+        {
+          error: "Resume was parsed but could not be added to this job's pipeline.",
+          details: applicationError.message,
+          candidateId,
+        },
+        { status: 500 },
+      )
+    }
 
     let fitScore: number | null = null
     try {
