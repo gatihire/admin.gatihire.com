@@ -115,7 +115,7 @@ function screeningContextFor(job: any, client: any, origin: string, extra?: Reco
     salaryRange: formatSalaryRange(job),
     mustHaveSkills: Array.isArray(job.skills_must_have) ? job.skills_must_have.join(", ") : job.skills_must_have || "",
     experienceRange: `${job.experience_min_years ?? 0}-${job.experience_max_years ?? "any"}`,
-    location: job.city || "",
+    location: jobLocation(job),
     ...(extra || {}),
   }
 }
@@ -185,7 +185,7 @@ async function sendShortlistMessage(opts: {
     whatsapp_sent_at: now,
     whatsapp_delivery_status: "sent",
     whatsapp_outbound_template: "shortlist_call_schedule",
-    whatsapp_outbound_params: { jobTitle: job.title, location: job.city || "", salaryBudget: formatSalaryRange(job) },
+    whatsapp_outbound_params: { jobTitle: job.title, location: jobLocation(job), salaryBudget: formatSalaryRange(job) },
     whatsapp_history: history,
     call_payload_json: userData,
     generated_questions: generatedQuestions.join("\n"),
@@ -291,13 +291,16 @@ async function sendOutboundWithJobLink(opts: {
   )
   const jobLink = getPublicJobUrl(job.id)
 
-  const outreachResult = await getWhatsAppService().sendTalentOutreach({
+    const outreachResult = await getWhatsAppService().sendTalentOutreach({
     phoneNumber: candidate.phone as string,
     candidateName: candidate.name || "",
     jobTitle: job.title || "",
     companyName: job.client_name || client?.name || "",
-    location: job.city || "",
-    salary: formatSalaryRange(job),
+    // talent_outreach_v2 has five required body parameters. Meta rejects the
+    // whole send with #131008 if any one arrives empty, so a job with no city
+    // and no salary took down the message rather than degrading the text.
+    location: jobLocation(job) || "Multiple locations",
+    salary: formatSalaryRange(job) || "As per industry standards",
   })
   if (!outreachResult.success) return { sent: false, error: outreachResult.error }
 
@@ -318,7 +321,7 @@ async function sendOutboundWithJobLink(opts: {
       whatsapp_outbound_template: "talent_outreach",
       whatsapp_outbound_params: {
         jobTitle: job.title,
-        location: job.city,
+        location: jobLocation(job),
         salaryBudget: formatSalaryRange(job),
       },
       whatsapp_history: [{
@@ -416,14 +419,63 @@ function buildJobGist(job: any): string {
   return `A ${job?.employment_type || ""} ${job?.work_type || ""} role`.trim() || job?.title || ""
 }
 
-function formatSalaryRange(job: any): string {
+/**
+ * Best available location string for a job.
+ *
+ * `jobs.city` is null on a large share of rows while `jobs.location` holds the
+ * real value, so reading only `city` sent an empty string. That is not a
+ * cosmetic bug: an empty template parameter makes Meta reject the entire send
+ * with #131008 "Required parameter is missing", so every outbound nudge to such
+ * a job silently failed.
+ */
+export function jobLocation(job: any): string {
+  const candidates = [job?.city, job?.location, job?.work_location, job?.state]
+  for (const c of candidates) {
+    const v = String(c ?? "").trim()
+    if (v) return v
+  }
+  return ""
+}
+
+/**
+ * Render a job's salary for a candidate-facing message.
+ *
+ * Candidates read "Rs 500000 - 600000" as noise at best and as an error at
+ * worst — Indian salary convention is lakhs per annum, so an annual figure in
+ * raw rupees is both unreadable and easy to misread as monthly. Annual amounts
+ * are converted to LPA; per-period amounts keep their unit.
+ */
+export function formatSalaryRange(job: any): string {
   const min = job?.salary_min
   const max = job?.salary_max
-  const type = SALARY_TYPE_TEXT[String(job?.salary_type || "").toLowerCase()] || ""
-  if (min != null && max != null) return `Rs ${min} - ${max}${type ? ` ${type}` : ""}`
-  if (min != null) return `Rs ${min}${type ? ` ${type}` : ""}`
-  if (max != null) return `Rs ${max}${type ? ` ${type}` : ""}`
-  return ""
+  const rawType = String(job?.salary_type || "").toLowerCase()
+
+  const num = (v: unknown): number | null => {
+    if (v == null || v === "") return null
+    const n = Number(v)
+    return isNaN(n) ? null : n
+  }
+  const lo = num(min)
+  const hi = num(max)
+
+  if (lo == null && hi == null) return ""
+
+  const isAnnual = rawType === "annual" || rawType === "yearly" || rawType === "pa" || rawType === "ctc"
+  const unit = SALARY_TYPE_TEXT[rawType] || ""
+
+  if (isAnnual) {
+    // 500000/yr -> "5 LPA". Keep one decimal only when it carries information.
+    const lpa = (n: number) => {
+      const v = n / 100000
+      return Number.isInteger(v) ? String(v) : v.toFixed(1)
+    }
+    if (lo != null && hi != null) return `${lpa(lo)} - ${lpa(hi)} LPA`
+    return `${lpa((lo ?? hi)!)} LPA`
+  }
+
+  const suffix = unit ? ` ${unit}` : ""
+  if (lo != null && hi != null) return `Rs ${lo} - ${hi}${suffix}`
+  return `Rs ${lo ?? hi}${suffix}`
 }
 
 type CallUserDataResult = {
@@ -462,7 +514,7 @@ async function buildCallUserData(
     must_have_skills: Array.isArray(job.skills_must_have)
       ? (job.skills_must_have as string[]).join(", ")
       : job.skills_must_have || "",
-    job_location: job.city || "",
+    job_location: jobLocation(job),
     experience_min: job.experience_min_years != null ? String(job.experience_min_years) : "",
     experience_max: job.experience_max_years != null ? String(job.experience_max_years) : "",
     origin,
@@ -817,7 +869,7 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
             salaryRange: formatSalaryRange(job),
             mustHaveSkills: Array.isArray(job.skills_must_have) ? job.skills_must_have.join(", ") : job.skills_must_have || "",
             experienceRange: `${job.experience_min_years ?? 0}-${job.experience_max_years ?? "any"}`,
-            location: job.city || "",
+            location: jobLocation(job),
           },
           updated_at: new Date().toISOString(),
         })
@@ -842,7 +894,7 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
             salaryRange: formatSalaryRange(job),
             mustHaveSkills: Array.isArray(job.skills_must_have) ? job.skills_must_have.join(", ") : job.skills_must_have || "",
             experienceRange: `${job.experience_min_years ?? 0}-${job.experience_max_years ?? "any"}`,
-            location: job.city || "",
+            location: jobLocation(job),
           },
           updated_at: new Date().toISOString(),
         })
@@ -880,5 +932,5 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
   }
 }
 
-export { inferJobCategory, buildBusinessTypeContext, buildJobGist, formatSalaryRange }
+export { inferJobCategory, buildBusinessTypeContext, buildJobGist }
 export type { CandidateOrigin }

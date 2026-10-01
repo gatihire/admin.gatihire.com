@@ -40,6 +40,18 @@ interface SendMessageResult {
   errorCode?: string | number
 }
 
+/**
+ * Coerce a template body parameter to non-empty text.
+ *
+ * Meta rejects the whole message with #131008 when any body parameter is an
+ * empty string, rather than rendering it blank. Guarding centrally keeps a
+ * missing job field from taking down the send.
+ */
+function templateParam(value: string | undefined | null, fallback: string): string {
+  const s = String(value ?? "").trim()
+  return s || fallback
+}
+
 export class WhatsAppService {
   private config: WhatsAppConfig
   private baseUrl: string
@@ -284,8 +296,12 @@ export class WhatsAppService {
     location: string
     salary: string
   }): Promise<SendMessageResult> {
-    const templateName = process.env.WHATSAPP_TEMPLATE_TALENT_OUTREACH || "talent_outreach"
-    
+    // Default must match the template that actually exists on the WABA.
+    // Falling back to "talent_outreach" (no suffix) means every outbound send
+    // fails with #132001 "Template name does not exist" whenever the env var is
+    // missing from a deployed environment.
+    const templateName = process.env.WHATSAPP_TEMPLATE_TALENT_OUTREACH || "talent_outreach_v2"
+
     return this.sendTemplateMessage({
       to: params.phoneNumber,
       templateName,
@@ -293,11 +309,11 @@ export class WhatsAppService {
         {
           type: "body",
           parameters: [
-            { type: "text", text: params.candidateName },
-            { type: "text", text: params.jobTitle },
-            { type: "text", text: params.companyName },
-            { type: "text", text: params.location },
-            { type: "text", text: params.salary }
+            { type: "text", text: templateParam(params.candidateName, "there") },
+            { type: "text", text: templateParam(params.jobTitle, "an open role") },
+            { type: "text", text: templateParam(params.companyName, "our client") },
+            { type: "text", text: templateParam(params.location, "Multiple locations") },
+            { type: "text", text: templateParam(params.salary, "As per industry standards") }
           ]
         }
       ]
@@ -557,9 +573,9 @@ export class WhatsAppService {
             {
               type: "body",
               parameters: [
-                { type: "text", text: params.candidateName },
-                { type: "text", text: params.jobTitle },
-                { type: "text", text: params.companyName }
+                { type: "text", text: templateParam(params.candidateName, "there") },
+                { type: "text", text: templateParam(params.jobTitle, "an open role") },
+                { type: "text", text: templateParam(params.companyName, "our client") }
               ]
             }
           ]
@@ -753,9 +769,9 @@ export class WhatsAppService {
             {
               type: "body",
               parameters: [
-                { type: "text", text: params.candidateName },
-                { type: "text", text: params.jobTitle },
-                { type: "text", text: params.companyName },
+                { type: "text", text: templateParam(params.candidateName, "there") },
+                { type: "text", text: templateParam(params.jobTitle, "an open role") },
+                { type: "text", text: templateParam(params.companyName, "our client") },
               ],
             },
             {

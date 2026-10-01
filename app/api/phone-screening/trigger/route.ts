@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { deriveOrigin, deriveCandidateFlow, type CandidateOrigin } from "@/lib/origin"
-import { orchestrateScreening, systemDecidesMode, getPublicJobUrl } from "@/lib/call-orchestrator"
+import { orchestrateScreening, systemDecidesMode, getPublicJobUrl, formatSalaryRange, jobLocation } from "@/lib/call-orchestrator"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { placeBolnaCall } from "@/lib/bolna"
 import { logger } from "@/lib/logger"
@@ -102,8 +102,13 @@ async function renudgeExistingParticipant(opts: {
         candidateName: candidate.name || "",
         jobTitle: job.title || "",
         companyName: job.client_name || client?.name || "",
-        location: job.city || "",
-        salary: `${job.salary_min || "?"} - ${job.salary_max || "?"}`,
+        // Empty parameters make Meta reject the entire send with #131008, so
+        // both fallbacks here are load-bearing, not cosmetic.
+        location: jobLocation(job) || "Multiple locations",
+        // Shared with the orchestrator. The inline `${min} - ${max}` this
+        // replaced printed raw rupees ("Rs 500000 - 600000") to candidates and
+        // "?" whenever either bound was unset.
+        salary: formatSalaryRange(job) || "As per industry standards",
       })
       status = "whatsapp_sent"
       outboundLink = getPublicJobUrl(job.id)
@@ -406,10 +411,10 @@ export async function POST(request: NextRequest) {
               jobTitle: job.title,
               clientName: job.client_name || client?.name || "",
               origin: fallbackOrigin,
-              salaryRange: `${job.salary_min || "?"} - ${job.salary_max || "?"}`,
+              salaryRange: formatSalaryRange(job),
               mustHaveSkills: Array.isArray(job.skills_must_have) ? job.skills_must_have.join(", ") : job.skills_must_have || "",
               experienceRange: `${job.experience_min_years ?? 0}-${job.experience_max_years ?? "any"}`,
-              location: job.city || "",
+              location: jobLocation(job),
               dedupedAt: now,
             },
             updated_at: now,
