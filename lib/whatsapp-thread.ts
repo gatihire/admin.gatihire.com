@@ -50,7 +50,13 @@ export async function appendThreadEntry(
     // the call payload in, and an untrimmed thread grows it without limit. The
     // cap matches lib/whatsapp-history so both writers behave the same.
     const MAX_ENTRIES = 60
-    history.push(entry)
+    // Stamp the time here rather than trusting every caller to pass one. An
+    // entry with no at/sentAt is dropped by the conversation view
+    // (buildConversation filters out entries entryTime() cannot parse), so a
+    // job-link message could be delivered to the candidate and then be
+    // invisible to the recruiter — the exact "sent but the thread is empty"
+    // symptom this guards against.
+    history.push({ at: new Date().toISOString(), ...entry })
     const trimmed =
       history.length > MAX_ENTRIES ? history.slice(history.length - MAX_ENTRIES) : history
 

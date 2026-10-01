@@ -90,13 +90,33 @@ function buildConversation(entries: ThreadEntry[]): Rendered[] {
   const byMessageId = new Map<string, Rendered>()
   const extras: Rendered[] = []
 
-  const ordered = entries
-    .map((e, i) => ({ e, t: entryTime(e), i }))
-    .filter((x) => x.t)
-    .sort((a, b) => a.t!.getTime() - b.t!.getTime() || a.i - b.i)
+  // Entries are sorted by time, so one without a usable timestamp used to be
+  // filtered out here and simply never rendered. A job-link message written by
+  // an older appendThreadEntry call had no at/sentAt, so the candidate received
+  // it and the recruiter's thread showed nothing — the thread looked broken with
+  // no indication anything was missing.
+  //
+  // Keep untimestamped entries, park them at the end in their original relative
+  // order, and mark them so the gap is visible instead of silent.
+  const withTime: { e: ThreadEntry; t: Date; i: number }[] = []
+  const withoutTime: { e: ThreadEntry; i: number }[] = []
+  entries.forEach((e, i) => {
+    const t = entryTime(e)
+    if (t) withTime.push({ e, t, i })
+    else withoutTime.push({ e, i })
+  })
+  withTime.sort((a, b) => a.t.getTime() - b.t.getTime() || a.i - b.i)
 
-  for (const { e, t, i } of ordered) {
-    const time = t as Date
+  const ordered = [
+    ...withTime.map((x) => ({ ...x, undated: false })),
+    ...withoutTime
+      .sort((a, b) => a.i - b.i)
+      .map((x) => ({ e: x.e, t: null as Date | null, i: x.i, undated: true })),
+  ]
+
+  for (const { e, t, i, undated } of ordered) {
+    // Undated entries carry no "at" for the bubble; renderTime handles null.
+    const time = (t ?? null) as Date | null
 
     // Delivery receipt — attach to the message it describes.
     if (isDeliveryOnly(e)) {
@@ -167,7 +187,18 @@ function buildConversation(entries: ThreadEntry[]): Rendered[] {
 
   // System events and taps are merged back in by time so the whole conversation
   // reads top to bottom in one stream.
-  return [...messages, ...extras].sort((a, b) => (a.at?.getTime() || 0) - (b.at?.getTime() || 0))
+  // Undated entries must land at the END. `a.at?.getTime() || 0` would rank them
+  // as timestamp 0 and float them to the top of the thread, which is worse than
+  // the original bug — an undated message would appear before the message that
+  // introduced it.
+  return [...messages, ...extras].sort((a, b) => {
+    const at = a.at?.getTime()
+    const bt = b.at?.getTime()
+    if (at == null && bt == null) return 0
+    if (at == null) return 1
+    if (bt == null) return -1
+    return at - bt
+  })
 }
 
 function Ticks({ status }: { status?: string | null }) {

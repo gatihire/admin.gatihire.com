@@ -224,8 +224,52 @@ async function handleIncomingMessage(message: any, contact: any) {
         findError = error
       }
     } else {
-      logger.warn("No candidate matched sender phone", { phoneNumber, normalized: normalizedFrom })
-      return
+      // The sender's number matches no candidate row at all — a common case when
+      // a recruiter tests the flow from their own SIM, or when the candidate
+      // replies from a different number than the one on file.
+      //
+      // This used to `return` with only a warn. That made a candidate tap
+      // "Interested" and receive complete silence, with nothing in the thread to
+      // explain it: no reply, no error surfaced, and the participant row still
+      // showing "waiting for reply" because we never touched it.
+      //
+      // Fall back to the most recent awaiting-interest participant so the reply
+      // is still handled, and say so loudly — picking the wrong row is far better
+      // than dropping a real candidate reply, and the log names the row we chose.
+      const { data: recent, error: recentErr } = await supabaseAdmin
+        .from("phone_screening_participants")
+        .select(`
+          *,
+          candidates:candidate_id (id, name, phone, email, total_experience, location),
+          jobs:job_id (id, title, client_name, city, location, salary_min, salary_max, experience_min_years, experience_max_years)
+        `)
+        .eq("info_step", "awaiting_interest")
+        .order("updated_at", { ascending: false })
+        .limit(1)
+        .maybeSingle()
+
+      if (!recentErr && recent) {
+        participant = recent
+        logger.error(
+          "Sender number matches no candidate — matched most recent awaiting_interest participant instead. VERIFY THIS IS CORRECT.",
+          {
+            senderPhone: phoneNumber,
+            normalized: normalizedFrom,
+            matchedParticipantId: recent.id,
+            matchedCandidateId: recent.candidate_id,
+            matchedCandidatePhone: recent.candidates?.phone,
+            matchedCandidateName: recent.candidates?.name,
+            jobId: recent.job_id,
+          }
+        )
+      } else {
+        logger.error("No candidate matched sender phone and no awaiting_interest participant to fall back on", {
+          phoneNumber,
+          normalized: normalizedFrom,
+          recentError: recentErr?.message,
+        })
+        return
+      }
     }
   }
   

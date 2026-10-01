@@ -97,6 +97,36 @@ export class WhatsAppService {
     return !!(this.config.phoneNumberId && this.config.accessToken)
   }
 
+  /**
+   * How long to hold a follow-up message so it cannot overtake the one before it.
+   *
+   * Meta gives no ordering guarantee between an approved template and a
+   * free-form session message sent immediately after: on a live run the link
+   * arrived ~5s BEFORE the template that introduced it.
+   *
+   * The obvious fix — poll the Graph API for the first message's status — is not
+   * available. `GET /{wamid}` returns 400 "Unsupported get request" for every
+   * message id, delivered or not, so it cannot be used as a delivery gate. What
+   * actually works is a fixed wait: delivery-status webhooks are not needed and
+   * the link lands reliably after the template.
+   */
+  private static readonly OUTBOUND_ORDERING_DELAY_MS = 12_000
+
+  /**
+   * Delay a dependent send until the previous message has had time to arrive.
+   *
+   * Returns true once the wait has elapsed. Never rejects and never fails the
+   * caller's send — this is pacing, not a delivery guarantee.
+   */
+  async waitForDelivery(messageId?: string | null, delayMs?: number): Promise<boolean> {
+    const budget = delayMs ?? WhatsAppService.OUTBOUND_ORDERING_DELAY_MS
+    if (budget <= 0) return true
+    // A tiny floor even for a zero/short budget: sending in the same instant as
+    // the previous message is exactly the race we are avoiding.
+    await new Promise((r) => setTimeout(r, Math.max(2_000, budget)))
+    return true
+  }
+
   async sendTemplateMessage(message: TemplateMessage): Promise<SendMessageResult> {
     // Use Meta API if configured
     if (this.isMetaConfigured()) {

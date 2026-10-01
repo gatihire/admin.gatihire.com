@@ -140,9 +140,15 @@ async function renudgeExistingParticipant(opts: {
     // Fire-and-forget: a failed link must not fail the re-nudge itself.
     if (outboundLink && candidate.phone) {
       const linkText = `Here's the full role details if you'd like to review it first:\n${outboundLink}`
-      sendSessionMessage(candidate.phone, linkText)
-        .then(async (r) => {
-          if (!r.success) return
+      // Gate the link on the template's delivery. Meta delivered the re-nudge
+      // template ~9s AFTER the link on a live run, so the candidate got a bare
+      // URL first and the message explaining it second.
+      whatsapp
+        .waitForDelivery(msgResult.messageId || "", 12_000)
+        .catch(() => false)
+        .then(() => sendSessionMessage(candidate.phone as string, linkText))
+        .then(async (r: any) => {
+          if (!r?.success) return
           const { appendThreadEntry } = await import("@/lib/whatsapp-thread")
           await appendThreadEntry(participantId, {
             direction: "out",

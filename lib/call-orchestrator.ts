@@ -346,6 +346,14 @@ async function sendOutboundWithJobLink(opts: {
     .eq("candidate_id", candidate.id)
 
   if (jobLink) {
+    // Hold the link back so it cannot overtake the outreach. Meta delivered a
+    // free-form session message ~5s BEFORE the approved template sent just
+    // before it, so the candidate saw a bare URL first and the message
+    // introducing it second.
+    await getWhatsAppService()
+      .waitForDelivery(outreachResult.messageId)
+      .catch(() => false)
+
     // Fire-and-forget: a failed link must not fail the outreach itself.
     const linkText = `Here's the full role details if you'd like to review it first:\n${jobLink}`
     const linkResult = await sendSessionMessage(candidate.phone as string, linkText).catch(() => null)
