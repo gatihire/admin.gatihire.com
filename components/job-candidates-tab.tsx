@@ -21,6 +21,7 @@ import { CandidateActivityTimeline } from "./candidate-activity-timeline"
 import { CandidateTimeline } from "./candidate-timeline"
 import { CandidateMetricsBar } from "./candidate-metrics-bar"
 import { CollectedInfoView, PreScreenVerdict } from "./candidate-collected-info"
+import { WhatsAppThreadTimeline } from "./whatsapp-thread-timeline"
 import { getCallTruth, CALL_TRUTH_FILTERS } from "@/lib/call-truth"
 import { RootCauseAnalytics } from "./root-cause-analytics"
 import {
@@ -1501,6 +1502,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                             execution {String(participant.bolna_execution_id).slice(0, 12)}…
                           </p>
                         )}
+                        <WhatsAppThreadTimeline history={participant.whatsapp_history} />
                         <CandidateMetricsBar participant={participant} callStatus={callStatus || "pending"} />
                       </div>
                     )}

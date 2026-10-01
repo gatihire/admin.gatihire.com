@@ -3,6 +3,7 @@ import { logger } from '@/lib/logger';
 import { mergeSources, stampSources } from '@/lib/info-provenance';
 import { getWhatsAppService } from '@/lib/whatsapp';
 import { scheduleOrPlaceCall } from '@/lib/scheduled-call';
+import { appendWhatsappHistory, buttonLabel } from '@/lib/whatsapp-history';
 import { 
   INFO_STEPS, 
   STEP_KEYS, 
@@ -384,11 +385,25 @@ async function markScheduledAndFire(participantId: string, scheduledAt: Date): P
   // a real enqueued callback inside the helper instead of being dropped.
   const delaySec = Math.max(0, Math.round((scheduledAt.getTime() - Date.now()) / 1000));
   const placed = await scheduleOrPlaceCall(participantId, delaySec);
-  if (placed.success || placed.skipped) return { success: true };
-
+  if (placed.success || placed.skipped) {
+    await appendWhatsappHistory(participantId, {
+      at: new Date().toISOString(),
+      kind: 'call_booked',
+      scheduledFor: scheduledAtISO,
+      mode: placed.skipped ? 'already_placed' : 'queued',
+    });
+    return { success: true };
+  }
+  
   // scheduleOrPlaceCall reports scheduled:false when nothing is actually queued,
   // so we must not confirm a call that cannot happen.
   if (!placed.scheduled) {
+    await appendWhatsappHistory(participantId, {
+      at: new Date().toISOString(),
+      kind: 'call_booking_failed',
+      scheduledFor: scheduledAtISO,
+      error: placed.error || 'Call could not be scheduled',
+    });
     return { success: false, error: placed.error || 'Call could not be scheduled' };
   }
   return { success: true };
@@ -430,6 +445,16 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
     if (!participant) return { success: false, error: 'Participant not found' };
     
     logger.info('Handling interactive button', { participantId, buttonId, buttonTitle: _buttonTitle });
+
+    // Record the tap itself, before acting on it. Without this the recruiter
+    // card could only ever show "read", so a dropped tap was indistinguishable
+    // from a candidate who never responded.
+    await appendWhatsappHistory(participantId, {
+      at: new Date().toISOString(),
+      kind: 'button_tap',
+      buttonId,
+      buttonTitle: _buttonTitle || buttonLabel(buttonId),
+    });
     
     switch (buttonId) {
       case 'interested': {

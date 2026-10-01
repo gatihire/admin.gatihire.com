@@ -10,6 +10,7 @@
     "build": "next build",
     "dev": "next dev",
     "lint": "eslint \"{app,components,lib}/**/*.{ts,tsx,js,jsx}\"",
+    "reconcile:calls": "node --env-file=.env.local scripts/reconcile-calls.mjs",
     "start": "next start"
   },
   "dependencies": {
