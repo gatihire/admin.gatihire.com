@@ -186,6 +186,13 @@ function formatCost(cents: number | null | undefined): string {
   return `₹${(cents / 100).toFixed(2)}`
 }
 
+/** Initials for the avatar. Tolerates a missing/blank name. */
+function initials(name?: string | null): string {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean)
+  if (parts.length === 0) return "?"
+  return parts.slice(0, 2).map((p) => p[0]).join("").toUpperCase()
+}
+
 type TabId = "transcript" | "whatsapp" | "recording" | "qa" | "jd_fit" | "agent_config"
 
 const TABS: { id: TabId; label: string; icon: React.ElementType }[] = [
@@ -216,6 +223,7 @@ export function PhoneScreeningResultsSheet({
   const [isPlaying, setIsPlaying] = useState(false)
   const [audioProgress, setAudioProgress] = useState(0)
   const [audioDuration, setAudioDuration] = useState(0)
+  const [audioError, setAudioError] = useState(false)
   const audioRef = useRef<HTMLAudioElement>(null)
   const { toast } = useToast()
 
@@ -226,6 +234,7 @@ export function PhoneScreeningResultsSheet({
     setActiveTab("transcript")
     setIsPlaying(false)
     setAudioProgress(0)
+    setAudioError(false)
 
     fetch(`/api/phone-screening/participants/${participantId}`)
       .then((res) => res.json())
@@ -321,20 +330,40 @@ export function PhoneScreeningResultsSheet({
     }
   }
 
-  const parsedSummary = data?.ai_summary
-    ? (() => { try { return JSON.parse(data.ai_summary) as Record<string, unknown> } catch { return null } })()
-    : null
+  // Every one of these is written by different jobs (basic screening, enrichment
+  // pass, legacy rows) and several of them store prose rather than JSON — e.g.
+  // ai_summary on 2 of 5 completed calls is a plain paragraph. Parsing must
+  // therefore never be able to throw: a failed parse used to bubble out of the
+  // component and blank the whole sheet, taking the recording player with it.
+  const safeParse = (raw: unknown): Record<string, unknown> | null => {
+    if (!raw) return null
+    if (typeof raw === "object") return raw as Record<string, unknown>
+    try {
+      const parsed = JSON.parse(String(raw))
+      return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null
+    } catch {
+      // Prose summary, not JSON — surface it as the summary text instead of
+      // discarding the only human-readable outcome we have.
+      return { __text: String(raw) }
+    }
+  }
 
-  const verd = data?.verdict_json
-    ? (typeof data.verdict_json === "string" ? JSON.parse(data.verdict_json) : data.verdict_json)
-    : null
+  const parsedSummary = safeParse(data?.ai_summary)
+  const verd = safeParse(data?.verdict_json)
 
   const enriched = data?.enriched_summary as Record<string, unknown> | null | undefined
 
   // Prefer enriched summary over basic verdict
   const pluses: string[] = (enriched?.strengths as string[]) || (verd?.pluses as string[]) || ((parsedSummary?.pluses as string[]) || [])
   const minuses: string[] = (enriched?.concerns as string[]) || (verd?.minuses as string[]) || ((parsedSummary?.minuses as string[]) || [])
-  const verdictExplanation = (enriched?.comprehensive_summary as string) || (verd?.verdict_explanation as string) || (parsedSummary?.verdict_explanation as string) || ""
+  const verdictExplanation =
+    (enriched?.comprehensive_summary as string)
+    || (verd?.verdict_explanation as string)
+    || (parsedSummary?.verdict_explanation as string)
+    // A prose (non-JSON) ai_summary is the whole summary; showing it beats
+    // showing nothing at all.
+    || (parsedSummary?.__text as string)
+    || ""
   const fitAssessment = (enriched?.fit_assessment as string) || ""
   const salaryAnalysis = (enriched?.salary_analysis as { current?: string; expected?: string; risk?: string; notes?: string }) || null
   const relocationAssessment = (enriched?.relocation_assessment as string) || ""
@@ -413,12 +442,12 @@ export function PhoneScreeningResultsSheet({
                   <SheetTitle className="flex items-center gap-3">
                     <div className="h-10 w-10 rounded-full bg-zinc-200 flex items-center justify-center shrink-0">
                       <span className="text-sm font-bold text-zinc-600">
-                        {data.candidates.name.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase()}
+                        {initials(data.candidates?.name)}
                       </span>
                     </div>
                     <div className="min-w-0">
-                      <span className="block truncate">{data.candidates.name}</span>
-                      <SheetDescription className="text-xs">{data.candidates.current_role}</SheetDescription>
+                      <span className="block truncate">{data.candidates?.name || "Candidate"}</span>
+                      <SheetDescription className="text-xs">{data.candidates?.current_role || "—"}</SheetDescription>
                     </div>
                   </SheetTitle>
                 </SheetHeader>
@@ -829,10 +858,29 @@ export function PhoneScreeningResultsSheet({
                     <p className="text-sm text-zinc-400 text-center py-8">No recording available</p>
                   ) : (
                     <div className="space-y-4">
-                      {/* Hidden audio element */}
-                      <audio ref={audioRef} src={data.recording_url} preload="metadata" />
+                      {/* Hidden audio element. Bolna URLs are 307s to signed S3
+                          objects, so a stale one fails to load — surface that
+                          instead of leaving a dead play button. */}
+                      <audio
+                        ref={audioRef}
+                        src={data.recording_url}
+                        preload="metadata"
+                        onError={() => setAudioError(true)}
+                      />
 
-                      {/* Player card */}
+                      {audioError ? (
+                        <div className="p-3 rounded-xl border border-amber-200 bg-amber-50/60 text-xs text-amber-900 space-y-2">
+                          <p className="font-semibold flex items-center gap-1.5">
+                            <AlertTriangle className="h-3.5 w-3.5" />
+                            This recording link is no longer valid
+                          </p>
+                          <p>
+                            Bolna stores recordings behind signed, expiring S3 URLs. The transcript
+                            and the AI screening summary below are unaffected.
+                          </p>
+                        </div>
+                      ) : (
+                      /* Player card */
                       <div className="p-4 rounded-xl border border-zinc-200 bg-white">
                         <div className="flex items-center gap-3 mb-4">
                           <button
@@ -889,6 +937,7 @@ export function PhoneScreeningResultsSheet({
                           </Button>
                         </div>
                       </div>
+                      )}
 
                       {/* Call details */}
                       <div className="p-3 rounded-xl bg-zinc-50 border border-zinc-100">
