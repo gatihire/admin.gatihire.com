@@ -2,8 +2,8 @@
 
 import { useState } from "react"
 import { MessageCircle, MousePointerClick, PhoneCall } from "lucide-react"
-import type { ThreadEntry } from "@/lib/whatsapp-thread"
-import { describeTemplate, entryTime } from "@/lib/whatsapp-thread"
+import type { ThreadEntry } from "@/lib/whatsapp-thread-shared"
+import { describeTemplate, entryTime } from "@/lib/whatsapp-thread-shared"
 import { WhatsAppConversationModal } from "./whatsapp-conversation-modal"
 
 /**

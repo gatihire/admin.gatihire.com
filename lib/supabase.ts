@@ -1,4 +1,4 @@
-import { createClient } from '@supabase/supabase-js'
+import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import {
   CLIENT_LOGOS_BUCKET_ALLOWED_MIME_TYPES,
   CLIENT_LOGOS_BUCKET_NAME,
@@ -9,13 +9,53 @@ import {
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey)
+function requireKey(key: string | undefined, name: string): string {
+  if (!key) throw new Error(`${name} is not set`)
+  return key
+}
 
-// For server-side operations that require elevated permissions
-export const supabaseAdmin = createClient(
+export const supabase = createClient(
   supabaseUrl,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
+  requireKey(supabaseAnonKey, "NEXT_PUBLIC_SUPABASE_ANON_KEY")
 )
+
+/**
+ * Server-side client with elevated permissions.
+ *
+ * Built lazily behind a Proxy. Constructing it at module scope threw
+ * "supabaseKey is required" in the browser — the service-role key is not a
+ * NEXT_PUBLIC_ variable, so it is undefined client-side and `createClient`
+ * throws during module evaluation. Because that happens at import time, a single
+ * "use client" component importing this file for the anon client alone took the
+ * whole page down before React rendered anything.
+ *
+ * The Proxy defers construction until a property is actually touched, so
+ * importing this module in the browser is safe; only real server use pays the
+ * cost of building the client.
+ */
+// Spelled out rather than ReturnType<typeof createClient>: the Proxy's indexed
+// access would otherwise widen `.from()` to `never` and break every call site.
+type SupabaseAdmin = SupabaseClient
+
+let adminClient: SupabaseAdmin | null = null
+
+function getAdminClient(): SupabaseAdmin {
+  if (!adminClient) {
+    adminClient = createClient(
+      supabaseUrl,
+      requireKey(process.env.SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
+    )
+  }
+  return adminClient
+}
+
+export const supabaseAdmin: SupabaseAdmin = new Proxy({} as SupabaseAdmin, {
+  get(_target, prop, receiver) {
+    const client = getAdminClient()
+    const value = Reflect.get(client as object, prop, receiver)
+    return typeof value === "function" ? value.bind(client) : value
+  },
+})
 
 async function ensureBucketExists(params: {
   bucketName: string

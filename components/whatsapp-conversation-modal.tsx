@@ -12,8 +12,8 @@ import {
   PhoneCall,
   XCircle,
 } from "lucide-react"
-import type { ThreadEntry } from "@/lib/whatsapp-thread"
-import { describeTemplate, entryTime } from "@/lib/whatsapp-thread"
+import type { ThreadEntry } from "@/lib/whatsapp-thread-shared"
+import { describeTemplate, entryTime } from "@/lib/whatsapp-thread-shared"
 
 /**
  * WhatsApp-style conversation view for a candidate's screening thread.

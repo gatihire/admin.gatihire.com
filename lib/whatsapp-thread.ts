@@ -1,45 +1,25 @@
 import { supabaseAdmin } from "@/lib/supabase"
+import {
+  type ThreadEntry,
+  describeTemplate,
+  entryTime,
+  TEMPLATE_LABELS,
+} from "@/lib/whatsapp-thread-shared"
 
 /**
- * Canonical shape of one WhatsApp thread entry stored in
- * `phone_screening_participants.whatsapp_history`.
+ * Server-only writers for `phone_screening_participants.whatsapp_history`.
  *
- * History used to record only `{at, status, messageId}` delivery receipts and a
- * template name. There was no message body anywhere, so no UI could ever show
- * the candidate a readable conversation — the best possible view was a list of
- * "Message sent" lines with no idea what was said. `text` is what makes the
- * conversation renderable; `direction` is what decides which side of the bubble
- * it goes on.
+ * Recording message text at the send site is what makes the conversation view
+ * possible: the delivery receipts Meta sends afterwards carry a status and a
+ * messageId but no body, so a message logged without its text is permanently
+ * unreadable.
+ *
+ * Types and pure formatters live in `lib/whatsapp-thread-shared.ts` because this
+ * module imports the service-role Supabase client, and a "use client" component
+ * that imports from here crashes the page with `supabaseKey is required`.
  */
-export interface ThreadEntry {
-  /** ISO timestamp. Legacy rows used `sentAt`; both are read by the UI. */
-  at?: string
-  sentAt?: string
-  kind?: string
-  /** "out" for anything we sent, "in" for the candidate. */
-  direction?: "in" | "out" | "system"
-  /** The actual message body. Absent on legacy rows. */
-  text?: string | null
-  /** Template used, when the outbound message was a template send. */
-  template?: string
-  /** Delivery state: sent | delivered | read | failed. */
-  status?: string
-  messageId?: string | null
-  buttonId?: string
-  buttonTitle?: string
-  scheduledFor?: string
-  error?: string | null
-  mode?: string | null
-  [key: string]: unknown
-}
 
-/** Best-effort timestamp for an entry, tolerating both `at` and `sentAt`. */
-export function entryTime(entry: ThreadEntry): Date | null {
-  const raw = entry.at || entry.sentAt
-  if (!raw) return null
-  const d = new Date(String(raw))
-  return isNaN(d.getTime()) ? null : d
-}
+export { type ThreadEntry, describeTemplate, entryTime, TEMPLATE_LABELS }
 
 /**
  * Append a thread entry.
@@ -133,36 +113,4 @@ export function recordOutboundTemplate(
     at: new Date().toISOString(),
     ...extra,
   })
-}
-
-/**
- * Human label for an outbound template send that has no stored body. Used to
- * render legacy rows so a recruiter still sees what was sent rather than a bare
- * "Message sent".
- */
-export const TEMPLATE_LABELS: Record<string, string> = {
-  talent_outreach: "Matched-role outreach with Interested / Not Interested",
-  shortlist_call_schedule: "Shortlisted — call time options",
-  collect_info_form: "Candidate details form",
-  collect_info_form_v2: "Candidate details form",
-  collect_info_form_v3: "Candidate details form",
-  detailed_info_request: "Requested screening details",
-  inbound_screening_invite: "Screening invite",
-  inbound_info_request_v2: "Requested screening details",
-  outbound_info_request: "Requested screening details",
-  reminder_nudge: "Reminder nudge",
-  second_reminder_nudge: "Second reminder nudge",
-  call_nudge: "Call nudge",
-  missed_call_reschedule: "Missed-call reschedule",
-  ai_call_reassurance: "Call reassurance",
-  info_received_confirm: "Confirmed details received",
-  info_review_pending: "Held for recruiter review",
-  not_interested_reason: "Asked why they declined",
-  screening_filtered_out: "Screening outcome",
-}
-
-/** Short description of what a template was for, when its body text is unknown. */
-export function describeTemplate(template?: string): string {
-  if (!template) return "Message sent"
-  return TEMPLATE_LABELS[template] || `Message sent (${template})`
 }
