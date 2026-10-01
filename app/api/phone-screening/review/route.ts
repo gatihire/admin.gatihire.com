@@ -181,9 +181,22 @@ export async function POST(request: NextRequest) {
         }
 
         if (decision === "approved") {
+          // Clear the hold the pre-screen set. Leaving awaitingReviewApproval in
+          // place would make the next inbound reply believe the candidate is
+          // still ungated and go quiet on them after HR already approved.
+          const prevContext = (participant as any).screening_context || {}
           await supabaseAdmin
             .from("phone_screening_participants")
-            .update({ ...audit, status: "info_received", prescreen_decision: "approved" })
+            .update({
+              ...audit,
+              status: "info_received",
+              prescreen_decision: "approved",
+              screening_context: {
+                ...prevContext,
+                awaitingReviewApproval: false,
+                approvedAt: now,
+              },
+            })
             .eq("id", participantId)
 
           await supabaseAdmin

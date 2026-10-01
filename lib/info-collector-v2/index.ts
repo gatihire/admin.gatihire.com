@@ -47,6 +47,8 @@ export {
   initializeInfoCollection,
   handleRejectionReason,
   getParticipantWithExtras,
+  hasEnoughToScreen,
+  knownScreeningFields,
 } from './flow';
 
 export type { HandleResult } from './flow';

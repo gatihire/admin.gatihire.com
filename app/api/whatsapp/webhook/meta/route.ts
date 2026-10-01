@@ -596,6 +596,41 @@ async function dispatchIntent(participant: any, classification: { intent: string
     }
     
     case 'provide_details': {
+      // Portal applicants already typed their CTC/notice into the apply form.
+      // Re-asking is the "why are you asking me again" bug — when we hold a
+      // screenable set of fields, "provide details" is just consent, so honour
+      // it by moving to scheduling rather than opening a form.
+      const { hasEnoughToScreen, knownScreeningFields } = await import('@/lib/info-collector-v2')
+      if (hasEnoughToScreen(participant)) {
+        logger.info("AI: provide_details but details already on file — scheduling", {
+          participantId: participant.id,
+          known: knownScreeningFields(participant),
+        })
+        await supabaseAdmin
+          .from("phone_screening_participants")
+          .update({ status: "interested", info_step: "confirmed", updated_at: new Date().toISOString() })
+          .eq("id", participant.id)
+
+        if (participant.candidates?.phone) {
+          const sent = await getWhatsAppService().sendScheduleOptions({
+            phoneNumber: participant.candidates.phone,
+            candidateName: participant.candidates?.name || 'Candidate',
+            jobTitle: participant.jobs?.title || 'the role',
+          })
+          if (sent.success) {
+            await appendToHistory(participant.id, {
+              at: new Date().toISOString(),
+              kind: "schedule_buttons",
+              direction: "out",
+              text: `Thanks ${participant.candidates?.name || ''} — we already have your details from your application, so let's set up your screening call.`.trim(),
+              status: "sent",
+              messageId: sent.messageId ?? null,
+            })
+          }
+        }
+        break
+      }
+
       logger.info("AI: starting info collection", { participantId: participant.id })
       await initializeInfoCollection(participant)
       
@@ -625,18 +660,29 @@ async function dispatchIntent(participant: any, classification: { intent: string
     case 'question': {
       logger.info("AI: answering candidate question", { participantId: participant.id })
       const { sendSessionMessage } = await import('@/lib/info-collector-v2')
+      const { formatSalaryRange, jobLocation } = await import('@/lib/call-orchestrator')
+      const { hasEnoughToScreen } = await import('@/lib/info-collector-v2')
       const phoneNumber = participant.candidates?.phone
       const role = participant.jobs?.title || "the role"
       const company = participant.jobs?.client_name || "our client"
-      const city = participant.jobs?.city || participant.jobs?.location || ""
-      const salary = participant.jobs?.salary_min != null && participant.jobs?.salary_max != null
-        ? `Rs ${participant.jobs.salary_min} - ${participant.jobs.salary_max}`
-        : "competitive"
+      const city = jobLocation(participant.jobs || {})
+      // Shared formatter: the inline `Rs ${min} - ${max}` this replaced printed
+      // raw rupees (a monthly 30000-40000 band read as a paise salary) and "?"
+      // for half-filled jobs.
+      const salary = formatSalaryRange(participant.jobs || {}) || "competitive"
+
+      // Do not invite a portal applicant to re-send details they already typed
+      // into the apply form — that invitation is what turned a question into an
+      // info-collection exchange.
+      const nextStep = hasEnoughToScreen(participant)
+        ? `Would you like to schedule it? Reply "call now" or pick a slot.`
+        : `Would you like to schedule it? Reply "call now", or share your CTC / notice period / experience and we'll proceed.`
+
       if (phoneNumber) {
         await sendAndRecord(
           participant.id,
           phoneNumber,
-          `Thanks for asking! Quick details on the ${role} role at ${company}:${city ? `\n• Location: ${city}` : ""}\n• Salary: ${salary}\n• Screening: a quick 5-10 minute call with our AI recruiter.\n\nWould you like to schedule it? Reply "call now", or share your CTC / notice period / experience and we'll proceed.`,
+          `Thanks for asking! Quick details on the ${role} role at ${company}:${city ? `\n• Location: ${city}` : ""}\n• Salary: ${salary}\n• Screening: a quick 5-10 minute call with our AI recruiter.\n\n${nextStep}`,
           { kind: "role_info_reply" }
         )
       }
@@ -932,57 +978,52 @@ async function finalizeCollectedInfo(
     }
 
     case 'needs_review': {
-      // Mark for HR review, but still let the candidate schedule the call.
-      // HR review runs alongside — the candidate isn't blocked from an intro call.
+      // Deliberately SILENT. needs_review means a human has to look at this
+      // profile before we spend a call slot on it, so nothing goes to the
+      // candidate here.
+      //
+      // This branch used to send "when should we call you?" with slot buttons
+      // and the code comment argued that HR review "runs alongside — the
+      // candidate isn't blocked". That is backwards: the candidate booked
+      // themselves into a call nobody had approved, and the reviewer in the
+      // pre-screen queue was left looking at a candidate who had already been
+      // offered slots. Approval drives the next message (see the
+      // app/api/phone-screening/review route, which sends the confirm template
+      // and books Bolna on "approved").
+      //
+      // A silence is not a dead end: the follow-up scheduler still nudges these
+      // rows, and the review queue surfaces them to HR.
       await supabaseAdmin
         .from("phone_screening_participants")
-        .update({ status: "needs_review", updated_at: new Date().toISOString() })
+        .update({
+          status: "needs_review",
+          needs_manual_followup: true,
+          screening_context: {
+            ...(participant.screening_context || {}),
+            // Guards the late-reply path below from messaging them either.
+            awaitingReviewApproval: true,
+            awaitingReviewSince: new Date().toISOString(),
+          },
+          updated_at: new Date().toISOString(),
+        })
         .eq("id", participant.id)
 
-      const { getWhatsAppService } = await import('@/lib/whatsapp')
-      const reviewBody = "Thanks for sharing your details! To take this forward, our AI recruiter needs a quick 5-10 minute call to understand your background. When should we call you?"
-      const sendResult = await getWhatsAppService().sendInteractiveButtons({
-        phoneNumber,
-        body: reviewBody,
-        footer: "Reply 'call now' or pick a slot",
-        buttons: [
-          { id: "call_now", title: "Call Now" },
-          { id: "in_10_min", title: "In 10 min" },
-          { id: "in_30_min", title: "In 30 min" },
-        ],
+      // Recorded as an internal event, not an outbound bubble: the thread shows
+      // the candidate's details arriving and then nothing, which is accurate.
+      await appendToHistory(participant.id, {
+        at: new Date().toISOString(),
+        kind: "pre_screen_review_queued",
+        direction: "internal",
+        text: "Pre-screen flagged this profile for HR review. No message sent — waiting for recruiter approval.",
+        status: "sent",
+        preScreenDecision: preScreenResult.decision,
+        preScreenReasons: preScreenResult.reasons,
       })
 
-      if (!sendResult.success) {
-        logger.warn("Failed to send schedule buttons after needs_review", {
-          participantId: participant.id,
-          error: sendResult.error,
-        })
-        await appendToHistory(participant.id, {
-          at: new Date().toISOString(),
-          kind: "schedule_buttons",
-          direction: "out",
-          text: reviewBody,
-          status: "failed",
-          error: sendResult.error,
-        })
-      } else {
-        logger.info("Schedule buttons sent after needs_review", {
-          participantId: participant.id,
-          messageId: sendResult.messageId,
-        })
-        await appendToHistory(participant.id, {
-          at: new Date().toISOString(),
-          kind: "schedule_buttons",
-          direction: "out",
-          text: reviewBody,
-          status: "sent",
-          messageId: sendResult.messageId,
-        })
-        await assertSet(participant.id, {
-          whatsapp_delivery_status: "sent",
-          whatsapp_message_id: sendResult.messageId,
-        })
-      }
+      logger.info("Pre-screen needs_review — held for HR approval, candidate not messaged", {
+        participantId: participant.id,
+        reasons: preScreenResult.reasons,
+      })
       break
     }
 

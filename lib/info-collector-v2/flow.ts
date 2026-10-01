@@ -84,13 +84,58 @@ async function getParticipantWithExtras(participantId: string): Promise<Particip
   } as any;
 }
 
-async function initializeInfoCollection(participant: any): Promise<{ success: boolean; error?: string }> {
-  // Reset info collection state
+/**
+ * Does this participant already have the details we would otherwise ask for?
+ *
+ * Portal applicants type current/expected CTC, notice period and relocation into
+ * the apply form before we ever message them. Treating their reply as a request
+ * to re-collect that data is both redundant and insulting — it is the "why is it
+ * asking me my salary again" behaviour.
+ *
+ * Returns the keys we can already answer for, so the caller can ask only about
+ * what is genuinely missing.
+ */
+export function knownScreeningFields(participant: any): string[] {
+  const ctcKeys = ["current_ctc", "expected_ctc", "notice_period"]
+  const info = (participant as any)?.info_data || {}
+  const candidate = (participant as any)?.candidates || {}
+  const known: string[] = []
+
+  for (const k of ctcKeys) {
+    const v = info[k] ?? candidate[k]
+    if (v != null && String(v).trim() && !["void", "n/a", "na", "-"].includes(String(v).trim().toLowerCase())) {
+      known.push(k)
+    }
+  }
+  // Relocation is a boolean column; treat either a stored answer or a seeded
+  // one as known.
+  const reloc = info.willing_to_relocate ?? candidate.willing_to_relocate
+  if (reloc === true || reloc === false || (typeof reloc === "string" && ["yes", "no"].includes(reloc.toLowerCase()))) {
+    known.push("willing_to_relocate")
+  }
+  return known
+}
+
+/** True when we hold enough detail to screen without asking anything. */
+export function hasEnoughToScreen(participant: any): boolean {
+  const known = new Set(knownScreeningFields(participant))
+  // CTC pair plus notice is the minimum the pre-screen actually reads.
+  return known.has("current_ctc") && known.has("expected_ctc") && known.has("notice_period")
+}
+
+async function initializeInfoCollection(participant: any): Promise<{ success: boolean; error?: string; alreadyKnown?: string[] }> {
+  // Never blank a profile that already carries apply-form data. The old
+  // `info_data: {}` here silently deleted the seeded current/expected CTC and
+  // notice period, which is precisely the information we would then ask the
+  // candidate for.
+  const alreadyKnown = knownScreeningFields(participant)
+  const existingInfo = hasEnoughToScreen(participant) ? { ...((participant as any).info_data || {}) } : {}
+
   await supabaseAdmin
     .from('phone_screening_participants')
     .update({
-      info_step: 'current_ctc',
-      info_data: {},
+      info_step: alreadyKnown.length ? 'collect_all' : 'current_ctc',
+      info_data: existingInfo,
       info_confirmed: false,
       status: 'info_requested',
       info_request_sent_at: new Date().toISOString(),
@@ -102,7 +147,7 @@ async function initializeInfoCollection(participant: any): Promise<{ success: bo
     })
     .eq('id', participant.id);
   
-  return { success: true };
+  return { success: true, alreadyKnown };
 }
 
 async function handleStepByStepReply(participantId: string, replyText: string): Promise<{
@@ -649,6 +694,41 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
       }
         
       case 'provide_details': {
+        // A candidate who tapped "provide details" but whose apply form already
+        // carries CTC/notice has opted in; they do not need to type it again.
+        // Go to scheduling with what we hold instead of opening a form.
+        if (hasEnoughToScreen(participant)) {
+          logger.info('provide_details with details already on file — proceeding to schedule', {
+            participantId,
+            known: knownScreeningFields(participant),
+          });
+          await supabaseAdmin
+            .from('phone_screening_participants')
+            .update({
+              status: 'interested',
+              info_step: 'confirmed',
+              info_confirmed: false,
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', participantId);
+
+          if (participant.candidates?.phone) {
+            await getWhatsAppService().sendScheduleOptions({
+              phoneNumber: participant.candidates.phone,
+              candidateName: participant.candidate_name,
+              jobTitle: participant.job_title,
+            });
+            await appendWhatsappHistory(participantId, {
+              at: new Date().toISOString(),
+              kind: 'schedule_buttons',
+              direction: 'out',
+              text: `Thanks ${participant.candidate_name || ''} — we already have your details from your application. Pick a slot for your screening call.`.trim(),
+              status: 'sent',
+            });
+          }
+          break;
+        }
+
         await initializeInfoCollection({
           id: participant.id,
           candidate_id: participant.candidate_id,
