@@ -724,9 +724,20 @@ export class WhatsAppService {
     flowToken: string
   }): Promise<SendMessageResult> {
     const preferred = (process.env.WHATSAPP_TEMPLATE_COLLECT_INFO_FORM || "").trim()
+    // Order matters and deliberately SKIPS v2.
+    //
+    // v3 (collect_info_form_v3) is the corrected 5-field flow — its footer maps
+    // every input, so submissions carry real values.
+    //
+    // v2 is deliberately excluded: its footer payload is `{}`, so every
+    // submission arrived as an empty object and candidate data was thrown away.
+    // Falling back to it would silently reintroduce that data loss. It is only
+    // used if explicitly pinned via WHATSAPP_TEMPLATE_COLLECT_INFO_FORM, and
+    // until v3 is approved the working 7-field v1 (collect_info_form) takes over
+    // so no candidate is left without a form.
     const candidates: Array<{ templateName: string; screen: string }> = [
       { templateName: preferred, screen: "DETAILS_SCREEN" },
-      { templateName: "collect_info_form_v2", screen: "DETAILS_SCREEN" },
+      { templateName: "collect_info_form_v3", screen: "DETAILS_SCREEN" },
       { templateName: "collect_info_form", screen: "DETAILS_SCREEN" },
     ].filter((c) => !!c.templateName)
 

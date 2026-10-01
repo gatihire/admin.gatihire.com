@@ -14,6 +14,23 @@ import { type CandidateOrigin, type CandidateFlow, deriveCandidateFlow } from "@
 import { type InfoSource, stampSources, mergeSources } from "@/lib/info-provenance"
 import { updateParticipant } from "@/lib/participant-update"
 import { logger } from "@/lib/logger"
+import { getBoardAppBaseUrl } from "@/lib/utils"
+import { sendSessionMessage } from "@/lib/info-collector-v2"
+
+/**
+ * Public job page the candidate can open to review the role before sharing
+ * details. Deliberately the job-detail URL, not /apply: outbound candidates are
+ * being screened for a role and may never apply, so linking an apply form would
+ * imply they should.
+ */
+export function getPublicJobUrl(jobId: string): string {
+  return `${getBoardAppBaseUrl()}/jobs/${jobId}`
+}
+
+/** All open roles — offered when a candidate declines so the relationship survives. */
+export function getPortalJobsUrl(): string {
+  return `${getBoardAppBaseUrl()}/jobs`
+}
 
 /** Batch size for WhatsApp sends — delay between batches to avoid rate limits. */
 const WHATSAPP_BATCH_SIZE = 50
@@ -235,6 +252,100 @@ async function sendDetailedInfoMessage(opts: {
   await scheduleOutreachFollowup(participantId, "nudge", nudgeH * 60 * 60)
   await scheduleOutreachFollowup(participantId, "escalate", escalateH * 60 * 60)
   return { sent: true, messageId: result.messageId }
+}
+
+/**
+ * Flow C (outbound) opener: matched-role outreach + job link, and STOP there.
+ *
+ * Outbound candidates have not opted in to anything yet. Asking a stranger for
+ * their CTC before they have agreed to be considered reads as a data grab, so we
+ * only sell the role and offer Interested / Not Interested. The details form is
+ * sent later, from the `interested` case in the Meta webhook, and the call is
+ * offered after the pre-screen passes.
+ *
+ * The job link rides in a separate session message because talent_outreach_v2 is
+ * already approved with five body parameters; adding a sixth would require a new
+ * Meta approval round before anything could be sent at all.
+ */
+async function sendOutboundWithJobLink(opts: {
+  candidate: ScreeningCandidate
+  job: any
+  client: any
+  origin: string
+  participantId?: string
+  campaignId: string
+  nudgeH: number
+  escalateH: number
+  preScreenConfig: Record<string, number>
+}): Promise<OutboundSendResult> {
+  const { candidate, job, client, origin, participantId, campaignId, nudgeH, escalateH, preScreenConfig } = opts
+  const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(
+    candidate, job, client, origin, participantId
+  )
+  const jobLink = getPublicJobUrl(job.id)
+
+  const outreachResult = await getWhatsAppService().sendTalentOutreach({
+    phoneNumber: candidate.phone as string,
+    candidateName: candidate.name || "",
+    jobTitle: job.title || "",
+    companyName: job.client_name || client?.name || "",
+    location: job.city || "",
+    salary: formatSalaryRange(job),
+  })
+  if (!outreachResult.success) return { sent: false, error: outreachResult.error }
+
+  const now = new Date().toISOString()
+  await supabaseAdmin
+    .from("phone_screening_participants")
+    .update({
+      status: "whatsapp_sent",
+      screening_mode: "collect_info_first",
+      // Nothing is asked until they opt in; the webhook moves this to
+      // collect_form on Interested.
+      info_step: "awaiting_interest",
+      info_data: {},
+      info_confirmed: false,
+      whatsapp_message_id: outreachResult.messageId || null,
+      whatsapp_sent_at: now,
+      whatsapp_delivery_status: "sent",
+      whatsapp_outbound_template: "talent_outreach",
+      whatsapp_outbound_params: {
+        jobTitle: job.title,
+        location: job.city,
+        salaryBudget: formatSalaryRange(job),
+      },
+      whatsapp_history: [{
+        messageId: outreachResult.messageId || null,
+        template: "talent_outreach",
+        sentAt: now,
+        status: "sent",
+      }],
+      call_payload_json: userData,
+      generated_questions: generatedQuestions.join("\n"),
+      gemini_prompt_used: geminiPromptUsed,
+      screening_context: {
+        ...screeningContextFor(job, client, origin, { preScreenConfig }),
+        awaitingInterest: true,
+        jobUrl: jobLink,
+      },
+      updated_at: now,
+    })
+    .eq("campaign_id", campaignId)
+    .eq("candidate_id", candidate.id)
+
+  if (jobLink) {
+    // Fire-and-forget: a failed link must not fail the outreach itself.
+    await sendSessionMessage(
+      candidate.phone as string,
+      `Here's the full role details if you'd like to review it first:\n${jobLink}`
+    ).catch(() => {})
+  }
+
+  if (participantId) {
+    await scheduleOutreachFollowup(participantId, "nudge", nudgeH * 60 * 60)
+    await scheduleOutreachFollowup(participantId, "escalate", escalateH * 60 * 60)
+  }
+  return { sent: true, messageId: outreachResult.messageId }
 }
 
 const ROLE_CATEGORY_MAP: Record<string, string> = {
@@ -582,62 +693,16 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
         continue
       }
 
-      // Flow C (outbound): talent_outreach (MARKETING) - HR reaching out
-      const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(candidate, job, client, origin, participantId)
-      const whatsapp = getWhatsAppService()
-      const outreachResult = await whatsapp.sendTalentOutreach({
-        phoneNumber: candidate.phone as string,
-        candidateName: candidate.name || "",
-        jobTitle: job.title || "",
-        companyName: job.client_name || client?.name || "",
-        location: job.city || "",
-        salary: formatSalaryRange(job),
+      // Flow C (outbound): talent_outreach with the job link, gated on interest.
+      const outreach = await sendOutboundWithJobLink({
+        candidate, job, client, origin, participantId,
+        campaignId: campaign.id, nudgeH, escalateH,
+        preScreenConfig,
       })
-
-      if (outreachResult.success) {
-        const history = [{
-          messageId: outreachResult.messageId || null,
-          template: "talent_outreach",
-          sentAt: new Date().toISOString(),
-          status: "sent",
-        }]
-        await supabaseAdmin
-          .from("phone_screening_participants")
-          .update({
-            status: "whatsapp_sent",
-            whatsapp_message_id: outreachResult.messageId || null,
-            whatsapp_sent_at: new Date().toISOString(),
-            whatsapp_delivery_status: "sent",
-            whatsapp_outbound_template: "talent_outreach",
-            whatsapp_outbound_params: { jobTitle: job.title, location: job.city, salaryBudget: formatSalaryRange(job) },
-            whatsapp_history: history,
-            call_payload_json: userData,
-            generated_questions: generatedQuestions.join("\n"),
-            gemini_prompt_used: geminiPromptUsed,
-            screening_context: screeningContextFor(job, client, origin),
-            updated_at: new Date().toISOString(),
-          })
-          .eq("campaign_id", campaign.id)
-          .eq("candidate_id", candidate.id)
-        nudgeSent++
-
-        // Schedule follow-up nudge/escalate
-        if (participantId) {
-          await scheduleOutreachFollowup(participantId, "nudge", nudgeH * 60 * 60)
-          await scheduleOutreachFollowup(participantId, "escalate", escalateH * 60 * 60)
-        }
-      } else {
-        await supabaseAdmin
-          .from("phone_screening_participants")
-          .update({
-            status: "needs_manual_followup",
-            needs_manual_followup: true,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("campaign_id", campaign.id)
-          .eq("candidate_id", candidate.id)
+      if (outreach.sent) nudgeSent++
+      else {
         failed++
-        errors.push(`${candidate.name}: outreach send failed (${outreachResult.error})`)
+        errors.push(`${candidate.name}: outreach send failed (${outreach.error})`)
       }
       continue
     }
@@ -668,7 +733,25 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
         continue
       }
 
-      // Flow B external + Flow C outbound interested step: 7-field ask
+      // Flow C (outbound): the candidate has NOT opted in yet. Asking a
+      // stranger for their CTC before they have agreed to anything reads as a
+      // data grab, so outbound leads with the matched-role outreach (job link +
+      // Interested / Not Interested). The form is only sent after they tap
+      // Interested — see the `interested` case in the Meta webhook.
+      if (flow === "outbound") {
+        const outbound = await sendOutboundWithJobLink({
+          candidate, job, client, origin, participantId,
+          campaignId: campaign.id, nudgeH, escalateH, preScreenConfig,
+        })
+        if (outbound.sent) nudgeSent++
+        else {
+          failed++
+          errors.push(`${candidate.name}: outreach send failed (${outbound.error})`)
+        }
+        continue
+      }
+
+      // Flow B external: no form data -> the details ask.
       const info = await sendDetailedInfoMessage({
         candidate, job, client, origin, participantId,
         campaignId: campaign.id, nudgeH, escalateH, preScreenConfig,

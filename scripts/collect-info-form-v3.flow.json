@@ -1,0 +1,87 @@
+{
+  "version": "7.3",
+  "screens": [
+    {
+      "id": "DETAILS_SCREEN",
+      "title": "Your details",
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "TextHeading",
+            "text": "Quick details"
+          },
+          {
+            "type": "TextBody",
+            "text": "Your experience and location are already on file — we only need these five to set up your screening call."
+          },
+          {
+            "type": "Form",
+            "name": "details",
+            "children": [
+              {
+                "type": "TextInput",
+                "name": "current_ctc",
+                "label": "Current CTC (LPA)",
+                "input-type": "text",
+                "required": true
+              },
+              {
+                "type": "TextInput",
+                "name": "expected_ctc",
+                "label": "Expected CTC (LPA)",
+                "input-type": "text",
+                "required": true
+              },
+              {
+                "type": "TextInput",
+                "name": "notice_period",
+                "label": "Notice period (days)",
+                "input-type": "number",
+                "required": true
+              },
+              {
+                "type": "RadioButtonsGroup",
+                "name": "willing_to_relocate",
+                "label": "Willing to relocate?",
+                "data-source": [
+                  {
+                    "id": "yes",
+                    "title": "Yes"
+                  },
+                  {
+                    "id": "no",
+                    "title": "No"
+                  }
+                ],
+                "required": true
+              },
+              {
+                "type": "TextArea",
+                "name": "reason_for_switching",
+                "label": "Reason for switching",
+                "required": false
+              }
+            ]
+          },
+          {
+            "type": "Footer",
+            "label": "Submit",
+            "on-click-action": {
+              "name": "complete",
+              "payload": {
+                "current_ctc": "${form.current_ctc}",
+                "expected_ctc": "${form.expected_ctc}",
+                "notice_period": "${form.notice_period}",
+                "willing_to_relocate": "${form.willing_to_relocate}",
+                "reason_for_switching": "${form.reason_for_switching}"
+              }
+            }
+          }
+        ]
+      },
+      "terminal": true,
+      "refresh_on_back": false
+    }
+  ]
+}

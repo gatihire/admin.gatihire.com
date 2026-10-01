@@ -447,11 +447,75 @@ async function dispatchIntent(participant: any, classification: { intent: string
     
     case 'interested': {
       logger.info("AI: marking interested", { participantId: participant.id })
+
+      // Outbound candidates are gated on interest BEFORE we ask for anything.
+      // Jumping straight to schedule buttons skipped the details we actually
+      // need (CTC, notice, relocation), so the call had nothing to screen
+      // against. Now "Interested" opens the form; the call is offered after the
+      // pre-screen, which is where the schedule buttons are sent from.
+      const awaitingInterest = !!participant.screening_context?.awaitingInterest
+      if (awaitingInterest) {
+        await supabaseAdmin
+          .from("phone_screening_participants")
+          .update({
+            status: "info_requested",
+            screening_mode: "collect_info_first",
+            info_step: "collect_form",
+            info_data: {},
+            info_confirmed: false,
+            screening_context: {
+              ...(participant.screening_context || {}),
+              awaitingInterest: false,
+              interestedAt: new Date().toISOString(),
+            },
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", participant.id)
+
+        if (participant.candidates?.phone) {
+          try {
+            // sendCollectInfoForm is a method on the service, not a standalone
+            // export.
+            const formResult = await getWhatsAppService().sendCollectInfoForm({
+              phoneNumber: participant.candidates.phone,
+              candidateName: participant.candidates?.name || "Candidate",
+              jobTitle: participant.jobs?.title || "the role",
+              companyName: participant.jobs?.client_name || "",
+              flowToken: participant.id,
+            })
+            if (!formResult.success) {
+              logger.error("Failed to send details form after interest", {
+                participantId: participant.id,
+                error: formResult.error,
+              })
+              await supabaseAdmin
+                .from("phone_screening_participants")
+                .update({
+                  status: "needs_manual_followup",
+                  needs_manual_followup: true,
+                  updated_at: new Date().toISOString(),
+                })
+                .eq("id", participant.id)
+              await sendSessionMessage(
+                participant.candidates.phone,
+                "Sorry, we couldn't open the details form just now. 🙏 Reply here and our team will help you directly."
+              )
+            }
+          } catch (err: any) {
+            logger.error("Failed to send details form after interest", {
+              participantId: participant.id,
+              error: err.message,
+            })
+          }
+        }
+        break
+      }
+
       await supabaseAdmin
         .from("phone_screening_participants")
         .update({ status: "interested", updated_at: new Date().toISOString() })
         .eq("id", participant.id)
-      
+
       // Send schedule options if we have their phone
       if (participant.candidates?.phone) {
         try {
@@ -474,6 +538,25 @@ async function dispatchIntent(participant: any, classification: { intent: string
         .from("phone_screening_participants")
         .update({ status: "not_interested", updated_at: new Date().toISOString() })
         .eq("id", participant.id)
+
+      // Never end on a dead end. Thank them, leave the door open, and point them
+      // at the portal so a decline today can become an application later.
+      if (participant.candidates?.phone) {
+        try {
+          const { getPortalJobsUrl } = await import("@/lib/call-orchestrator")
+          await sendSessionMessage(
+            participant.candidates.phone,
+            "Thanks for your time, and for reading our message. 🙏\n\n" +
+              "We'll reach out if something matching your profile comes up. " +
+              `In the meantime, you can browse other open roles here: ${getPortalJobsUrl()}`
+          )
+        } catch (err: any) {
+          logger.error("Failed to send not-interested follow-up", {
+            participantId: participant.id,
+            error: err.message,
+          })
+        }
+      }
       break
     }
     
@@ -946,10 +1029,64 @@ async function handleFlowFormReply(participant: any, nfmReply: any) {
       .catch(() => {})
 
     let fields: Record<string, any> = {}
+    let parseFailed = false
     try {
-      fields = JSON.parse(nfmReply?.response_json || "{}")
-    } catch {
-      fields = {}
+      const parsed = JSON.parse(nfmReply?.response_json || "{}")
+      fields = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}
+    } catch (err: any) {
+      parseFailed = true
+      logger.warn("flow form response_json was not valid JSON", {
+        participantId: participant.id,
+        error: err?.message,
+        raw: String(nfmReply?.response_json || "").slice(0, 200),
+      })
+    }
+
+    // A `complete` action returns ONLY the values its footer payload maps. The
+    // old v2 flow had `"payload": {}`, so every submission arrived as `{}` — the
+    // candidate filled all five fields and we silently discarded them, then ran
+    // the pre-screen on a blank profile and reported "Salary / Notice missing" as
+    // though they had withheld it. Never judge a candidate on an empty payload:
+    // tell them it didn't come through and route to a human instead.
+    const meaningful = Object.entries(fields).filter(([, v]) =>
+      v !== undefined && v !== null && String(v).trim() !== ""
+    )
+    if (meaningful.length === 0) {
+      logger.error("flow form submission contained no fields — not evaluating", {
+        participantId: participant.id,
+        parseFailed,
+        hasResponseJson: !!nfmReply?.response_json,
+        template: participant.whatsapp_outbound_template,
+      })
+      await supabaseAdmin
+        .from("phone_screening_participants")
+        .update({
+          status: "needs_manual_followup",
+          needs_manual_followup: true,
+          info_step: "collect_form",
+          screening_context: {
+            ...(participant.screening_context || {}),
+            collect_fail_count: Number(participant.screening_context?.collect_fail_count || 0) + 1,
+            collect_error: "empty_form_submission",
+          },
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", participant.id)
+
+      await appendToHistory(participant.id, {
+        at: new Date().toISOString(),
+        kind: "form_submit_failed",
+        status: "failed",
+        error: "empty form submission",
+      })
+
+      await sendSessionMessage(
+        phoneNumber,
+        "Sorry — we didn't receive your details properly. 🙏\n\n" +
+          "Please tap 'Share details' in the previous message and submit the form again. " +
+          "If it still fails, just reply here and our team will help you directly.",
+      )
+      return
     }
 
     // Form returns "Yes"/"No" but the pre-screen checks for "yes"/true.
@@ -960,6 +1097,7 @@ async function handleFlowFormReply(participant: any, nfmReply: any) {
     logger.info("Received flow form reply", {
       participantId: participant.id,
       flowToken: nfmReply?.flow_token,
+      fieldCount: meaningful.length,
       fields,
     })
 
