@@ -105,18 +105,22 @@ export function JobUploadDialog({ jobId, jobTitle, open, onOpenChange, onComplet
       }
 
       const candidateId = result.candidateId
-      const successStatus = result.updatedExisting ? "updated" : "created"
+      // The route reports identity merges as `isDuplicate`; there is no
+      // `updatedExisting` key, so the old check always evaluated to false and a
+      // merged upload was labelled "created" with the "new candidate" toast.
+      const mergedExisting = !!(result.isDuplicate || result.updatedExisting)
+      const successStatus: UploadFile["status"] = mergedExisting ? "updated" : "created"
 
       setUploadedFiles((prev) =>
-        prev.map((f, i) => i === index ? { ...f, status: successStatus as UploadFile["status"], progress: 100, result } : f),
+        prev.map((f, i) => i === index ? { ...f, status: successStatus, progress: 100, result } : f),
       )
 
       invalidateSessionCache("internal:candidates:", { prefix: true })
 
-      if (!result.updatedExisting) {
-        toast({ title: "Resume Uploaded", description: `${file.name} parsed and assigned to ${jobTitle}` })
+      if (mergedExisting) {
+        toast({ title: "Existing Candidate Updated", description: `${file.name} matched an existing profile by phone — refreshed and added to ${jobTitle}` })
       } else {
-        toast({ title: "Profile Updated", description: `${file.name} updated existing candidate` })
+        toast({ title: "Resume Uploaded", description: `${file.name} parsed and added to the Applied stage of ${jobTitle} for review` })
       }
     } catch (error: any) {
       clearInterval(progressInterval)

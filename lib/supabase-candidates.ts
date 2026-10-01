@@ -918,6 +918,35 @@ export class SupabaseCandidateService {
     }
   }
 
+  /**
+   * Phone identity lookup on the normalized column. Stored `phone` is free text
+   * ("+91-99323 38847", "9311808285"), so an exact `.eq('phone', ...)` misses the
+   * same person whose resume was parsed into a different format. `phone_e164` is
+   * written from `toE164` on every insert/update, so it is the reliable identity
+   * key and must be tried before any formatting-sensitive fallback.
+   */
+  static async getCandidateByPhoneE164(phone: string): Promise<ComprehensiveCandidateData | null> {
+    try {
+      const e164 = toE164(phone)
+      if (!e164) return null
+
+      const { data, error } = await supabase
+        .from('candidates')
+        .select('*')
+        .eq('phone_e164', e164)
+        .limit(1)
+
+      if (error) {
+        return null
+      }
+
+      const row = (data || [])[0]
+      return row ? this.mapRowToCandidate(row) : null
+    } catch (e) {
+      return null
+    }
+  }
+
   static async getCandidateByFileUrl(fileUrl: string): Promise<ComprehensiveCandidateData | null> {
     try {
       const normalized = (fileUrl || '').trim()

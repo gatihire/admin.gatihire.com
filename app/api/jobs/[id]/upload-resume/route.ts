@@ -140,20 +140,27 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const nameToCheck = parsedData.name?.trim()
     const locationToCheck = parsedData.location?.trim()
 
+    // Dedup by strongest identity signal first. Phone is the anchor: a person
+    // re-uploading a revised resume often has a new/alternate email typed into
+    // the document, so falling back to email-only would miss them and spawn a
+    // second candidate row for one human.
     let duplicate = null as any
-    if (emailToCheck && phoneToCheck) {
+    if (phoneToCheck) {
+      duplicate = await SupabaseCandidateService.getCandidateByPhoneE164(phoneToCheck)
+    }
+    if (!duplicate && phoneToCheck && emailToCheck) {
       duplicate = await SupabaseCandidateService.getCandidateByEmailAndPhone(emailToCheck, phoneToCheck)
     }
-    if (!duplicate && emailToCheck && !phoneToCheck) {
+    if (!duplicate && emailToCheck) {
       duplicate = await SupabaseCandidateService.getCandidateByEmail(emailToCheck)
     }
-    if (!duplicate && phoneToCheck && !emailToCheck) {
+    if (!duplicate && phoneToCheck) {
       duplicate = await SupabaseCandidateService.getCandidateByPhone(phoneToCheck)
     }
-    if (!duplicate && nameToCheck && phoneToCheck && !emailToCheck) {
+    if (!duplicate && nameToCheck && phoneToCheck) {
       duplicate = await SupabaseCandidateService.getCandidateByNameAndPhone(nameToCheck, phoneToCheck)
     }
-    if (!duplicate && nameToCheck && locationToCheck && !emailToCheck && !phoneToCheck) {
+    if (!duplicate && nameToCheck && locationToCheck) {
       duplicate = await SupabaseCandidateService.getCandidateByNameAndLocation(nameToCheck, locationToCheck)
     }
 

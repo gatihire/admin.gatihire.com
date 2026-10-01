@@ -447,24 +447,31 @@ export async function POST(request: NextRequest) {
       const nameToCheck = parsedData.name?.trim()
       const locationToCheck = parsedData.location?.trim()
 
+      // Same ordering as the job-scoped upload route: phone is the identity
+      // anchor, so a resume with a new/alternate email still merges into the
+      // existing candidate instead of creating a second row for one person.
       let duplicate = null as any
-      if (emailToCheck && phoneToCheck) {
+      if (phoneToCheck) {
+        duplicate = await SupabaseCandidateService.getCandidateByPhoneE164(phoneToCheck)
+      }
+
+      if (!duplicate && emailToCheck && phoneToCheck) {
         duplicate = await SupabaseCandidateService.getCandidateByEmailAndPhone(emailToCheck, phoneToCheck)
       }
 
-      if (!duplicate && emailToCheck && !phoneToCheck) {
+      if (!duplicate && emailToCheck) {
         duplicate = await SupabaseCandidateService.getCandidateByEmail(emailToCheck)
       }
 
-      if (!duplicate && phoneToCheck && !emailToCheck) {
+      if (!duplicate && phoneToCheck) {
         duplicate = await SupabaseCandidateService.getCandidateByPhone(phoneToCheck)
       }
 
-      if (!duplicate && nameToCheck && phoneToCheck && !emailToCheck) {
+      if (!duplicate && nameToCheck && phoneToCheck) {
         duplicate = await SupabaseCandidateService.getCandidateByNameAndPhone(nameToCheck, phoneToCheck)
       }
 
-      if (!duplicate && nameToCheck && locationToCheck && !emailToCheck && !phoneToCheck) {
+      if (!duplicate && nameToCheck && locationToCheck) {
         duplicate = await SupabaseCandidateService.getCandidateByNameAndLocation(nameToCheck, locationToCheck)
       }
 
