@@ -196,17 +196,17 @@ export default async function PreScreenReviewPage() {
                       )}
                     </td>
                     <td className="px-6 py-4">
-                      <form action={`/api/phone-screening/participants/${participant.id}/pre-screen-review`} method="POST">
-                        <select name="decision" className="w-full px-3 py-1 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mb-2">
-                          <option value="">Select decision</option>
-                          <option value="proceed">✅ Proceed to AI Call</option>
-                          <option value="filter_out">❌ Filter Out</option>
-                        </select>
-                        <textarea name="note" placeholder="Optional note..." rows={2} className="w-full px-3 py-1 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mb-2" />
-                        <button type="submit" className="w-full px-3 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700">
-                          Submit
-                        </button>
-                      </form>
+                        <form action={`/api/phone-screening/participants/${participant.id}/pre-screen-review`} method="POST">
+                          <select name="decision" className="w-full px-3 py-1 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mb-2" required>
+                            <option value="">Select decision</option>
+                            <option value="proceed">✅ Proceed to AI Call</option>
+                            <option value="filter_out">❌ Filter Out</option>
+                          </select>
+                          <textarea name="note" placeholder="Optional note..." rows={2} className="w-full px-3 py-1 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mb-2" />
+                          <button type="submit" className="w-full px-3 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700">
+                            Submit
+                          </button>
+                        </form>
                     </td>
                   </tr>
                 )

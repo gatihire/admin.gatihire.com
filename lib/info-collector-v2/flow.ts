@@ -423,6 +423,36 @@ function assertScheduled(result: { success: boolean; error?: string }): void {
   }
 }
 
+/**
+ * Resolve a tapped quick-reply button to a canonical action key.
+ *
+ * The templates in WhatsApp Manager were created without an explicit button
+ * payload, so Meta delivers the button TEXT as the reply id — a tap arrives as
+ * "Call Now", not "call_now". The switch below only knew the canonical ids, so
+ * every tap fell through to `default`, was logged as "Unknown button reply",
+ * returned success, and got stamped as processed: the candidate saw the message
+ * marked read and no call was ever placed. Match on the normalized title as
+ * well as the id so a template edited in the UI can't silently orphan taps.
+ */
+function normalizeButtonAction(buttonId: string, buttonTitle: string): string {
+  const norm = (s: string) => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const actions: Record<string, string> = {
+    'call now': 'call_now',
+    'in 10 min': 'in_10_min',
+    'in 20 min': 'in_20_min',
+    'in 30 min': 'in_30_min',
+    'in 1 hour': 'in_1_hour',
+    'today evening': 'today_evening',
+    'tomorrow morning': 'tomorrow_morning',
+    interested: 'interested',
+    'not interested': 'not_interested',
+    'share details': 'provide_details',
+    'provide details': 'provide_details',
+    'skip schedule call': 'skip_schedule_call',
+  };
+  return actions[norm(buttonTitle)] || actions[norm(buttonId)] || buttonId;
+}
+
 async function handleIncomingCallNow(participantId: string): Promise<{ success: boolean; error?: string }> {
   try {
     return await markScheduledAndFire(participantId, new Date());
@@ -448,15 +478,20 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
 
     // Record the tap itself, before acting on it. Without this the recruiter
     // card could only ever show "read", so a dropped tap was indistinguishable
-    // from a candidate who never responded.
+    // from a candidate who never responded. The raw id is kept verbatim (it may
+    // be the button text) so a template/payload mismatch is visible in the UI.
     await appendWhatsappHistory(participantId, {
       at: new Date().toISOString(),
       kind: 'button_tap',
       buttonId,
       buttonTitle: _buttonTitle || buttonLabel(buttonId),
     });
-    
-    switch (buttonId) {
+
+    const action = buttonId.startsWith('reject_')
+      ? buttonId
+      : normalizeButtonAction(buttonId, _buttonTitle);
+
+    switch (action) {
       case 'interested': {
         await supabaseAdmin
           .from('phone_screening_participants')
@@ -507,6 +542,10 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
         
       case 'in_30_min':
         await assertScheduled(await markScheduledAndFire(participant.id, new Date(Date.now() + 30 * 60 * 1000)));
+        break;
+
+      case 'in_1_hour':
+        await assertScheduled(await markScheduledAndFire(participant.id, new Date(Date.now() + 60 * 60 * 1000)));
         break;
         
       case 'today_evening': {

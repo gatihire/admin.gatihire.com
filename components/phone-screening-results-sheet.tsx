@@ -10,8 +10,8 @@ import {
   Loader2, Star, Target, AlertTriangle, CheckCircle, Clock,
   DollarSign, User, Phone as PhoneIcon,
   ExternalLink, ThumbsUp, ThumbsDown, PhoneCall, Play, Pause,
-  MessageSquare, BarChart3, Mic, Send, CheckCheck, MessageCircle,
-  ArrowDown, CircleDot, Smartphone, Volume2, Download, Bot, Settings,
+  MessageSquare, BarChart3, Mic, MessageCircle,
+  ArrowDown, CircleDot, Volume2, Download, Bot, Settings,
   RefreshCw, UserX
 } from "lucide-react"
 import {
@@ -20,6 +20,7 @@ import {
 import { useToast } from "@/hooks/use-toast"
 import { cn } from "@/lib/utils"
 import { CollectedInfoView, PreScreenVerdict } from "@/components/candidate-collected-info"
+import { WhatsAppThreadTimeline } from "@/components/whatsapp-thread-timeline"
 import { getCallTruth } from "@/lib/call-truth"
 
 interface TranscriptSegment {
@@ -38,11 +39,14 @@ interface ScreeningAnswer {
   sentiment: string | null
 }
 
-interface WhatsAppMessage {
-  messageId: string | null
-  template: string
-  sentAt: string
-  status: string
+type WhatsAppMessage = {
+  at?: string
+  sentAt?: string
+  template?: string
+  status?: string
+  messageId?: string
+  kind?: string
+  [key: string]: unknown
 }
 
 interface ParticipantDetail {
@@ -742,93 +746,50 @@ export function PhoneScreeningResultsSheet({
             <div className="p-4">
               {/* WhatsApp Flow Tab */}
               {activeTab === "whatsapp" && (
-                <div>
-                  {whatsappHistory.length === 0 && !data.whatsapp_sent_at ? (
-                    <p className="text-sm text-zinc-400 text-center py-8">No WhatsApp messages sent</p>
-                  ) : (
-                    <div className="space-y-0">
-                      {/* WhatsApp status summary */}
-                      {data.whatsapp_delivery_status && (
-                        <div className="flex items-center gap-2 mb-4 p-2.5 rounded-lg bg-zinc-50 border border-zinc-100">
-                          <Smartphone className="h-4 w-4 text-zinc-400" />
-                          <span className="text-xs font-semibold text-zinc-500">Status:</span>
-                          <Badge variant="outline" className={`text-[10px] font-bold ${
-                            data.whatsapp_delivery_status === "read" ? "bg-blue-50 text-blue-700 border-blue-200" :
-                            data.whatsapp_delivery_status === "delivered" ? "bg-teal-50 text-teal-700 border-teal-200" :
-                            "bg-zinc-100 text-zinc-600 border-zinc-200"
-                          }`}>
-                            {data.whatsapp_delivery_status === "read" && <CheckCheck className="h-3 w-3 mr-1" />}
-                            {data.whatsapp_delivery_status === "delivered" && <CheckCheck className="h-3 w-3 mr-1" />}
-                            {data.whatsapp_delivery_status.charAt(0).toUpperCase() + data.whatsapp_delivery_status.slice(1)}
-                          </Badge>
-                        </div>
-                      )}
+                <div className="space-y-4">
+                  <WhatsAppThreadTimeline history={data.whatsapp_history} />
 
-                      {/* Timeline */}
-                      {whatsappHistory.map((msg, i) => (
-                        <div key={i} className="flex gap-3">
-                          {/* Timeline line */}
-                          <div className="flex flex-col items-center">
-                            <div className="h-8 w-8 rounded-full bg-teal-100 flex items-center justify-center shrink-0">
-                              <Send className="h-3.5 w-3.5 text-teal-600" />
-                            </div>
-                            {i < whatsappHistory.length - 1 && (
-                              <div className="w-0.5 flex-1 bg-zinc-200 my-1" />
-                            )}
-                          </div>
-                          {/* Content */}
-                          <div className="pb-4 flex-1 min-w-0">
-                            <p className="text-xs font-bold text-zinc-700 mb-0.5">
-                              {msg.template.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
-                            </p>
-                            <p className="text-xs text-zinc-400">{formatTimeAgo(msg.sentAt)}</p>
-                          </div>
-                        </div>
-                      ))}
-
-                      {/* Candidate reply */}
-                      {data.whatsapp_reply_text && (
-                        <div className="flex gap-3">
-                          <div className="flex flex-col items-center">
-                            <div className="h-8 w-8 rounded-full bg-green-100 flex items-center justify-center shrink-0">
-                              <MessageCircle className="h-3.5 w-3.5 text-green-600" />
-                            </div>
-                          </div>
-                          <div className="pb-4 flex-1 min-w-0">
-                            <p className="text-xs font-bold text-zinc-700 mb-0.5">Candidate Reply</p>
-                            <div className="inline-block p-2.5 rounded-xl bg-green-50 border border-green-100 text-sm text-zinc-800 max-w-full whitespace-pre-wrap">
-                              {data.whatsapp_reply_text}
-                            </div>
-                            {data.whatsapp_reply_at && (
-                              <p className="text-xs text-zinc-400 mt-1">{formatTimeAgo(data.whatsapp_reply_at)}</p>
-                            )}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Structured reply: fields ingested via Gemini */}
-                      {(data.info_data && Object.keys(data.info_data).length > 0 || data.screening_context?.preScreenResult) && (
-                        <div className="mt-1 space-y-3">
-                          {data.screening_context?.preScreenResult && (
-                            <PreScreenVerdict result={data.screening_context.preScreenResult} />
-                          )}
-                          {data.info_data && Object.keys(data.info_data).length > 0 && (
-                            <CollectedInfoView
-                              infoData={data.info_data}
-                              infoSources={(data as any).info_sources}
-                              fallback={(data as any).candidates}
-                            />
-                          )}
-                          {data.prescreen_decision && !data.screening_context?.preScreenResult && (
-                            <p className="text-xs text-zinc-400">
-                              Decision: <span className="font-semibold text-zinc-600">{data.prescreen_decision}</span>
-                              {data.prescreen_reason ? ` — ${data.prescreen_reason}` : ""}
-                            </p>
-                          )}
-                        </div>
+                  {data.whatsapp_reply_text && (
+                    <div>
+                      <p className="text-xs font-bold text-zinc-700 mb-1">Candidate Reply</p>
+                      <div className="inline-block p-2.5 rounded-xl bg-green-50 border border-green-100 text-sm text-zinc-800 max-w-full whitespace-pre-wrap">
+                        {data.whatsapp_reply_text}
+                      </div>
+                      {data.whatsapp_reply_at && (
+                        <p className="text-xs text-zinc-400 mt-1">{formatTimeAgo(data.whatsapp_reply_at)}</p>
                       )}
                     </div>
                   )}
+
+                  {/* Structured reply: fields ingested via WhatsApp Flow / Gemini */}
+                  {((data.info_data && Object.keys(data.info_data).length > 0) ||
+                    data.screening_context?.preScreenResult) && (
+                    <div className="space-y-3">
+                      {data.screening_context?.preScreenResult && (
+                        <PreScreenVerdict result={data.screening_context.preScreenResult} />
+                      )}
+                      {data.info_data && Object.keys(data.info_data).length > 0 && (
+                        <CollectedInfoView
+                          infoData={data.info_data}
+                          infoSources={(data as any).info_sources}
+                          fallback={(data as any).candidates}
+                        />
+                      )}
+                      {data.prescreen_decision && !data.screening_context?.preScreenResult && (
+                        <p className="text-xs text-zinc-400">
+                          Decision: <span className="font-semibold text-zinc-600">{data.prescreen_decision}</span>
+                          {data.prescreen_reason ? ` — ${data.prescreen_reason}` : ""}
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {whatsappHistory.length === 0 &&
+                    !data.whatsapp_sent_at &&
+                    !data.whatsapp_reply_text &&
+                    !(data.info_data && Object.keys(data.info_data).length > 0) && (
+                      <p className="text-sm text-zinc-400 text-center py-8">No WhatsApp messages sent</p>
+                    )}
                 </div>
               )}
 
