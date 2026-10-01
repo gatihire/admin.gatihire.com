@@ -493,33 +493,116 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
 
     switch (action) {
       case 'interested': {
+        // Two different meanings, decided by whether we were waiting on consent.
+        //
+        // Outbound candidates are strangers we have not yet got permission to
+        // screen, so "Interested" means "yes, tell me more" — the details form
+        // is the next step, and the call is only offered once the pre-screen has
+        // data to judge. Handling it here used to send call-slot buttons straight
+        // away, which skipped the form entirely: the call had no CTC or notice to
+        // screen against.
+        //
+        // Everyone else (portal applicants, external resumes) already opted in by
+        // applying, so their "Interested" keeps its original meaning and goes
+        // straight to scheduling.
+        const awaitingInterest = !!(participant as any).screening_context?.awaitingInterest;
+
+        if (!awaitingInterest) {
+          await supabaseAdmin
+            .from('phone_screening_participants')
+            .update({
+              status: 'interested',
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', participantId);
+
+          const whatsapp = getWhatsAppService();
+          if (participant.candidates?.phone) {
+            await whatsapp.sendScheduleOptions({
+              phoneNumber: participant.candidates.phone,
+              candidateName: participant.candidate_name,
+              jobTitle: participant.job_title,
+            });
+          }
+          break;
+        }
+
         await supabaseAdmin
           .from('phone_screening_participants')
-          .update({ 
-            status: 'interested',
+          .update({
+            status: 'info_requested',
+            screening_mode: 'collect_info_first',
+            info_step: 'collect_form',
+            info_data: {},
+            info_confirmed: false,
+            screening_context: {
+              ...((participant as any).screening_context || {}),
+              awaitingInterest: false,
+              interestedAt: new Date().toISOString(),
+            },
             updated_at: new Date().toISOString()
           })
           .eq('id', participantId);
-        
-        const whatsapp = getWhatsAppService();
-        if (participant.candidates?.phone) {
-          await whatsapp.sendScheduleOptions({
-            phoneNumber: participant.candidates.phone,
-            candidateName: participant.candidate_name,
-            jobTitle: participant.job_title,
-          });
+
+        if (!participant.candidates?.phone) {
+          throw new Error('interested but no phone on participant');
         }
+
+        const whatsapp = getWhatsAppService();
+        const form = await whatsapp.sendCollectInfoForm({
+          phoneNumber: participant.candidates.phone,
+          candidateName: participant.candidate_name,
+          jobTitle: participant.job_title,
+          companyName: participant.company_name,
+          flowToken: participantId,
+        });
+        if (!form.success) {
+          throw new Error(form.error || 'failed to send details form');
+        }
+
+        await appendWhatsappHistory(participantId, {
+          at: new Date().toISOString(),
+          kind: 'schedule_buttons',
+          direction: 'out',
+          text: `Thanks for your interest in ${participant.job_title || 'the role'} — please share a few details so we can screen you.`,
+          status: 'sent',
+          messageId: form.messageId ?? null,
+        });
         break;
       }
         
       case 'not_interested': {
-        const ws = getWhatsAppService();
-        if (participant.candidates?.phone) {
-          await ws.sendNotInterestedReason({
-            phoneNumber: participant.candidates.phone,
-            candidateName: participant.candidate_name,
-          });
-        }
+        // A decline is a final answer, so close it politely and leave a door
+        // open instead of interrogating them for a reason. The reason-asking
+        // template reads as pressure and was what a tapped "Not Interested"
+        // used to trigger.
+        const phone = participant.candidates?.phone;
+        if (!phone) break;
+
+        await supabaseAdmin
+          .from('phone_screening_participants')
+          .update({
+            status: 'not_interested',
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', participantId);
+
+        const { getPortalJobsUrl } = await import('@/lib/call-orchestrator');
+        const closingText =
+          "Thanks for your time, and for reading our message. 🙏\n\n" +
+          "We'll reach out if something matching your profile comes up. " +
+          `In the meantime, you can browse other open roles here: ${getPortalJobsUrl()}`;
+
+        const sent = await sendSessionMessage(phone, closingText);
+        await appendWhatsappHistory(participantId, {
+          at: new Date().toISOString(),
+          kind: 'not_interested_closing',
+          direction: 'out',
+          text: closingText,
+          status: sent.success ? 'sent' : 'failed',
+          messageId: sent.messageId ?? null,
+          error: sent.error ?? null,
+        });
         break;
       }
         

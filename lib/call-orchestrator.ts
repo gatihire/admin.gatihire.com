@@ -16,6 +16,7 @@ import { updateParticipant } from "@/lib/participant-update"
 import { logger } from "@/lib/logger"
 import { getBoardAppBaseUrl } from "@/lib/utils"
 import { sendSessionMessage } from "@/lib/info-collector-v2"
+import { appendThreadEntry } from "@/lib/whatsapp-thread"
 
 /**
  * Public job page the candidate can open to review the role before sharing
@@ -150,9 +151,13 @@ async function sendShortlistMessage(opts: {
   if (!participantId) return { sent: true, messageId: result.messageId }
 
   const now = new Date().toISOString()
+  // direction/text are what make the conversation view readable; legacy rows
+  // without them fall back to a template description in the UI.
   const history = [{
     messageId: result.messageId || null,
     template: "shortlist_call_schedule",
+    direction: "out",
+    text: `You're shortlisted for ${job.title || "the role"} at ${job.client_name || client?.name || "our client"}. Pick a slot for a quick screening call.`,
     sentAt: now,
     status: "sent",
   }]
@@ -225,6 +230,8 @@ async function sendDetailedInfoMessage(opts: {
   const history = [{
     messageId: result.messageId || null,
     template: "collect_info_form",
+    direction: "out",
+    text: `Please share a few details so we can screen you for ${job.title || "this role"}.`,
     sentAt: now,
     status: "sent",
   }]
@@ -317,6 +324,8 @@ async function sendOutboundWithJobLink(opts: {
       whatsapp_history: [{
         messageId: outreachResult.messageId || null,
         template: "talent_outreach",
+        direction: "out",
+        text: `Hi ${candidate.name || "there"}, we have an opening for ${job.title || "a role"} at ${job.client_name || client?.name || "our client"}${job.city ? ` in ${job.city}` : ""}. Would you be interested?`,
         sentAt: now,
         status: "sent",
       }],
@@ -335,10 +344,17 @@ async function sendOutboundWithJobLink(opts: {
 
   if (jobLink) {
     // Fire-and-forget: a failed link must not fail the outreach itself.
-    await sendSessionMessage(
-      candidate.phone as string,
-      `Here's the full role details if you'd like to review it first:\n${jobLink}`
-    ).catch(() => {})
+    const linkText = `Here's the full role details if you'd like to review it first:\n${jobLink}`
+    const linkResult = await sendSessionMessage(candidate.phone as string, linkText).catch(() => null)
+    if (participantId && linkResult?.success) {
+      await appendThreadEntry(participantId, {
+        direction: "out",
+        text: linkText,
+        status: "sent",
+        kind: "job_link",
+        messageId: linkResult.messageId ?? null,
+      })
+    }
   }
 
   if (participantId) {

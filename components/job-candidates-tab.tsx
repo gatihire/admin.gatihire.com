@@ -1503,7 +1503,10 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                             execution {String(participant.bolna_execution_id).slice(0, 12)}…
                           </p>
                         )}
-                        <WhatsAppThreadTimeline history={participant.whatsapp_history} />
+                        <WhatsAppThreadTimeline
+                          history={participant.whatsapp_history}
+                          candidateName={participant.candidates?.name}
+                        />
                         <CandidateMetricsBar participant={participant} callStatus={callStatus || "pending"} />
                       </div>
                     )}

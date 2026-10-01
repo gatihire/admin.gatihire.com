@@ -3,6 +3,7 @@ import { supabaseAdmin } from '@/lib/supabase';
 import { logger } from '@/lib/logger';
 import { toDial } from '@/lib/phone';
 import { InfoStepKey, getStep, getNextStep, getStepQuestion, STEP_KEYS } from './steps';
+import { recordOutboundText, recordOutboundTemplate } from '@/lib/whatsapp-thread';
 
 export interface ParticipantInfo {
   id: string;
@@ -93,6 +94,14 @@ async function sendFirstQuestion(
   ];
   
   const result = await sendTemplateMessage(participant.phone_number, templateName, components);
+
+  await recordOutboundTemplate(
+    participant.id,
+    templateName,
+    `Hi ${participant.candidate_name}, thanks for applying for ${jobTitle} at ${companyName}. To move ahead, could you share a few details?`,
+    result.messageId,
+    { kind: `step_question:${stepKey}`, status: result.success ? 'sent' : 'failed', error: result.error ?? null }
+  );
   
   if (result.success) {
     await supabaseAdmin
@@ -133,6 +142,16 @@ async function sendStepQuestion(
   
   const result = await sendSessionMessage(participant.phone_number, text);
   
+  // Record the question so the conversation view shows both sides of the
+  // exchange. Without this the thread is a wall of the candidate's answers with
+  // no question they were answering.
+  await recordOutboundText(participant.id, text, {
+    kind: `step_question:${stepKey}`,
+    status: result.success ? 'sent' : 'failed',
+    messageId: result.messageId ?? null,
+    error: result.error ?? null,
+  });
+
   if (result.success) {
     await supabaseAdmin
       .from('phone_screening_participants')
@@ -217,7 +236,15 @@ async function sendConfirmationAndScheduleCall(
   jobTitle: string,
   companyName: string
 ): Promise<{ success: boolean; messageId?: string; error?: string }> {
-  const result = await sendSessionMessage(participant.phone_number, formatConfirmation(participant.info_data));
+  const confirmationText = formatConfirmation(participant.info_data);
+  const result = await sendSessionMessage(participant.phone_number, confirmationText);
+
+  await recordOutboundText(participant.id, confirmationText, {
+    kind: 'details_confirmation',
+    status: result.success ? 'sent' : 'failed',
+    messageId: result.messageId ?? null,
+    error: result.error ?? null,
+  });
   
   if (result.success) {
     await supabaseAdmin

@@ -2,10 +2,11 @@ import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { deriveOrigin, deriveCandidateFlow, type CandidateOrigin } from "@/lib/origin"
-import { orchestrateScreening, systemDecidesMode } from "@/lib/call-orchestrator"
+import { orchestrateScreening, systemDecidesMode, getPublicJobUrl } from "@/lib/call-orchestrator"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { placeBolnaCall } from "@/lib/bolna"
 import { logger } from "@/lib/logger"
+import { sendSessionMessage } from "@/lib/info-collector-v2"
 import { logCandidateActivityBatch } from "@/lib/activity-logger"
 
 export const runtime = "nodejs"
@@ -82,9 +83,19 @@ async function renudgeExistingParticipant(opts: {
     let msgResult: { success: boolean; messageId?: string; error?: string }
     let template: string
     let status: string
+    let outboundLink: string | null = null
     const portalShortlist = flow === "portal"
-    if (effMode === "quick_screen" && flow === "outbound") {
-      // Flow C outbound: matched outreach
+
+    // Outbound re-nudges always re-run the full outbound opener — outreach plus
+    // job link — and stop there, regardless of the mode HR picked.
+    //
+    // Two bugs lived here. Re-nudging with quick_screen sent the outreach but no
+    // job link and never set awaitingInterest, so the candidate's later "Interested"
+    // tap found no gate and was answered with call-slot buttons instead of the
+    // details form. And re-nudging with collect_info_first fell through to the
+    // generic branch and sent collect_info_form directly — asking a stranger for
+    // their CTC before they had agreed to anything.
+    if (flow === "outbound") {
       template = "talent_outreach"
       msgResult = await whatsapp.sendTalentOutreach({
         phoneNumber: candidate.phone as string,
@@ -95,6 +106,7 @@ async function renudgeExistingParticipant(opts: {
         salary: `${job.salary_min || "?"} - ${job.salary_max || "?"}`,
       })
       status = "whatsapp_sent"
+      outboundLink = getPublicJobUrl(job.id)
     } else if (portalShortlist) {
       // Flow A portal: shortlist + schedule (info already in apply form)
       template = "shortlist_call_schedule"
@@ -120,6 +132,24 @@ async function renudgeExistingParticipant(opts: {
 
     if (!msgResult.success) return { ok: false, kind: "nudge", error: msgResult.error || "Failed to send message" }
 
+    // Fire-and-forget: a failed link must not fail the re-nudge itself.
+    if (outboundLink && candidate.phone) {
+      const linkText = `Here's the full role details if you'd like to review it first:\n${outboundLink}`
+      sendSessionMessage(candidate.phone, linkText)
+        .then(async (r) => {
+          if (!r.success) return
+          const { appendThreadEntry } = await import("@/lib/whatsapp-thread")
+          await appendThreadEntry(participantId, {
+            direction: "out",
+            text: linkText,
+            status: "sent",
+            kind: "job_link",
+            messageId: r.messageId ?? null,
+          })
+        })
+        .catch(() => {})
+    }
+
     const { data: current } = await supabaseAdmin
       .from("phone_screening_participants")
       .select("whatsapp_history, screening_context")
@@ -132,6 +162,11 @@ async function renudgeExistingParticipant(opts: {
     history.push({
       messageId: msgResult.messageId || null,
       template,
+      direction: "out",
+      text:
+        template === "talent_outreach"
+          ? `Hi ${candidate.name || "there"}, following up on the ${job.title || "role"} at ${job.client_name || client?.name || "our client"}. Would you be interested?`
+          : `Following up on your screening for ${job.title || "the role"}.`,
       sentAt: now,
       status: "sent",
       kind: "re-nudge",
@@ -147,7 +182,21 @@ async function renudgeExistingParticipant(opts: {
       updated_at: now,
     }
 
-    if (portalShortlist) {
+    if (flow === "outbound") {
+      // Back to the top of the outbound journey: ask for interest, collect nothing.
+      // Any partially-collected data from the previous attempt is dropped so a
+      // later form submission is not merged onto a stale baseline.
+      update.screening_mode = "collect_info_first"
+      update.info_step = "awaiting_interest"
+      update.info_data = {}
+      update.info_confirmed = false
+      update.screening_context = {
+        ...((current as any)?.screening_context || {}),
+        awaitingInterest: true,
+        jobUrl: outboundLink,
+        renudgedAt: now,
+      }
+    } else if (portalShortlist) {
       // Flow A portal: keep the previously seeded info; just re-send the invite.
       update.screening_mode = "collect_info_first"
       update.info_step = "confirmed"

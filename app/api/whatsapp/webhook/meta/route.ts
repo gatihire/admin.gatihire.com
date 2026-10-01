@@ -19,7 +19,32 @@ import { getWhatsAppService } from "@/lib/whatsapp"
 import { scheduleOrPlaceCall } from "@/lib/scheduled-call"
 import { classifyIntent } from "@/lib/ai-intent-classifier"
 import { toE164 } from "@/lib/phone"
+import { appendThreadEntry, recordInboundText, recordOutboundText } from "@/lib/whatsapp-thread"
 import crypto from "crypto"
+
+/**
+ * Send a free-text message and record the body it sent.
+ *
+ * The send and the log have to be one call. Recording text at the send site is
+ * the only way the UI can ever show what was actually said — the delivery
+ * receipts that arrive later carry no body, so a message logged without its text
+ * is permanently unreadable.
+ */
+async function sendAndRecord(
+  participantId: string,
+  phoneNumber: string,
+  text: string,
+  extra: Record<string, any> = {}
+): Promise<{ success: boolean; messageId?: string; error?: string }> {
+  const result = await sendSessionMessage(phoneNumber, text)
+  await recordOutboundText(participantId, text, {
+    messageId: result.messageId ?? null,
+    status: result.success ? "sent" : "failed",
+    error: result.error,
+    ...extra,
+  })
+  return result
+}
 
 // Verify Meta webhook signature
 function verifyMetaSignature(body: string, signature: string | null, appSecret: string): boolean {
@@ -317,7 +342,13 @@ async function handleInteractiveMessage(participant: any, interactive: any) {
 async function handleTextMessage(participant: any, text: any) {
   const messageBody = text.body?.trim() || ""
   const lower = messageBody.toLowerCase()
-  
+
+  // Record the candidate's own words before doing anything else with them. This
+  // is the only place inbound text exists — after this the value lives in local
+  // variables and in no persisted field, so a recruiter reviewing the thread
+  // later would see our replies with none of their answers.
+  await recordInboundText(participant.id, messageBody)
+
   logger.info("Received text message", { 
     participantId: participant.id, 
     message: messageBody.substring(0, 100),
@@ -418,7 +449,8 @@ async function sendReplyFallbackPrompt(participant: any) {
   const phoneNumber = participant.candidates?.phone
   if (!phoneNumber) return
 
-  await sendSessionMessage(
+  await sendAndRecord(
+    participant.id,
     phoneNumber,
     "Thanks for replying! To help us move forward faster, please pick one:\n\n" +
     "• Interested — we'll schedule your screening call\n" +
@@ -496,7 +528,8 @@ async function dispatchIntent(participant: any, classification: { intent: string
                   updated_at: new Date().toISOString(),
                 })
                 .eq("id", participant.id)
-              await sendSessionMessage(
+              await sendAndRecord(
+                participant.id,
                 participant.candidates.phone,
                 "Sorry, we couldn't open the details form just now. 🙏 Reply here and our team will help you directly."
               )
@@ -544,11 +577,13 @@ async function dispatchIntent(participant: any, classification: { intent: string
       if (participant.candidates?.phone) {
         try {
           const { getPortalJobsUrl } = await import("@/lib/call-orchestrator")
-          await sendSessionMessage(
+          await sendAndRecord(
+            participant.id,
             participant.candidates.phone,
             "Thanks for your time, and for reading our message. 🙏\n\n" +
               "We'll reach out if something matching your profile comes up. " +
-              `In the meantime, you can browse other open roles here: ${getPortalJobsUrl()}`
+              `In the meantime, you can browse other open roles here: ${getPortalJobsUrl()}`,
+            { kind: "not_interested_closing" }
           )
         } catch (err: any) {
           logger.error("Failed to send not-interested follow-up", {
@@ -598,9 +633,11 @@ async function dispatchIntent(participant: any, classification: { intent: string
         ? `Rs ${participant.jobs.salary_min} - ${participant.jobs.salary_max}`
         : "competitive"
       if (phoneNumber) {
-        await sendSessionMessage(
+        await sendAndRecord(
+          participant.id,
           phoneNumber,
-          `Thanks for asking! Quick details on the ${role} role at ${company}:${city ? `\n• Location: ${city}` : ""}\n• Salary: ${salary}\n• Screening: a quick 5-10 minute call with our AI recruiter.\n\nWould you like to schedule it? Reply "call now", or share your CTC / notice period / experience and we'll proceed.`
+          `Thanks for asking! Quick details on the ${role} role at ${company}:${city ? `\n• Location: ${city}` : ""}\n• Salary: ${salary}\n• Screening: a quick 5-10 minute call with our AI recruiter.\n\nWould you like to schedule it? Reply "call now", or share your CTC / notice period / experience and we'll proceed.`,
+          { kind: "role_info_reply" }
         )
       }
       break
@@ -704,28 +741,13 @@ async function handleStatusUpdate(status: any) {
   }
 }
 
+// Kept as a thin named wrapper so existing call sites read unchanged; the actual
+// read-modify-write now lives in lib/whatsapp-thread so the UI and the recorder
+// agree on one entry shape.
 async function appendToHistory(participantId: string, entry: Record<string, any>) {
-  const { data: participant, error: findError } = await supabaseAdmin
-    .from("phone_screening_participants")
-    .select("whatsapp_history")
-    .eq("id", participantId)
-    .maybeSingle()
-
-  if (findError || !participant) {
-    logger.warn("appendToHistory: participant lookup failed", { participantId, error: findError?.message })
-    return
-  }
-
-  const history = Array.isArray(participant.whatsapp_history) ? [...participant.whatsapp_history] : []
-  history.push(entry)
-
-  const { error: updateError } = await supabaseAdmin
-    .from("phone_screening_participants")
-    .update({ whatsapp_history: history, updated_at: new Date().toISOString() })
-    .eq("id", participantId)
-
-  if (updateError) {
-    logger.warn("appendToHistory: persist failed", { participantId, error: updateError.message })
+  const ok = await appendThreadEntry(participantId, entry)
+  if (!ok) {
+    logger.warn("appendToHistory: persist failed", { participantId, entry: entry.kind || entry.status })
   }
 }
 
@@ -861,9 +883,12 @@ async function finalizeCollectedInfo(
         .eq("id", participant.id)
 
       const { getWhatsAppService } = await import('@/lib/whatsapp')
+      // Body text is recorded alongside the send so the conversation view shows
+      // what was actually offered, not just that a send happened.
+      const proceedBody = "✅ Thanks for sharing your details! Your profile looks like a good fit.\n\nWhen should our AI recruiter call you for the quick screening?"
       const sendResult = await getWhatsAppService().sendInteractiveButtons({
         phoneNumber,
-        body: "✅ Thanks for sharing your details! Your profile looks like a good fit.\n\nWhen should our AI recruiter call you for the quick screening?",
+        body: proceedBody,
         footer: "Reply 'call now' or pick a slot",
         buttons: [
           { id: "call_now", title: "Call Now" },
@@ -880,6 +905,8 @@ async function finalizeCollectedInfo(
         await appendToHistory(participant.id, {
           at: new Date().toISOString(),
           kind: "schedule_buttons",
+          direction: "out",
+          text: proceedBody,
           status: "failed",
           error: sendResult.error,
         })
@@ -891,6 +918,8 @@ async function finalizeCollectedInfo(
         await appendToHistory(participant.id, {
           at: new Date().toISOString(),
           kind: "schedule_buttons",
+          direction: "out",
+          text: proceedBody,
           status: "sent",
           messageId: sendResult.messageId,
         })
@@ -911,9 +940,10 @@ async function finalizeCollectedInfo(
         .eq("id", participant.id)
 
       const { getWhatsAppService } = await import('@/lib/whatsapp')
+      const reviewBody = "Thanks for sharing your details! To take this forward, our AI recruiter needs a quick 5-10 minute call to understand your background. When should we call you?"
       const sendResult = await getWhatsAppService().sendInteractiveButtons({
         phoneNumber,
-        body: "Thanks for sharing your details! To take this forward, our AI recruiter needs a quick 5-10 minute call to understand your background. When should we call you?",
+        body: reviewBody,
         footer: "Reply 'call now' or pick a slot",
         buttons: [
           { id: "call_now", title: "Call Now" },
@@ -930,6 +960,8 @@ async function finalizeCollectedInfo(
         await appendToHistory(participant.id, {
           at: new Date().toISOString(),
           kind: "schedule_buttons",
+          direction: "out",
+          text: reviewBody,
           status: "failed",
           error: sendResult.error,
         })
@@ -941,6 +973,8 @@ async function finalizeCollectedInfo(
         await appendToHistory(participant.id, {
           at: new Date().toISOString(),
           kind: "schedule_buttons",
+          direction: "out",
+          text: reviewBody,
           status: "sent",
           messageId: sendResult.messageId,
         })
@@ -1025,8 +1059,11 @@ async function handleFlowFormReply(participant: any, nfmReply: any) {
   try {
     // Instant ack so the candidate isn't staring at silence while the
     // pre-screen runs. Fire-and-forget; the decision messages supersede it.
-    sendSessionMessage(phoneNumber, "✅ Details received — ek second, mujhe aapka profile check karne dein...")
-      .catch(() => {})
+    sendAndRecord(
+      participant.id,
+      phoneNumber,
+      "✅ Details received — ek second, mujhe aapka profile check karne dein..."
+    ).catch(() => {})
 
     let fields: Record<string, any> = {}
     let parseFailed = false
@@ -1080,7 +1117,8 @@ async function handleFlowFormReply(participant: any, nfmReply: any) {
         error: "empty form submission",
       })
 
-      await sendSessionMessage(
+      await sendAndRecord(
+        participant.id,
         phoneNumber,
         "Sorry — we didn't receive your details properly. 🙏\n\n" +
           "Please tap 'Share details' in the previous message and submit the form again. " +
@@ -1110,7 +1148,7 @@ async function handleFlowFormReply(participant: any, nfmReply: any) {
       error: error.message,
     })
     if (phoneNumber) {
-      await sendSessionMessage(phoneNumber, "Thanks for sharing your details! Our team will review them and reach out shortly.")
+      await sendAndRecord(participant.id, phoneNumber, "Thanks for sharing your details! Our team will review them and reach out shortly.")
     }
   }
 }
@@ -1122,8 +1160,11 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
     // Instant ack so the candidate isn't staring at silence while Gemini
     // extracts fields and runs the pre-screen. Fire-and-forget; the decision
     // messages below supersede it.
-    sendSessionMessage(phoneNumber, "✅ Details received — ek second, mujhe aapka profile check karne dein...")
-      .catch(() => {})
+    sendAndRecord(
+      participant.id,
+      phoneNumber,
+      "✅ Details received — ek second, mujhe aapka profile check karne dein..."
+    ).catch(() => {})
 
     // Parse all fields from the single message
     const allFields = await extractAllFieldsFromReply(messageBody, participant.info_data || {})
@@ -1167,7 +1208,7 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
         .eq("id", participant.id)
 
       if (phoneNumber) {
-        await sendSessionMessage(phoneNumber, "Thanks for sharing your details! Our team will review them and reach out shortly.")
+        await sendAndRecord(participant.id, phoneNumber, "Thanks for sharing your details! Our team will review them and reach out shortly.")
       }
     } else {
       await supabaseAdmin
@@ -1184,7 +1225,8 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
         .eq("id", participant.id)
 
       if (phoneNumber) {
-        await sendSessionMessage(
+        await sendAndRecord(
+          participant.id,
           phoneNumber,
           "🙏 Couldn't read all the details. Please share them in ONE reply like:\n\n" +
             "Current CTC, Expected CTC, Total experience, Notice period, City, Willing to relocate (yes/no), Reason for switching\n\n" +

@@ -20,7 +20,7 @@ import {
 import { useToast } from "@/hooks/use-toast"
 import { cn } from "@/lib/utils"
 import { CollectedInfoView, PreScreenVerdict } from "@/components/candidate-collected-info"
-import { WhatsAppThreadTimeline } from "@/components/whatsapp-thread-timeline"
+import { WhatsAppConversationModal } from "@/components/whatsapp-conversation-modal"
 import { getCallTruth } from "@/lib/call-truth"
 
 interface TranscriptSegment {
@@ -216,6 +216,7 @@ export function PhoneScreeningResultsSheet({
   onReviewed?: () => void
 }) {
   const [loading, setLoading] = useState(false)
+  const [showWhatsAppThread, setShowWhatsAppThread] = useState(false)
   const [data, setData] = useState<ParticipantDetail | null>(null)
   const [approveStage, setApproveStage] = useState("shortlist")
   const [reviewBusy, setReviewBusy] = useState(false)
@@ -776,7 +777,25 @@ export function PhoneScreeningResultsSheet({
               {/* WhatsApp Flow Tab */}
               {activeTab === "whatsapp" && (
                 <div className="space-y-4">
-                  <WhatsAppThreadTimeline history={data.whatsapp_history} />
+                  <WhatsAppConversationModal
+                    history={data.whatsapp_history}
+                    candidateName={data.candidates?.name}
+                    open={showWhatsAppThread}
+                    onOpenChange={setShowWhatsAppThread}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowWhatsAppThread(true)}
+                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-100"
+                  >
+                    <MessageCircle className="h-3.5 w-3.5" />
+                    Open full WhatsApp conversation
+                    {whatsappHistory.length > 0 && (
+                      <span className="rounded-full bg-white px-1.5 py-px text-[10px] tabular-nums">
+                        {whatsappHistory.length}
+                      </span>
+                    )}
+                  </button>
 
                   {data.whatsapp_reply_text && (
                     <div>
