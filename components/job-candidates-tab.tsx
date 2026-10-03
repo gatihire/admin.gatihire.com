@@ -455,6 +455,21 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
     } catch { /* noop */ }
   }, [jobId])
 
+  // Manual refresh. The pipeline payload is served from a 30s session cache, so
+  // a plain refetch would hand back the same rows the recruiter is looking at;
+  // onRefresh forces past that cache. Call status lives in a separate endpoint
+  // from the applications list, so both must be pulled or the cards keep showing
+  // a stale "calling"/"no reply" state next to a fresh list.
+  const [refreshing, setRefreshing] = useState(false)
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true)
+    try {
+      await Promise.all([fetchParticipants(), onRefresh()])
+    } finally {
+      setRefreshing(false)
+    }
+  }, [fetchParticipants, onRefresh])
+
   // Auto-timeout: re-evaluate call statuses every 30 seconds for 3-min timeout
   useEffect(() => {
     const hasCalling = Object.values(callStatusByCandidate).some((s) => s === "calling")
@@ -807,6 +822,16 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
               </button>
             )
           })}
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing || loading}
+            title="Refresh candidates and call status"
+            aria-label="Refresh candidates and call status"
+            className="ml-auto flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold text-zinc-600 bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
+            <span className="hidden sm:inline">{refreshing ? "Refreshing..." : "Refresh"}</span>
+          </button>
         </motion.div>
 
         {/* ── All View: Inbound / Outbound Tabs ── */}

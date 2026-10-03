@@ -9,6 +9,7 @@ export function JobDetailsPageClient({ jobId }: { jobId: string }) {
   const router = useRouter()
   const sp = useSearchParams()
   const tab = sp.get("tab") || undefined
+  const stage = sp.get("stage") || undefined
   const [job, setJob] = useState<any | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -62,5 +63,5 @@ export function JobDetailsPageClient({ jobId }: { jobId: string }) {
     } else {
       router.push("/jobs")
     }
-  }} initialTab={tab} />
+  }} initialTab={tab} initialStage={stage} />
 }

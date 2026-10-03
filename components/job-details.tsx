@@ -72,9 +72,10 @@ interface JobDetailsProps {
   job: Job
   onBack: () => void
   initialTab?: string
+  initialStage?: string
 }
 
-export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
+export function JobDetails({ job, onBack, initialTab, initialStage }: JobDetailsProps) {
   const router = useRouter()
   const { toast } = useToast()
   const [applications, setApplications] = useState<Application[]>([])
@@ -86,7 +87,18 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
     const t = parseTab(initialTab ?? null)
     return t || "pipeline"
   })
-  const [candidateStage, setCandidateStage] = useState<string>("applied")
+  // Restore the stage the recruiter was actually looking at. This used to be
+  // hardcoded to "applied", so selecting AI Screen wrote ?stage=ai_screen to the
+  // URL but a reload always landed back on Applied — the stage was saved in the
+  // URL and then thrown away on mount.
+  const [candidateStage, setCandidateStage] = useState<string>(() => initialStage || "applied")
+
+  // Keep the selected stage in sync when the URL changes underneath us (browser
+  // back/forward, or a shared link). Without this the chips and the list can
+  // disagree after navigating history.
+  useEffect(() => {
+    setCandidateStage(initialStage || "applied")
+  }, [initialStage])
   const [candidateSubFilter, setCandidateSubFilter] = useState<string>("all")
   const [selectedCandidate, setSelectedCandidate] = useState<any | null>(null)
   const [selectedApplication, setSelectedApplication] = useState<Application | null>(null)
@@ -127,8 +139,12 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
     } catch { setClient(null) }
   }
 
-  const fetchPipeline = async (opts?: { force?: boolean }) => {
-    setApplicationLoading(true)
+  const fetchPipeline = async (opts?: { force?: boolean; silent?: boolean }) => {
+    // A manual refresh must not blank the pipeline into skeletons: the
+    // recruiter loses their scroll position and their selected stage view for
+    // the sake of data they are already looking at. Only the initial load (or an
+    // explicit reload) shows the loading state.
+    if (!opts?.silent) setApplicationLoading(true)
     try {
       const cacheKey = `internal:pipeline:job:${job.id}`
       if (opts?.force) {
@@ -159,7 +175,7 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
       console.error("[fetchPipeline] Error:", err)
       toast({ title: "Failed to load candidates", variant: "destructive" })
     } finally {
-      setApplicationLoading(false)
+      if (!opts?.silent) setApplicationLoading(false)
     }
   }
 
@@ -190,10 +206,13 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
   const selectStage = useCallback((stage: string) => {
     setActiveTab("pipeline")
     setCandidateStage(stage)
+    // Always write the stage, including "all". Omitting it for "all" made the
+    // param disappear, and the restore-on-mount effect then read it as missing
+    // and jumped the recruiter back to Applied.
     const params = new URLSearchParams()
-    if (stage && stage !== "all") params.set("stage", stage)
+    params.set("stage", stage)
     const qs = params.toString()
-    router.replace(`/jobs/${job.id}${qs ? `?${qs}` : ""}`, { scroll: false })
+    router.replace(`/jobs/${job.id}?${qs}`, { scroll: false })
   }, [job.id, router])
 
   const updateStatus = useCallback(async (applicationId: string, newStatus: string, rejectionReason?: string) => {
@@ -238,7 +257,7 @@ export function JobDetails({ job, onBack, initialTab }: JobDetailsProps) {
             onStageChange={updateStatus}
             onApplicationUpdated={updateApplication}
             onViewProfile={handleViewProfile}
-            onRefresh={() => fetchPipeline({ force: true })}
+            onRefresh={() => fetchPipeline({ force: true, silent: true })}
           />
         )
       case "sourcing":
