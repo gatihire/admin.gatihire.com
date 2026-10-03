@@ -4,9 +4,9 @@ import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { deriveOrigin, deriveCandidateFlow, type CandidateOrigin } from "@/lib/origin"
 import { orchestrateScreening, systemDecidesMode, getPublicJobUrl, formatSalaryRange, jobLocation } from "@/lib/call-orchestrator"
 import { getWhatsAppService } from "@/lib/whatsapp"
-import { placeBolnaCall } from "@/lib/bolna"
+import { placeCallImmediately } from "@/lib/scheduled-call"
 import { logger } from "@/lib/logger"
-import { sendSessionMessage } from "@/lib/info-collector-v2"
+import { sendSessionMessage, hasEnoughToScreen } from "@/lib/info-collector-v2"
 import { logCandidateActivityBatch } from "@/lib/activity-logger"
 
 export const runtime = "nodejs"
@@ -55,28 +55,32 @@ async function renudgeExistingParticipant(opts: {
     if (effMode === "call_now") {
       const { data: participant } = await supabaseAdmin
         .from("phone_screening_participants")
-        .select("call_payload_json")
+        .select("call_payload_json, info_data")
         .eq("id", participantId)
         .maybeSingle()
+
       const userData = (participant as any)?.call_payload_json
       if (!userData || !candidate.phone) {
         return { ok: false, kind: "call", error: "No stored call payload or phone for re-nudge" }
       }
-      const result = await placeBolnaCall({ to: candidate.phone, userData })
-      if (!result.success || !result.executionId) {
+
+      // Route through the guarded placement rather than calling Bolna directly.
+      // Two bugs lived in the old direct call:
+      //  - it bypassed placeCallImmediately's "already with the provider" check,
+      //    so HR double-clicking "Call Now" fired two Bolna executions;
+      //  - it sent call_payload_json raw. That payload is seeded with 29 keys at
+      //    creation but the CTC/notice fields are empty — the candidate's real
+      //    answers live in info_data — so the AI had nothing to screen against.
+      //    placeCallForParticipant already merges info_data over the payload, and
+      //    it also owns the attempt counter that the old hardcoded
+      //    `call_attempts: 1` used to reset.
+      const result = await placeCallImmediately(participantId)
+      if (result.skipped) {
+        return { ok: false, kind: "call", error: result.error || "A call is already in progress" }
+      }
+      if (!result.success) {
         return { ok: false, kind: "call", error: result.error || "Failed to re-place call" }
       }
-      await supabaseAdmin
-        .from("phone_screening_participants")
-        .update({
-          status: "calling",
-          bolna_execution_id: result.executionId,
-          bolna_status: "queued",
-          call_attempts: 1,
-          last_attempt_at: now,
-          updated_at: now,
-        })
-        .eq("id", participantId)
       return { ok: true, kind: "call" }
     }
 
@@ -163,9 +167,14 @@ async function renudgeExistingParticipant(opts: {
 
     const { data: current } = await supabaseAdmin
       .from("phone_screening_participants")
-      .select("whatsapp_history, screening_context")
+      .select("whatsapp_history, screening_context, info_data, info_confirmed, info_step")
       .eq("id", participantId)
       .maybeSingle()
+
+    // Has this candidate already given us the screening answers? Re-triggering
+    // must never restart that collection — they get asked for the same fields
+    // again otherwise.
+    const alreadyCollected = hasEnoughToScreen(current)
 
     const history = Array.isArray((current as any)?.whatsapp_history)
       ? [...(current as any).whatsapp_history]
@@ -195,18 +204,20 @@ async function renudgeExistingParticipant(opts: {
 
     if (flow === "outbound") {
       // Back to the top of the outbound journey: ask for interest, collect nothing.
-      // Any partially-collected data from the previous attempt is dropped so a
-      // later form submission is not merged onto a stale baseline.
       update.screening_mode = "collect_info_first"
       update.info_step = "awaiting_interest"
-      update.info_data = {}
-      update.info_confirmed = false
       update.screening_context = {
         ...((current as any)?.screening_context || {}),
         awaitingInterest: true,
         jobUrl: outboundLink,
         renudgedAt: now,
       }
+      // info_data is deliberately NOT cleared. Blanking it deleted answers the
+      // candidate had already given, and the next form submission then asked for
+      // the same fields again. A candidate who already opted in and submitted is
+      // past this point in the journey.
+      if (!alreadyCollected) update.info_data = {}
+      if (!alreadyCollected) update.info_confirmed = false
     } else if (portalShortlist) {
       // Flow A portal: keep the previously seeded info; just re-send the invite.
       update.screening_mode = "collect_info_first"
@@ -216,15 +227,22 @@ async function renudgeExistingParticipant(opts: {
         renudgedAt: now,
       }
     } else if (effMode === "collect_info_first") {
-      // Reset any half-finished info-collection state so the next form
-      // submission parses cleanly.
+      // Re-send the questions, but never delete what the candidate already
+      // answered. The previous `info_data = {}` here was the direct cause of
+      // "I already filled the form, why is it asking me again?" — the submitted
+      // CTC/notice were wiped and the form started from blank.
       update.screening_mode = "collect_info_first"
-      update.info_step = "collect_form"
-      update.info_data = {}
-      update.info_confirmed = false
       update.screening_context = {
         ...((current as any)?.screening_context || {}),
         renudgedAt: now,
+      }
+      if (alreadyCollected) {
+        // Already has the full screening set, so there is nothing left to ask.
+        update.info_step = "confirmed"
+      } else {
+        update.info_step = "collect_form"
+        update.info_data = {}
+        update.info_confirmed = false
       }
     }
 

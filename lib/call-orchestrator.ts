@@ -546,6 +546,11 @@ export function systemDecidesMode(
   callMode: ScreeningCallMode | undefined,
   flow: string
 ): ScreeningCallMode {
+  // An explicit call_now from HR wins. It used to be discarded for portal and
+  // external candidates, so pressing "Call Now" silently became a re-collect:
+  // the candidate was asked to answer the screening questions a second time
+  // instead of getting a call. Flow defaults only apply when HR did not choose.
+  if (callMode === "call_now") return "call_now"
   if (flow === "portal") return "quick_screen"
   if (flow === "external") return "collect_info_first"
   return callMode || "call_now"
