@@ -14,6 +14,9 @@ import {
   XCircle,
 } from "lucide-react"
 import { CollectedInfoView, PreScreenVerdict } from "@/components/candidate-collected-info"
+/** How often an open thread refetches. */
+const LIVE_POLL_INTERVAL_MS = 5000
+
 import type { ThreadEntry } from "@/lib/whatsapp-thread-shared"
 import { describeTemplate, entryTime } from "@/lib/whatsapp-thread-shared"
 
@@ -334,17 +337,10 @@ export function WhatsAppConversationModal({
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
-  const conversation = useMemo(() => buildConversation(parseEntries(history)), [history])
   const scrollRef = useRef<HTMLDivElement>(null)
   const [showSystem, setShowSystem] = useState(true)
   const [showDetails, setShowDetails] = useState(false)
 
-  // Counted from info_data only. resumeFallback must not count here or the badge
-  // would claim the candidate told us things they never typed on WhatsApp.
-  const collectedKeyCount = Object.keys(infoData ?? {}).filter(
-    (k) => (infoData as Record<string, unknown>)?.[k] !== null && (infoData as Record<string, unknown>)?.[k] !== undefined && (infoData as Record<string, unknown>)?.[k] !== ""
-  ).length
-  const hasCollectedInfo = collectedKeyCount > 0
 
   // Outbound composer. The thread used to be strictly read-only — its footer
   // said so — which meant the one moment a recruiter most needs to speak is the
@@ -356,8 +352,96 @@ export function WhatsAppConversationModal({
   const [sendError, setSendError] = useState<string | null>(null)
   // Messages sent in this session, shown immediately rather than after a refetch.
   const [pending, setPending] = useState<Rendered[]>([])
+  // Thread as last fetched from the server. The prop is only the initial value —
+  // polling updates this instead, so a reply that arrives while the modal is
+  // open appears on its own.
+  const [liveHistory, setLiveHistory] = useState<unknown>(history)
+  const [liveInfo, setLiveInfo] = useState<{ infoData?: any; infoSources?: any; preScreenResult?: any }>({
+    infoData: infoData ?? undefined,
+    infoSources: infoSources ?? undefined,
+    preScreenResult: preScreenResult ?? undefined,
+  })
+
+  // A new prop value (parent refetch) must win over whatever polling last saw.
+  useEffect(() => {
+    setLiveHistory(history)
+    setLiveInfo({ infoData: infoData ?? undefined, infoSources: infoSources ?? undefined, preScreenResult: preScreenResult ?? undefined })
+  }, [history, infoData, infoSources, preScreenResult])
+
+  // Counted from info_data only. resumeFallback must not count here or the badge
+  // would claim the candidate told us things they never typed on WhatsApp.
+  const liveInfoData = liveInfo.infoData as Record<string, unknown> | undefined
+  const collectedKeyCount = Object.keys(liveInfoData ?? {}).filter(
+    (k) => liveInfoData?.[k] !== null && liveInfoData?.[k] !== undefined && liveInfoData?.[k] !== ""
+  ).length
+  const hasCollectedInfo = collectedKeyCount > 0
+
+  const conversation = useMemo(() => buildConversation(parseEntries(liveHistory)), [liveHistory])
 
   const canSend = !!participantId
+
+  /**
+   * Live updates.
+   *
+   * The thread is a chat: a recruiter sitting on it needs a reply to appear
+   * without re-opening anything. Polling rather than Supabase Realtime because
+   * this app does not subscribe to postgres_changes anywhere, so enabling a
+   * publication for this one view would be a wider change than it looks.
+   *
+   * Pauses when the tab is hidden, and skips when the document is not visible,
+   * so a backgrounded tab is not hammering the endpoint. Interval is a
+   * deliberate trade: short enough that "live" feels true, long enough that a
+   * recruiter watching a handful of threads is not a meaningful load.
+   */
+  useEffect(() => {
+    if (!open || !participantId) return
+
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+
+    const poll = async () => {
+      if (cancelled) return
+      if (typeof document !== "undefined" && document.hidden) {
+        timer = setTimeout(poll, LIVE_POLL_INTERVAL_MS)
+        return
+      }
+      try {
+        const res = await fetch(`/api/phone-screening/participants/${participantId}/thread`, {
+          cache: "no-store",
+        })
+        if (res.ok) {
+          const data = await res.json()
+          if (!cancelled) {
+            // Only adopt changed slices, so an unchanged poll does not force a
+            // re-render of every bubble.
+            setLiveHistory((prev: unknown) => (prev === data.whatsapp_history ? prev : data.whatsapp_history))
+            setLiveInfo((prev: { infoData?: any; infoSources?: any; preScreenResult?: any }) => {
+              const next = {
+                infoData: data.info_data ?? undefined,
+                infoSources: data.info_sources ?? undefined,
+                preScreenResult: data.screening_context?.preScreenResult,
+              }
+              const same =
+                prev.infoData === next.infoData &&
+                prev.infoSources === next.infoSources &&
+                prev.preScreenResult === next.preScreenResult
+              return same ? prev : next
+            })
+          }
+        }
+      } catch {
+        // Offline or aborted: the thread keeps whatever it had. Never blank it.
+      } finally {
+        if (!cancelled) timer = setTimeout(poll, LIVE_POLL_INTERVAL_MS)
+      }
+    }
+
+    timer = setTimeout(poll, LIVE_POLL_INTERVAL_MS)
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [open, participantId])
 
   useEffect(() => {
     if (!open) return
@@ -506,7 +590,7 @@ export function WhatsAppConversationModal({
         {/* What they submitted, above the transcript. Collapsed by default: most
             lookups are for the message, and the thread is the reason they opened
             this. */}
-        {(hasCollectedInfo || !!preScreenResult) && (
+        {(hasCollectedInfo || !!liveInfo.preScreenResult) && (
           <div className="border-b border-zinc-200 bg-white">
             <button
               type="button"
@@ -526,14 +610,14 @@ export function WhatsAppConversationModal({
             </button>
             {showDetails && (
               <div className="space-y-2 border-t border-zinc-100 px-4 pb-3 pt-3">
-                {preScreenResult ? (
-                  <PreScreenVerdict result={preScreenResult as any} />
+                {liveInfo.preScreenResult ? (
+                  <PreScreenVerdict result={liveInfo.preScreenResult as any} />
                 ) : null}
 
                 {hasCollectedInfo && (
                   <CollectedInfoView
-                    infoData={infoData ?? null}
-                    infoSources={infoSources as any}
+                    infoData={liveInfoData ?? null}
+                    infoSources={liveInfo.infoSources as any}
                     fallback={resumeFallback ?? null}
                     compact
                   />

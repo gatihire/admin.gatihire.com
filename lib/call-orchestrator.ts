@@ -231,7 +231,18 @@ async function sendDetailedInfoMessage(opts: {
     messageId: result.messageId || null,
     template: "collect_info_form",
     direction: "out",
-    text: `Please share a few details so we can screen you for ${job.title || "this role"}.`,
+    // The rendered registry body, not a hand-written approximation.
+    //
+    // This used to record "Please share a few details so we can screen you for
+    // <title>." while the template actually sends "Hi {{1}}, thanks for your
+    // interest in the {{2}} position at {{3}}. Please share a few details in the
+    // form below…" — so the thread dropped the greeting and the company name, and
+    // a recruiter reading it could not tell the candidate had been addressed by
+    // name. The fallback still names them, which is closer to the real body than
+    // the fragment it replaces.
+    text:
+      result.renderedBody ||
+      `Hi ${candidate.name || "there"}, thanks for your interest in the ${job.title || "open role"} position at ${job.client_name || "our client"}. Please share a few details in the form below so we can screen you for the role.`,
     sentAt: now,
     status: "sent",
   }]

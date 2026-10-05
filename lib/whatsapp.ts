@@ -1,4 +1,5 @@
 import { logger } from "./logger"
+import { renderTemplateBody } from "./whatsapp-template-body"
 import { toDial } from "./phone"
 
 interface WhatsAppConfig {
@@ -38,6 +39,15 @@ interface SendMessageResult {
   /** Meta Graph error code, populated when a send fails (e.g. 132001 language
    *  mismatch, 131042 template not yet approved). */
   errorCode?: string | number
+  /**
+   * The body Meta actually rendered, for templates only.
+   *
+   * The Graph send API returns a message id and nothing else, so without this
+   * every send site had to hand-write the text it assumed it had sent. Those
+   * strings drift from the registry — the thread showed a candidate's message
+   * without their name in it, for a template that greets them by name.
+   */
+  renderedBody?: string | null
 }
 
 /**
@@ -263,7 +273,16 @@ export class WhatsAppService {
       if (response.ok && result.messages && result.messages[0]) {
         const messageId = result.messages[0].id
         logger.info(`WhatsApp message sent successfully via Meta`, { messageId, destination })
-        return { success: true, messageId }
+        // Rendered from the registry rather than hand-written at the call site,
+        // so the thread shows the body the candidate actually received.
+        const renderedBody = await renderTemplateBody(
+          message.templateName,
+          message.languageCode || "en_US",
+          ((message.components ?? []) as any[]).flatMap((c) =>
+            (c?.parameters ?? []).map((p: any) => p?.text ?? null)
+          )
+        )
+        return { success: true, messageId, renderedBody }
       }
 
       // (#132001) "Template name does not exist in the translation" — the
