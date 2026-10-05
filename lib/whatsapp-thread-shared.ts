@@ -15,7 +15,14 @@ export interface ThreadEntry {
   sentAt?: string
   kind?: string
   /** "out" for anything we sent, "in" for the candidate. */
-  direction?: "in" | "out" | "system"
+  /**
+   * `internal` is our own note — never sent to the candidate.
+   *
+   * It was missing from this union while the webhook already wrote it, so the
+   * compiler said nothing and internal notes rendered as ordinary outbound
+   * bubbles: a recruiter read our own policy note as a message we had texted.
+   */
+  direction?: "in" | "out" | "system" | "internal"
   /** The actual message body. Absent on legacy rows. */
   text?: string | null
   /** Template used, when the outbound message was a template send. */

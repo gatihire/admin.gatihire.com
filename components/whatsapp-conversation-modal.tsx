@@ -41,7 +41,7 @@ import { describeTemplate, entryTime } from "@/lib/whatsapp-thread-shared"
 
 type Rendered = {
   id: string
-  direction: "in" | "out" | "system"
+  direction: "in" | "out" | "system" | "internal"
   text: string
   at: Date | null
   status?: string | null
@@ -164,9 +164,16 @@ function buildConversation(entries: ThreadEntry[]): Rendered[] {
     }
 
     const kind = String(e.kind || "")
+    // `internal` entries are our own notes, never sent to anyone. They were
+    // rendered as ordinary outbound bubbles, so a recruiter read
+    //   "Pre-screen flagged this profile for HR review. Candidate told a
+    //    recruiter is reviewing — no verdict, no call slot and no booking until
+    //    a human approves."
+    // as if it had been texted to the candidate. It is our own policy note.
     const isSystem =
       e.direction === "system" ||
-      ["call_booked", "call_booking_failed", "pre_screen_review", "form_submit_failed", "not_interested_closing"].includes(kind) ||
+      e.direction === "internal" ||
+      ["call_booked", "call_booking_failed", "pre_screen_review", "pre_screen_review_queued", "clarification_ack", "form_submit_failed", "not_interested_closing"].includes(kind) ||
       kind.startsWith("form_") ||
       kind.startsWith("call_")
 
@@ -556,7 +563,8 @@ export function WhatsAppConversationModal({
   )
 
   const unread = withPending.some((c) => c.direction === "in")
-  const systemCount = withPending.filter((c) => c.direction === "system").length
+  // Internal notes count here too, otherwise the toggle hides them with no way back.
+  const systemCount = withPending.filter((c) => c.direction === "system" || c.direction === "internal").length
 
   useEffect(() => {
     if (!open) return

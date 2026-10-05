@@ -21,6 +21,7 @@ import { CandidateActivityTimeline } from "./candidate-activity-timeline"
 import { CandidateTimeline } from "./candidate-timeline"
 import { CandidateMetricsBar } from "./candidate-metrics-bar"
 import { CollectedInfoView, PreScreenVerdict } from "./candidate-collected-info"
+import { supabase } from "@/lib/supabase"
 import { WhatsAppThreadTimeline } from "./whatsapp-thread-timeline"
 import { getCallTruth, CALL_TRUTH_FILTERS } from "@/lib/call-truth"
 import { RootCauseAnalytics } from "./root-cause-analytics"
@@ -588,14 +589,62 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
     }
   }, [jobId, selectedInterviewRound, fetchInterviews, toast])
 
+  // Live updates for the screening board.
+  //
+  // This replaces a 10s poll that only ran while a call was active. Two problems
+  // with that: it was blind exactly when it mattered most — a candidate replying
+  // on WhatsApp sets no call status, so a hold appearing or a reply landing went
+  // unnoticed until the recruiter happened to hit Refresh — and it burned a
+  // request every 10s while it ran.
+  //
+  // Subscribing to this job's participant rows means a reply, a status change or
+  // a pre-screen hold lands on the board as it happens. Only the fields this
+  // board renders are asked for, so the event is cheap.
+  //
+  // Gated on visibility, deliberately: the requirement is "live while the
+  // recruiter is looking at it". A hidden tab has no use for a subscription, so
+  // it drops it entirely and refetches once on return. That also means a
+  // backgrounded board costs nothing rather than quietly polling.
   useEffect(() => {
-    const hasActiveCalls = Object.values(callStatusByCandidate).some(
-      (s) => s === "calling" || s === "whatsapp_sent" || s === "replied" || s === "retrying" || s === "no_answer" || s === "busy"
-    )
-    if (!hasActiveCalls) return
-    const interval = setInterval(() => fetchParticipants(), 10000)
-    return () => clearInterval(interval)
-  }, [callStatusByCandidate, fetchParticipants])
+    if (!jobId) return
+    if (typeof document !== "undefined" && document.hidden) return
+
+    let cancelled = false
+    let debounce: ReturnType<typeof setTimeout> | null = null
+
+    const channel = supabase
+      .channel(`screening-board:${jobId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "phone_screening_participants",
+          filter: `job_id=eq.${jobId}`,
+        },
+        () => {
+          if (cancelled) return
+          // A single webhook can write the row several times in a row; coalesce.
+          if (debounce) clearTimeout(debounce)
+          debounce = setTimeout(() => {
+            if (!cancelled) void fetchParticipants()
+          }, 300)
+        }
+      )
+      .subscribe()
+
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && !cancelled) void fetchParticipants()
+    }
+    document.addEventListener("visibilitychange", onVisible)
+
+    return () => {
+      cancelled = true
+      if (debounce) clearTimeout(debounce)
+      document.removeEventListener("visibilitychange", onVisible)
+      void supabase.removeChannel(channel)
+    }
+  }, [jobId, fetchParticipants])
 
   useEffect(() => {
     if (activeCallSubFilter && activeCallSubFilter !== "all") setCallSubFilter(activeCallSubFilter as CallSubFilter)
