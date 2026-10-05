@@ -161,10 +161,18 @@ export async function POST(request: NextRequest) {
             .from("phone_screening_participants")
             .update({
               ...audit,
-              status: "info_requested",
-              clarification_question: trimmedNote,
-              clarification_asked_at: now,
-              clarification_answered_at: null,
+                  status: "info_requested",
+                  clarification_question: trimmedNote,
+                  clarification_asked_at: now,
+                  clarification_answered_at: null,
+                  // Clear any previous answer so a second clarify does not render
+                  // alongside the first one's answer. screening_context is the
+                  // only safe place for the body — there is no
+                  // `clarification_answer` column.
+                  screening_context: {
+                    ...(participant.screening_context || {}),
+                    clarification_answer: null,
+                  },
               // No `info_step: "clarify"`. "clarify" is not a member of
               // INFO_STEPS, so writing it parked the participant on a step that
               // does not exist: the next reply had no step to extract against and

@@ -15,6 +15,8 @@ export type EventType =
   | "call_missed"
   | "callback_scheduled"
   | "screening_reviewed"
+  | "screening_clarification_asked"
+  | "screening_clarification_answered"
   | "stage_changed"
   | "notes_updated"
   | "interview_scheduled"

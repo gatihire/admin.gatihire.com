@@ -20,6 +20,7 @@ import { scheduleOrPlaceCall } from "@/lib/scheduled-call"
 import { classifyIntent } from "@/lib/ai-intent-classifier"
 import { toE164 } from "@/lib/phone"
 import { appendThreadEntry, recordInboundText, recordOutboundText } from "@/lib/whatsapp-thread"
+import { logCandidateActivity } from "@/lib/activity-logger"
 import crypto from "crypto"
 
 /**
@@ -589,6 +590,76 @@ async function handleTextMessage(participant: any, text: any, replyPhone?: strin
     }
   }
   
+  // 2b. A reply to a recruiter's clarification question.
+  //
+  // This has to be caught here, before intent classification. `clarify` leaves
+  // the participant in `info_requested` with the screening step untouched, so an
+  // answer to the question falls through to classifyIntent, which routes it as a
+  // fresh screening utterance ("interested", "unclear", ...) and discards what
+  // the candidate actually typed. The recruiter asked a specific question and the
+  // answer has to land on that question.
+  if (
+    participant.status === 'info_requested' &&
+    participant.clarification_question &&
+    !participant.clarification_answered_at
+  ) {
+    logger.info('Candidate answered a clarification question', {
+      participantId: participant.id,
+      question: participant.clarification_question,
+      reply: messageBody.substring(0, 160),
+    })
+
+    const answeredAt = new Date().toISOString()
+
+    await supabaseAdmin
+      .from('phone_screening_participants')
+      .update({
+        clarification_answered_at: answeredAt,
+        // Stay in `info_requested`: the answer is in hand but the recruiter has
+        // not reviewed it, and no call is approved yet. Moving to
+        // `needs_review` would drop the thread out of the pre-screen queue the
+        // recruiter is already looking at.
+        //
+        // The answer body goes in screening_context rather than a
+        // `clarification_answer` column: only question/asked_at/answered_at exist
+        // as real columns, and writing an unknown column makes PostgREST reject
+        // the whole update — which would silently drop answered_at too and leave
+        // the recruiter waiting on a reply that was received.
+        screening_context: {
+          ...(participant.screening_context || {}),
+          clarification_answer: messageBody,
+        },
+      })
+      .eq('id', participant.id)
+
+    // Surfaced in the review modal as "Replied" and used to order the queue, so
+    // a recruiter opening the list sees who is waiting on them rather than
+    // having to read every thread to find out.
+    await logCandidateActivity({
+      jobId: participant.job_id || '',
+      candidateId: participant.candidate_id,
+      participantId: participant.id,
+      eventType: 'screening_clarification_answered',
+      eventData: {
+        question: participant.clarification_question,
+        answer: messageBody,
+      },
+    })
+
+    const answerPhone = replyPhone || participant.candidates?.phone
+    if (answerPhone) {
+      // Free text is safe here: we just asked the question, so the 24h service
+      // window is open by definition.
+      await sendAndRecord(
+        participant.id,
+        answerPhone,
+        "Thanks for the details — our team is reviewing this now and will get back to you shortly.",
+        { template: null, event: 'clarification_ack' }
+      )
+    }
+    return
+  }
+
   // 3. AI intent classification for outreach/general messages
   const classification = await classifyIntent(messageBody, {
     candidate_name: participant.candidates?.name || 'Candidate',

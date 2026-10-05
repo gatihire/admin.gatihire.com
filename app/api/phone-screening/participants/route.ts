@@ -20,7 +20,8 @@ export async function GET(request: NextRequest) {
     .from("phone_screening_participants")
     .select(`
       *,
-      candidates: candidate_id (id, name, email, phone, current_role, current_company, total_experience, location, technical_skills)
+      candidates: candidate_id (id, name, email, phone, current_role, current_company, total_experience, location, technical_skills),
+      jobs:job_id (id, title, client_name, city, location, salary_min, salary_max, salary_type, experience_min_years, experience_max_years, skills)
     `)
 
   if (campaignId) {

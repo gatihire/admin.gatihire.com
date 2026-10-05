@@ -251,12 +251,17 @@ function buildReviewCandidate(participant: any, application: Application): Revie
     jobTitle: job.title || null,
     jobSalaryMin: job.salary_min || null,
     jobSalaryMax: job.salary_max || null,
+    jobSalaryType: job.salary_type || null,
     jobExpMin: job.experience_min_years || null,
     jobExpMax: job.experience_max_years || null,
     jobCity: job.city || null,
     infoReceivedAt: participant?.info_received_at || null,
     clarificationQuestion: participant?.clarification_question || null,
     clarificationAskedAt: participant?.clarification_asked_at || null,
+    // Drives the "Replied" badge and un-replied-first queue ordering, so the
+    // recruiter can see who is waiting on them without opening every thread.
+    clarificationAnsweredAt: participant?.clarification_answered_at || null,
+    clarificationAnswer: participant?.screening_context?.clarification_answer || null,
     // The thread itself. The review decision depends on what the candidate
     // actually said, and the extracted fields alone do not show it — a field the
     // model read as `clarify: yes` looks identical to one the candidate meant as
@@ -598,6 +603,23 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
       return CALL_TRUTH_FILTERS.find((f) => f.id === callSubFilter)?.match(t) ?? true
     })
     .sort((a, b) => {
+      // Answered clarifications float to the top of the AI Screen stage.
+      //
+      // Sorting by fit_score only meant a recruiter scanning the queue could not
+      // tell who was waiting on them. The signal already exists (the webhook sets
+      // clarification_answered_at) but nothing in the list surfaced it, so an
+      // answered candidate could sit below an unanswered one indefinitely. Only
+      // applies to ai_screen — reordering the pipeline stages themselves would be
+      // wrong, since applied_at is the correct order for those.
+      if (activeStage === "ai_screen") {
+        const replied = (id: string) => {
+          const p = participantDataByCandidate[id]
+          return p?.clarification_asked_at && p?.clarification_answered_at ? 1 : 0
+        }
+        const diff = replied(b.candidate_id) - replied(a.candidate_id)
+        if (diff !== 0) return diff
+      }
+
       // Sort by fit_score descending (best first), then by applied_at descending
       const scoreA = fitScores[a.candidate_id] ?? -1
       const scoreB = fitScores[b.candidate_id] ?? -1

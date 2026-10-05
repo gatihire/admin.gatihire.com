@@ -12,12 +12,14 @@ import {
   Loader2,
   MessageCircle,
   MessageCircleQuestion,
+  MessageCircleReply,
   ShieldCheck,
   X,
   XCircle,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { useToast } from "@/hooks/use-toast"
+import { formatSalaryRange } from "@/lib/call-orchestrator"
 import { CollectedInfoView, PreScreenVerdict } from "@/components/candidate-collected-info"
 import { WhatsAppConversationModal } from "@/components/whatsapp-conversation-modal"
 import type { InfoSource } from "@/lib/info-provenance"
@@ -51,12 +53,18 @@ export interface ReviewCandidate {
   jobCity?: string
   jobSalaryMin?: number
   jobSalaryMax?: number
+  /** 'annual' | 'monthly' | ... Decides whether the band renders as LPA or rupees. */
+  jobSalaryType?: string | null
   jobExpMin?: number
   jobExpMax?: number
   // Timing
   infoReceivedAt?: string
   clarificationQuestion?: string | null
   clarificationAskedAt?: string | null
+  /** Set when the candidate replies to the question. Null/absent = still waiting. */
+  clarificationAnsweredAt?: string | null
+  /** What they said in reply, from screening_context.clarification_answer. */
+  clarificationAnswer?: string | null
   /** Raw WhatsApp thread, so the reviewer can read and reply without leaving here. */
   whatsappHistory?: unknown
 }
@@ -85,6 +93,38 @@ function formatTimeSince(iso: string | null | undefined): string {
   if (hrs < 24) return `${hrs}h ago`
   const days = Math.floor(hrs / 24)
   return `${days}d ago`
+}
+
+/**
+ * Whether the job row carried any requirements worth showing.
+ *
+ * Every tile below is individually conditional, so without this the section drew
+ * a bordered card with a "Role requirements" heading and nothing under it. That
+ * reads as "this role has no requirements" when it actually means "we have no
+ * requirement data for this job".
+ */
+function hasJobRequirements(c: ReviewCandidate): boolean {
+  return (
+    c.jobSalaryMin != null ||
+    c.jobSalaryMax != null ||
+    c.jobExpMin != null ||
+    c.jobExpMax != null ||
+    !!c.jobCity
+  )
+}
+
+/**
+ * Salary band for display. Delegates to the call orchestrator's formatter so the
+ * review screen and the AI caller's spoken salary band cannot disagree — both
+ * previously showed raw numbers ("500000–800000") against the candidate's "12
+ * LPA".
+ */
+function formatSalaryBand(c: ReviewCandidate): string {
+  return formatSalaryRange({
+    salary_min: c.jobSalaryMin,
+    salary_max: c.jobSalaryMax,
+    salary_type: c.jobSalaryType,
+  }) || `${c.jobSalaryMin}–${c.jobSalaryMax}`
 }
 
 export function PrescreenReviewModal({
@@ -212,10 +252,14 @@ export function PrescreenReviewModal({
   }
 
   const aiSaysReject = candidate.aiSuggestsRejection === true
-  const outstandingQuestion =
-    candidate.clarificationQuestion && !candidate.clarificationAskedAt
-      ? candidate.clarificationQuestion
-      : null
+
+  // Clarification state. `clarificationAnsweredAt` is set by the inbound webhook
+  // when the candidate actually replies, so "waiting" and "replied" are
+  // distinguishable — before this, the recruiter could not tell whether silence
+  // meant "not read it yet" or "replied and we lost the answer".
+  const questionSent = !!candidate.clarificationQuestion && !!candidate.clarificationAskedAt
+  const hasAnswer = !!candidate.clarificationAnsweredAt
+  const awaitingAnswer = questionSent && !hasAnswer
 
   const notesByDecision: Record<Decision, { label: string; placeholder: string; cta: string }> = {
     approved: {
@@ -297,14 +341,46 @@ export function PrescreenReviewModal({
                 </div>
               )}
 
-              {outstandingQuestion && (
-                <div className="flex items-start gap-2 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3">
-                  <MessageCircleQuestion className="h-4 w-4 text-sky-600 mt-0.5 shrink-0" />
-                  <div className="text-sm text-sky-900">
-                    <p className="font-semibold">Question sent, waiting on their reply</p>
-                    <p className="text-sky-700 mt-0.5">{outstandingQuestion}</p>
+              {questionSent && (
+                <div
+                  className={`flex items-start gap-2 rounded-xl border px-4 py-3 ${
+                    hasAnswer ? "border-emerald-200 bg-emerald-50" : "border-sky-200 bg-sky-50"
+                  }`}
+                >
+                  {hasAnswer ? (
+                    <MessageCircleReply className="h-4 w-4 text-emerald-600 mt-0.5 shrink-0" />
+                  ) : (
+                    <MessageCircleQuestion className="h-4 w-4 text-sky-600 mt-0.5 shrink-0" />
+                  )}
+                  <div className={`text-sm min-w-0 ${hasAnswer ? "text-emerald-900" : "text-sky-900"}`}>
+                    <p className="font-semibold">
+                      {hasAnswer ? "They replied" : "Question sent, waiting on their reply"}
+                      {hasAnswer && candidate.clarificationAnsweredAt && (
+                        <span className="font-normal opacity-70">
+                          {" "}· {formatTimeSince(candidate.clarificationAnsweredAt)}
+                        </span>
+                      )}
+                    </p>
+                    <p className={`mt-0.5 break-words ${hasAnswer ? "text-emerald-800" : "text-sky-700"}`}>
+                      <span className="opacity-70">You asked: </span>
+                      {candidate.clarificationQuestion}
+                    </p>
+                    {hasAnswer && (
+                      <p className="mt-2 border-l-2 border-emerald-300 pl-2 break-words">
+                        {candidate.clarificationAnswer || "Reply recorded — see the thread below."}
+                      </p>
+                    )}
                   </div>
                 </div>
+              )}
+
+              {/* While waiting on an answer the decision buttons stay disabled
+                  elsewhere; this states why, instead of leaving the recruiter
+                  guessing whether the buttons are broken. */}
+              {awaitingAnswer && (
+                <p className="text-xs text-sky-700">
+                  Their answer is stored as soon as it arrives. Approve or pass once you have read it.
+                </p>
               )}
 
               {/* Advisory banner: the AI's recommendation is never a decision. */}
@@ -345,7 +421,13 @@ export function PrescreenReviewModal({
                 />
               </div>
 
-              {/* Job requirements */}
+              {/* Job requirements. Rendered only when the job row actually
+                  carries requirements. The fields below are individually
+                  conditional, so with nothing populated this drew a bordered
+                  empty card under a "Role requirements" heading — which read as
+                  "this role has no requirements" rather than "we don't have this
+                  data". */}
+              {hasJobRequirements(candidate) && (
               <div className="rounded-2xl border border-gray-200 bg-white p-4">
                 <div className="flex items-center gap-2 mb-3">
                   <DollarSign className="h-4 w-4 text-gray-400" />
@@ -355,7 +437,7 @@ export function PrescreenReviewModal({
                   {candidate.jobSalaryMin != null && candidate.jobSalaryMax != null && (
                     <div className="rounded-lg border border-gray-100 bg-gray-50 p-2">
                       <p className="text-[10px] text-gray-400 font-medium">Salary band</p>
-                      <p className="text-sm font-semibold text-gray-800">{candidate.jobSalaryMin}–{candidate.jobSalaryMax}</p>
+                      <p className="text-sm font-semibold text-gray-800">{formatSalaryBand(candidate)}</p>
                     </div>
                   )}
                   {candidate.jobExpMin != null && (
@@ -372,6 +454,7 @@ export function PrescreenReviewModal({
                   )}
                 </div>
               </div>
+              )}
             </div>
 
             {/* Footer */}
