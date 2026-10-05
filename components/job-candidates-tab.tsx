@@ -1471,6 +1471,22 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
   const [confirmCallMode, setConfirmCallMode] = useState<"call_now" | "collect_info_first">("call_now")
   const [detailsExpanded, setDetailsExpanded] = useState(false)
 
+  // "Replied and waiting on you".
+  //
+  // The recruiter arrives from the per-job "Replied — Need You" tile, so the
+  // filter has already done the work of narrowing the board. What it cannot do
+  // is tell them *why* this row is here once the list is longer than one screen,
+  // or that the candidate is now idle waiting on them rather than still typing.
+  // The badge is that at-a-glance answer, and it is deliberately louder than the
+  // amber "AI flagged" treatment so the two are never confused: amber means the
+  // bot is unsure, this means the human is the next step.
+  const repliedWaiting = useMemo(() => {
+    if (application.status !== "ai_screen") return false
+    if (callStatus === "replied") return true
+    if (!participant) return false
+    return ["needs_review", "info_review_pending", "clarification_requested"].includes(participant.status)
+  }, [application.status, callStatus, participant?.status])
+
   const nextAction = useMemo(() => getActionForCard(application, callStatus, participant), [application.status, callStatus, participant])
   const callTruth = useMemo(() => getCallTruth(participant), [participant])
   const aiScore = aiInfo?.score
@@ -1546,9 +1562,16 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
     <>
       <Card className={`border shadow-sm hover:shadow-md transition-all duration-200 rounded-2xl overflow-hidden bg-white group ${
         selected ? "ring-2 ring-cyan-300 border-cyan-300" :
+        repliedWaiting ? "ring-2 ring-emerald-400 border-emerald-300" :
         isNew ? "ring-2 ring-amber-300 border-amber-300 bg-amber-50/30" :
         "border-zinc-200 hover:border-zinc-300"
       }`}>
+        {repliedWaiting && (
+          <div className="flex items-center gap-2 bg-emerald-500 px-4 py-1.5 text-[11px] font-semibold text-white">
+            <MessageCircle className="h-3.5 w-3.5 shrink-0" />
+            Replied — waiting on you
+          </div>
+        )}
         <CardContent className="p-0">
           <div className="p-5">
             {/* ── Row 1: Checkbox + Avatar + Name + AI Score ── */}
