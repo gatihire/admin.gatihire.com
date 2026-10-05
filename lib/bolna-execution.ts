@@ -6,6 +6,7 @@ import { scheduleBolnaCall, MAX_CALL_ATTEMPTS } from "@/lib/scheduled-call"
 import { enrichTranscript } from "@/lib/transcript-enrichment"
 import { logCandidateActivity } from "@/lib/activity-logger"
 import { toE164 } from "@/lib/phone"
+import { appendWhatsappHistory } from "@/lib/whatsapp-history"
 import {
   getBolnaExecution,
   findLatestExecutionByPhone,
@@ -445,12 +446,37 @@ async function sendPostCallWhatsApp(participantId: string): Promise<void> {
   if (!candidate?.phone) return
 
   const whatsapp = getWhatsAppService()
-  await whatsapp.sendCallCompleted({
+  const result = await whatsapp.sendCallCompleted({
     phoneNumber: candidate.phone,
     candidateName: candidate.name || "",
     jobTitle: job?.title || "",
     companyName: job?.client_name || "",
   })
+
+  // sendTemplateMessage reports API-level rejections as success:false rather than
+  // throwing, and the result was being discarded. So when the post-call template
+  // was missing or misconfigured, every candidate who finished a call simply got
+  // nothing afterwards and no log said why — the flow looked healthy end to end.
+  // Recorded in the thread so a failed post-call send is visible to a recruiter
+  // instead of being indistinguishable from "we decided not to text them".
+  await appendWhatsappHistory(participantId, {
+    at: new Date().toISOString(),
+    kind: "post_call_message",
+    direction: "out",
+    template: "call_completed",
+    text: "Thanks for completing the screening call.",
+    status: result.success ? "sent" : "failed",
+    messageId: result.messageId ?? null,
+    error: result.success ? null : result.error ?? null,
+  })
+
+  if (!result.success) {
+    logger.error("Post-call WhatsApp failed", {
+      participantId,
+      candidateId: participant.candidate_id,
+      error: result.error,
+    })
+  }
 }
 
 async function enrichTranscriptAsync(
