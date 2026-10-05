@@ -708,9 +708,58 @@ async function sendReplyFallbackPrompt(participant: any) {
   )
 }
 
+// Scheduling gate.
+//
+// A scheduling intent is only honoured when we are the ones who asked. Two
+// conditions, both required:
+//
+//   1. We sent the slot picker and are still waiting on the answer.
+//      Without this the bot can book a call it never offered.
+//   2. Nothing is wrong with the record. If the candidate is on hold for salary
+//      mismatch or is mid-clarification, a recruiter owns the next message and
+//      the AI must not talk over them.
+const HOLD_STATUSES = ["needs_review", "info_review_pending", "info_requested", "clarification_requested"]
+
+function schedulingGate(participant: any): { open: boolean; reason: string } {
+  const ctx = (participant.screening_context || {}) as Record<string, any>
+
+  if (HOLD_STATUSES.includes(participant.status)) {
+    return { open: false, reason: `participant is on hold (${participant.status})` }
+  }
+  if (ctx.awaitingScheduleDecision !== true) {
+    return { open: false, reason: "no outstanding scheduling offer" }
+  }
+  return { open: true, reason: "answered our scheduling offer" }
+}
+
+async function clearSchedulingOffer(participant: any) {
+  const ctx = (participant.screening_context || {}) as Record<string, any>
+  if (ctx.awaitingScheduleDecision !== true) return
+  await supabaseAdmin
+    .from("phone_screening_participants")
+    .update({
+      screening_context: { ...ctx, awaitingScheduleDecision: false, scheduleOfferAt: new Date().toISOString() },
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", participant.id)
+}
+
+// Record that we asked, so the candidate's answer to *our* offer is the only
+// thing that can move us to booking.
+async function markSchedulingOffer(participant: any) {
+  const ctx = (participant.screening_context || {}) as Record<string, any>
+  await supabaseAdmin
+    .from("phone_screening_participants")
+    .update({
+      screening_context: { ...ctx, awaitingScheduleDecision: true, scheduleOfferAt: new Date().toISOString() },
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", participant.id)
+}
+
 async function dispatchIntent(
   participant: any,
-  classification: { intent: string; delay_minutes: number | null },
+  classification: { intent: string; delay_minutes: number | null; confidence?: number },
   replyPhone?: string
 ) {
   // Number to answer. See handleIncomingMessage: when the sender was matched by
@@ -719,20 +768,53 @@ async function dispatchIntent(
   // sender with silence.
   const respondTo = replyPhone || participant.candidates?.phone
   const { intent, delay_minutes } = classification
-  
-  switch (intent) {
-    case 'schedule_call_now': {
+
+  // Gate for anything that commits us to a call.
+  //
+  // There was no record of whether we had ever offered a slot, so `dispatchIntent`
+  // trusted the classifier alone. Because classification is an LLM verdict on
+  // free text, any sufficiently confident guess was enough to place a real call
+  // to a real candidate. Testing with random words reproduced it:
+  //
+  //   inbound  "i want share the job"
+  //   outbound "Great, Bipul Sikder! Let us schedule your screening call for the
+  //            Store Incharge position. Please select a convenient time below."
+  //
+  // Nobody had asked to be scheduled, no call was booked, and the candidate was
+  // told a slot picker was coming. A recruiter would read that as interest the
+  // bot had manufactured. An unaudited classifier must not be able to commit us
+  // to a phone call.
+  if (intent === 'schedule_call_now' || intent === 'schedule_call_later') {
+    const gate = schedulingGate(participant)
+    if (!gate.open) {
+      logger.info("AI: scheduling intent not honoured — no pending offer", {
+        participantId: participant.id,
+        intent,
+        confidence: classification.confidence,
+        reason: gate.reason,
+      })
+      // Say nothing that implies a call is booked. Re-open the offer instead.
+      await sendReplyFallbackPrompt(participant)
+      return
+    }
+    await clearSchedulingOffer(participant)
+
+    if (intent === 'schedule_call_now') {
       logger.info("AI: scheduling immediate call", { participantId: participant.id })
       await scheduleCall(participant, 0)
-      break
-    }
-    
-    case 'schedule_call_later': {
+    } else {
       const delayMs = (delay_minutes || 10) * 60 * 1000
       logger.info("AI: scheduling delayed call", { participantId: participant.id, delayMinutes: delay_minutes })
       await scheduleCall(participant, delayMs)
-      break
     }
+    return
+  }
+
+  switch (intent) {
+    case 'schedule_call_now':
+    case 'schedule_call_later':
+      // Handled above, behind the gate. Unreachable by design.
+      break
     
     case 'interested': {
       logger.info("AI: marking interested", { participantId: participant.id })
@@ -827,17 +909,30 @@ async function dispatchIntent(
         .update({ status: "interested", updated_at: new Date().toISOString() })
         .eq("id", participant.id)
 
-      // Send schedule options if we have their phone
+      // Send schedule options if we have their phone.
+      //
+      // Only once. `interested` fires on any confident positive-sounding reply,
+      // so without the flag a candidate saying "thanks" three times in a row got
+      // three slot pickers queued up.
       if (respondTo) {
-        try {
-          const whatsapp = getWhatsAppService()
-          await whatsapp.sendScheduleOptions({
-            phoneNumber: respondTo,
-            candidateName: participant.candidates?.name || 'Candidate',
-            jobTitle: participant.jobs?.title || 'the role',
+        const ctx = (participant.screening_context || {}) as Record<string, any>
+        if (ctx.awaitingScheduleDecision !== true) {
+          try {
+            const whatsapp = getWhatsAppService()
+            await whatsapp.sendScheduleOptions({
+              phoneNumber: respondTo,
+              candidateName: participant.candidates?.name || 'Candidate',
+              jobTitle: participant.jobs?.title || 'the role',
+            })
+            // Only now is it true that we are expecting a scheduling answer.
+            await markSchedulingOffer(participant)
+          } catch (err: any) {
+            logger.error("Failed to send schedule options", { participantId: participant.id, error: err.message })
+          }
+        } else {
+          logger.info("AI: slot picker already outstanding, not re-sending", {
+            participantId: participant.id,
           })
-        } catch (err: any) {
-          logger.error("Failed to send schedule options", { participantId: participant.id, error: err.message })
         }
       }
       break
