@@ -27,7 +27,7 @@ import { getCallTruth, CALL_TRUTH_FILTERS } from "@/lib/call-truth"
 import { RootCauseAnalytics } from "./root-cause-analytics"
 import {
   Loader2, User, MapPin, Briefcase, Eye, Sparkles, Mail, Phone, ChevronDown, ChevronUp,
-  PhoneCall, PhoneOff, CheckCircle, CheckCheck, Check, Clock, UserX, Play, Save, Filter, MessageCircle, Send,
+  PhoneCall, PhoneOff, CalendarCheck, CheckCircle, CheckCheck, Check, Clock, UserX, Play, Save, Filter, MessageCircle, Send,
   AlertCircle, RefreshCw, BrainCircuit, ShieldCheck, Upload, Download,
 } from "lucide-react"
 import {
@@ -68,6 +68,9 @@ interface Application {
   source?: string
   origin?: string
   match_score?: number
+  // Derived from screening_context; see buildReviewCandidate.
+  interestNeedsApproval?: boolean
+  interestFlaggedAt?: string | null
   candidates: CandidateData
 }
 
@@ -292,6 +295,12 @@ function buildReviewCandidate(participant: any, application: Application): Revie
     jobExpMax: job.experience_max_years || null,
     jobCity: job.city || null,
     infoReceivedAt: participant?.info_received_at || null,
+    // Interest on WhatsApp no longer schedules anything (the AI records it and
+    // stops). This is what puts the recruiter's decision back in front of them
+    // instead of leaving the candidate waiting on a queue nobody was shown.
+    interestNeedsApproval:
+      participant?.screening_context?.interestNeedsApproval === true,
+    interestFlaggedAt: participant?.screening_context?.interestFlaggedAt || null,
     clarificationQuestion: participant?.clarification_question || null,
     clarificationAskedAt: participant?.clarification_asked_at || null,
     // Drives the "Replied" badge and un-replied-first queue ordering, so the
@@ -308,6 +317,20 @@ function buildReviewCandidate(participant: any, application: Application): Revie
 }
 
 function getActionForCard(application: Application, callStatus?: string, participant?: any): { label: string; cta: string; icon: any; color: string; action: string | null } | null {
+  // "Candidate said they're interested" is the one thing on this board that only
+  // a person can unblock, so it outranks the status-derived action below. The
+  // candidate has already been told we're passing it to the team; until someone
+  // acts on that they are waiting on us and nothing else will move.
+  if (application.status === "ai_screen" && application.interestNeedsApproval) {
+    return {
+      label: "Candidate said they're interested — no call scheduled yet. Approve to send a slot picker, or just reply.",
+      cta: "Approve to Schedule",
+      icon: CalendarCheck,
+      color: "bg-emerald-50 border-emerald-200 text-emerald-800",
+      action: "offer_schedule",
+    }
+  }
+
   // If there's an active call sub-status, use that for more specific action
   if (application.status === "ai_screen" && callStatus) {
     // DONE
@@ -1546,6 +1569,45 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
     finally { onNudgeEnd?.() }
   }
 
+  const [offeringSlot, setOfferingSlot] = useState(false)
+
+  /**
+   * Send the slot picker on the recruiter's authority.
+   *
+   * Deliberately not routed through onCallNow. That places a call; this sends
+   * the candidate a choice of times, and the call happens only if they pick one.
+   * They are different commitments and the UI must not blur them — the whole
+   * point of the eligibility gate is that scheduling is never implicit.
+   */
+  const offerScheduleSlot = async () => {
+    const participantId = participant?.id
+    if (!participantId || offeringSlot) return
+    setOfferingSlot(true)
+    try {
+      const res = await fetch(`/api/phone-screening/participants/${participantId}/offer-schedule`, {
+        method: "POST",
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        toast({
+          title: "Couldn't send the slot picker",
+          description: data.error || "Please try again.",
+          variant: "destructive",
+        })
+        return
+      }
+      toast({
+        title: "Slot picker sent",
+        description: "The candidate can now choose a time. No call is booked until they pick one.",
+      })
+      onRefreshParticipants?.()
+    } catch (err: any) {
+      toast({ title: "Couldn't send the slot picker", description: err?.message, variant: "destructive" })
+    } finally {
+      setOfferingSlot(false)
+    }
+  }
+
   const handleNextAction = () => {
     if (!nextAction) return
     if (nextAction.action === "view_profile") onViewProfile(c, application, participant, aiInfo, fitScore)
@@ -1556,6 +1618,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
     else if (nextAction.action === "retry_now") onCallNow?.()
     else if (nextAction.action === "manual_followup") toast({ title: "Manual follow-up required", description: "Please contact the candidate directly" })
     else if (nextAction.action === "review_info") onReviewInfo?.()
+    else if (nextAction.action === "offer_schedule") void offerScheduleSlot()
   }
 
   return (
@@ -1569,7 +1632,9 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
         {repliedWaiting && (
           <div className="flex items-center gap-2 bg-emerald-500 px-4 py-1.5 text-[11px] font-semibold text-white">
             <MessageCircle className="h-3.5 w-3.5 shrink-0" />
-            Replied — waiting on you
+            {application.interestNeedsApproval
+              ? "Said they're interested — your call whether to offer a slot"
+              : "Replied — waiting on you"}
           </div>
         )}
         <CardContent className="p-0">

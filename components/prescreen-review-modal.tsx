@@ -35,6 +35,10 @@ export interface ReviewCandidate {
   // Raw collected info + where each field came from. The modal shows these
   // rather than a reconstructed message, so a value from the apply form is never
   // presented as something the candidate said on WhatsApp.
+  // Candidate said they're interested on WhatsApp. The AI recorded it and sent
+  // nothing further, so this is an open decision rather than a detail.
+  interestNeedsApproval?: boolean
+  interestFlaggedAt?: string | null
   infoData?: Record<string, unknown> | null
   infoSources?: Record<string, unknown> | null
   resumeFallback?: Record<string, unknown> | null
