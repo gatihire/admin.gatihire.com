@@ -128,7 +128,14 @@ export async function POST(request: NextRequest) {
           // Ask, then wait. Deliberately does NOT book a call and does NOT set a
           // terminal status: the candidate has not been screened yet, so calling
           // them would contradict the question we just sent.
-          const question = `${candidate?.name ? `Hi ${candidate.name}, ` : ""}one quick thing before we call you:\n\n${trimmedNote}\n\nReply here and we'll take it from there.`
+          //
+          // The wording used to open "one quick thing before we call you:". On
+          // this branch no call is approved — that is the entire reason the
+          // candidate is in front of a recruiter. So the message told the
+          // candidate a call was imminent that nobody had authorised, and then
+          // went quiet while they waited for it.
+          const firstName = (candidate?.name || "").split(" ")[0]
+          const question = `${firstName ? `Hi ${firstName}, ` : ""}one quick question about your application:\n\n${trimmedNote}\n\nReply here and we'll take it from there.`
 
           // Free text rather than a template: the whole point of clarifying is to
           // ask something specific that no pre-approved template can anticipate.
@@ -158,7 +165,13 @@ export async function POST(request: NextRequest) {
               clarification_question: trimmedNote,
               clarification_asked_at: now,
               clarification_answered_at: null,
-              info_step: "clarify",
+              // No `info_step: "clarify"`. "clarify" is not a member of
+              // INFO_STEPS, so writing it parked the participant on a step that
+              // does not exist: the next reply had no step to extract against and
+              // the answer was stored in info_data under a literal `clarify` key,
+              // which then surfaced in the candidate-facing summary as
+              // "• clarify: yes". The clarification state already has real columns
+              // and lives in screening_context; the screening step is untouched.
             })
             .eq("id", participantId)
 

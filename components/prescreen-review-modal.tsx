@@ -1,14 +1,16 @@
 "use client"
 
-import { useState } from "react"
+import { useCallback, useState } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import {
   AlertTriangle,
+  Bell,
   CheckCircle2,
   Clock,
   DollarSign,
   HelpCircle,
   Loader2,
+  MessageCircle,
   MessageCircleQuestion,
   ShieldCheck,
   X,
@@ -17,6 +19,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { useToast } from "@/hooks/use-toast"
 import { CollectedInfoView, PreScreenVerdict } from "@/components/candidate-collected-info"
+import { WhatsAppConversationModal } from "@/components/whatsapp-conversation-modal"
 import type { InfoSource } from "@/lib/info-provenance"
 
 export interface ReviewCandidate {
@@ -54,6 +57,8 @@ export interface ReviewCandidate {
   infoReceivedAt?: string
   clarificationQuestion?: string | null
   clarificationAskedAt?: string | null
+  /** Raw WhatsApp thread, so the reviewer can read and reply without leaving here. */
+  whatsappHistory?: unknown
 }
 
 type Decision = "approved" | "rejected" | "clarify"
@@ -96,6 +101,34 @@ export function PrescreenReviewModal({
   const [loading, setLoading] = useState(false)
   const [decision, setDecision] = useState<Decision | null>(null)
   const [note, setNote] = useState("")
+  // The thread opens from inside the review modal so "chat manually" is a real
+  // conversation rather than a separate screen. A recruiter deciding whether to
+  // spend a call slot routinely needs to read what the candidate actually said
+  // first, and that text was previously only visible by hunting for the row.
+  const [showThread, setShowThread] = useState(false)
+  const [nudging, setNudging] = useState(false)
+  // The parent's copy of the thread is a snapshot taken when the queue was built,
+  // so it does not contain anything sent from inside this modal. The thread is
+  // re-read from the participant row on open and after each send, which is what
+  // makes the conversation continue instead of resetting.
+  const [threadHistory, setThreadHistory] = useState<unknown>(null)
+
+  const refreshThread = useCallback(async () => {
+    if (!candidate?.participantId) return
+    try {
+      const res = await fetch(`/api/phone-screening/participants/${candidate.participantId}`)
+      const json = await res.json()
+      if (res.ok && json) setThreadHistory(json.whatsapp_history ?? null)
+    } catch {
+      // Non-fatal: the composer keeps whatever history it already had.
+    }
+  }, [candidate?.participantId])
+
+  const openThread = useCallback(() => {
+    setThreadHistory(candidate?.whatsappHistory ?? null)
+    setShowThread(true)
+    void refreshThread()
+  }, [candidate?.whatsappHistory, refreshThread])
 
   if (!candidate) return null
 
@@ -126,10 +159,10 @@ export function PrescreenReviewModal({
       if (failed?.error) throw new Error(failed.error)
 
       toast({
-        title: d === "approved" ? "Moved to call" : d === "rejected" ? "Candidate passed" : "Question sent",
+        title: d === "approved" ? "Approved for call" : d === "rejected" ? "Candidate passed" : "Question sent",
         description:
           d === "approved"
-            ? "Schedule link sent and a call is booked"
+            ? "Screening call booked. The candidate gets a confirmation."
             : d === "rejected"
               ? "Candidate notified. Your reason is on the record."
               : "Waiting for their reply — no call booked yet",
@@ -145,6 +178,39 @@ export function PrescreenReviewModal({
     }
   }
 
+  /**
+   * Send the call nudge without deciding anything.
+   *
+   * The three review actions are all terminal or semi-terminal — approving books a
+   * call, passing ends it, and asking a question commits to waiting on a reply. A
+   * recruiter who wants to simply prompt someone again had no way to do it from
+   * here, so the only option was to close the modal and go hunting. This is
+   * deliberately non-committal: it prompts, it does not approve, and the row stays
+   * in the review queue.
+   */
+  const sendCallNudge = async () => {
+    if (nudging) return
+    setNudging(true)
+    try {
+      const res = await fetch(
+        `/api/phone-screening/participants/${candidate.participantId}/send-call-nudge`,
+        { method: "POST" }
+      )
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data?.error || `Could not send (HTTP ${res.status})`)
+
+      toast({
+        title: "Nudge sent",
+        description: `We reminded ${candidate.name} to respond. No decision was recorded.`,
+      })
+      onReviewed()
+    } catch (err: any) {
+      toast({ title: "Could not send the nudge", description: err.message, variant: "destructive" })
+    } finally {
+      setNudging(false)
+    }
+  }
+
   const aiSaysReject = candidate.aiSuggestsRejection === true
   const outstandingQuestion =
     candidate.clarificationQuestion && !candidate.clarificationAskedAt
@@ -155,7 +221,13 @@ export function PrescreenReviewModal({
     approved: {
       label: "Note (optional)",
       placeholder: "e.g. Confirmed the CTC expectation is workable",
-      cta: "Confirm — send schedule link & book call",
+      // Was "Confirm — send schedule link & book call". Two things were wrong
+      // with that. The schedule link is never sent on this path: approve() calls
+      // scheduleBolnaCall and books the screening call directly, so the button
+      // promised a link the candidate never received. And it described the
+      // outcome in terms the recruiter does not choose — they approve a person
+      // for a call, they do not pick a booking method.
+      cta: "Approve — book the screening call",
     },
     rejected: {
       label: "Reason for passing (required)",
@@ -306,6 +378,34 @@ export function PrescreenReviewModal({
             <div className="sticky bottom-0 border-t border-gray-100 bg-white px-6 py-4 space-y-3">
               {!decision ? (
                 <>
+                  {/* Read and reply without leaving the queue. The thread is the
+                      first thing a recruiter needs: the decision here depends on
+                      what the candidate actually said, not on the extracted
+                      fields alone. */}
+                  <div className="flex items-center gap-2">
+                    <Button
+                      onClick={openThread}
+                      variant="outline"
+                      className="flex-1 h-10 border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+                    >
+                      <MessageCircle className="h-4 w-4 mr-2" />
+                      Open WhatsApp chat
+                    </Button>
+                    <Button
+                      onClick={() => void sendCallNudge()}
+                      disabled={nudging}
+                      variant="outline"
+                      className="flex-1 h-10 border-amber-200 text-amber-700 hover:bg-amber-50"
+                    >
+                      {nudging ? (
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      ) : (
+                        <Bell className="h-4 w-4 mr-2" />
+                      )}
+                      Send call nudge
+                    </Button>
+                  </div>
+
                   <div className="flex items-center gap-3">
                     <Button
                       onClick={() => setDecision("approved")}
@@ -313,7 +413,7 @@ export function PrescreenReviewModal({
                       className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white h-11"
                     >
                       <CheckCircle2 className="h-4 w-4 mr-2" />
-                      Proceed to call
+                      Approve for call
                     </Button>
                     <Button
                       onClick={() => setDecision("clarify")}
@@ -333,7 +433,8 @@ export function PrescreenReviewModal({
                     </Button>
                   </div>
                   <p className="text-[11px] text-gray-400 text-center">
-                    Nothing is sent to the candidate until you choose.
+                    The candidate has already been told we&apos;re reviewing them. Nothing else is
+                    sent until you choose.
                   </p>
                 </>
               ) : (
@@ -385,6 +486,19 @@ export function PrescreenReviewModal({
                 </div>
               )}
             </div>
+            {showThread && (
+              <WhatsAppConversationModal
+                history={threadHistory}
+                candidateName={candidate.name}
+                participantId={candidate.participantId}
+                onSent={() => {
+                  void refreshThread()
+                  onReviewed()
+                }}
+                open={showThread}
+                onOpenChange={setShowThread}
+              />
+            )}
           </motion.div>
         </motion.div>
       )}

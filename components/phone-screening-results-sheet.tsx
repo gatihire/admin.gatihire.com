@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useCallback } from "react"
 import { Button } from "@/components/ui/button"
 import {
   Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle,
@@ -237,6 +237,17 @@ export function PhoneScreeningResultsSheet({
   const audioRef = useRef<HTMLAudioElement>(null)
   const { toast } = useToast()
 
+  // Extracted so a message sent from the WhatsApp composer can refresh the row
+  // in place. Without this the thread only updates when the sheet is reopened,
+  // so a recruiter who had just typed a reply could not see whether it landed.
+  const loadParticipant = useCallback(() => {
+    if (!participantId) return
+    return fetch(`/api/phone-screening/participants/${participantId}`)
+      .then((res) => res.json())
+      .then((json) => setData(json))
+      .catch(() => setData(null))
+  }, [participantId])
+
   useEffect(() => {
     if (!open || !participantId) return
     setLoading(true)
@@ -246,12 +257,8 @@ export function PhoneScreeningResultsSheet({
     setAudioProgress(0)
     setAudioError(false)
 
-    fetch(`/api/phone-screening/participants/${participantId}`)
-      .then((res) => res.json())
-      .then((json) => setData(json))
-      .catch(() => setData(null))
-      .finally(() => setLoading(false))
-  }, [open, participantId])
+    loadParticipant()?.finally(() => setLoading(false))
+  }, [open, participantId, loadParticipant])
 
   useEffect(() => {
     const audio = audioRef.current
@@ -876,6 +883,8 @@ export function PhoneScreeningResultsSheet({
                   <WhatsAppConversationModal
                     history={data.whatsapp_history}
                     candidateName={data.candidates?.name}
+                    participantId={data.id}
+                    onSent={() => void loadParticipant()}
                     open={showWhatsAppThread}
                     onOpenChange={setShowWhatsAppThread}
                   />

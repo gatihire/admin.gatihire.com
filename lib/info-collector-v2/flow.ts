@@ -3,12 +3,14 @@ import { logger } from '@/lib/logger';
 import { mergeSources, stampSources } from '@/lib/info-provenance';
 import { getWhatsAppService } from '@/lib/whatsapp';
 import { scheduleOrPlaceCall } from '@/lib/scheduled-call';
+import { getPublicJobUrl } from '@/lib/call-orchestrator';
 import { appendWhatsappHistory, buttonLabel } from '@/lib/whatsapp-history';
-import { 
-  INFO_STEPS, 
-  STEP_KEYS, 
-  REQUIRED_STEPS, 
-  getStep, 
+import {
+  INFO_STEPS,
+  STEP_KEYS,
+  REQUIRED_STEPS,
+  InfoStepKey,
+  getStep,
   getNextStep, 
   isFirstStep, 
   isLastStep,
@@ -82,6 +84,61 @@ async function getParticipantWithExtras(participantId: string): Promise<Particip
     job_title: data.jobs?.title || '',
     company_name: data.jobs?.client_name || '',
   } as any;
+}
+
+type OffTopicReply = 'greeting' | 'more_info';
+
+/**
+ * Classify a reply that is clearly not an attempt to answer the current field.
+ *
+ * The extractor is instructed to return is_valid:false when a reply is "unclear
+ * or irrelevant", which is right for noise but wrong for ordinary conversation.
+ * In a live run a candidate said "Hello" and "I want another info", and both were
+ * scored as failed answers to an unrelated CTC question — the candidate was told
+ * their own words "do not contain the requested information" for a field they
+ * never declined to fill in.
+ *
+ * Deliberately conservative: short replies only, and never on a step whose own
+ * answer could legitimately look like one of these. A real "yes" must still reach
+ * the extractor.
+ */
+function classifyOffTopicReply(text: string, stepKey: string): OffTopicReply | null {
+  const t = text.trim().toLowerCase().replace(/[!?.,]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t || t.length > 40) return null;
+
+  // A greeting is never a field value, on any step. "Hello" cannot be a current
+  // CTC, so this check is safe everywhere — and it has to be, because the live
+  // failure was exactly this: "Hello" arriving while we were asking for
+  // current_ctc. Guarding greetings behind a value-step exclusion left the
+  // original bug in place.
+  if (/^(hi|hey|hello|hiya|heyya|namaste|namaskar|good morning|good afternoon|good evening)\b/.test(t)) {
+    return 'greeting';
+  }
+
+  // On a value step, a reply that actually looks like a value is never
+  // intercepted — "9 LPA", "my CTC is 9 lakhs" and "salary negotiable?" must all
+  // reach the extractor.
+  //
+  // The discriminator is whether the reply looks like a value at all, NOT the step
+  // we happen to be on. Blanket-blocking every value step would have left the
+  // original bug in place: the live candidate said "I want another info" while we
+  // were asking for current_ctc, and that reply contains no figure, so it was
+  // never an answer to the question we asked.
+  const VALUE_STEPS = new Set(['current_ctc', 'expected_ctc', 'total_experience', 'notice_period']);
+  if (VALUE_STEPS.has(stepKey)) {
+    const looksLikeAValue = /\d|\b(lpa|lakh|lakhs|lac|crore|k\b|monthly|annual|ctc|salary|pay)\b/i.test(t);
+    if (looksLikeAValue) return null;
+  }
+
+  // A yes/no step must be able to accept a bare "yes" or "no".
+  const step = getStep(stepKey as InfoStepKey);
+  if (step?.helpText && /\byes\b|\bno\b/i.test(step.helpText)) return null;
+
+  if (/\b(more info|more information|more details|tell me more|another info|other info|details about (the )?(job|role|company)|about the (job|role|company))\b/.test(t)) {
+    return 'more_info';
+  }
+
+  return null;
 }
 
 /**
@@ -338,6 +395,54 @@ async function handleStepByStepReply(participantId: string, replyText: string): 
       }
     }
     
+    // Not every reply is an attempt to answer the field we're on. Handle greetings
+    // and "tell me more about the role" as the human exchange they are, then
+    // re-ask the current question — without scoring them as wrong and without
+    // printing a rejection.
+    const offTopic = classifyOffTopicReply(replyText, currentStepKey);
+    if (offTopic) {
+      const refreshedOffTopic = await getParticipantWithExtras(participantId);
+      if (!refreshedOffTopic) {
+        return { success: false, action: 'next_step' };
+      }
+
+      const firstName = (refreshedOffTopic.candidate_name || '').split(' ')[0];
+
+      if (offTopic === 'more_info') {
+        const jobUrl = refreshedOffTopic.jobs?.id ? getPublicJobUrl(refreshedOffTopic.jobs.id) : '';
+        await sendSessionMessage(
+          refreshedOffTopic.phone_number,
+          jobUrl
+            ? `Of course — here's the full role description${refreshedOffTopic.company_name ? ` for ${refreshedOffTopic.company_name}` : ''}:\n\n${jobUrl}\n\nHave a look, and we'll carry on with the next detail after.`
+            : `Happy to share more about the role. Tell me what you'd like to know and we'll carry on with the next detail after.`
+        );
+      } else {
+        await sendSessionMessage(
+          refreshedOffTopic.phone_number,
+          `Hi ${firstName || 'there'}! How can I help?`
+        );
+      }
+
+      await sendStepQuestion(
+        refreshedOffTopic,
+        currentStepKey,
+        participant.job_title,
+        participant.company_name
+      );
+
+      await appendWhatsappHistory(participantId, {
+        at: new Date().toISOString(),
+        kind: 'info_offtopic_reply',
+        direction: 'internal',
+        text: `Candidate sent "${replyText.trim().slice(0, 120)}" while we were asking for ${currentStepKey}. Answered in-conversation and re-asked.`,
+        status: 'sent',
+        stepKey: currentStepKey,
+        classifiedAs: offTopic,
+      });
+
+      return { success: true, action: 'next_step' };
+    }
+
     // Extract value using LLM + regex fallback (original single-field logic)
     const step = getStep(currentStepKey);
     const question = getStepQuestion(currentStepKey, participant.candidate_name, participant.job_title, participant.company_name);
@@ -345,18 +450,46 @@ async function handleStepByStepReply(participantId: string, replyText: string): 
     const extraction = await extractStepValue(currentStepKey, replyText, question, participant.info_data || {});
     
     if (!extraction.is_valid) {
-      // Invalid response - show error and re-ask
-      const errorMsg = extraction.error_message || getValidationError(currentStepKey);
+      // Re-ask ONCE, in a single message, with wording we control.
+      //
+      // Two defects lived here:
+      //
+      // 1. It sent the question, then sent a SECOND message containing the error
+      //    plus the question again — so any reply Gemini couldn't parse produced
+      //    a duplicate of the same question, back to back.
+      // 2. The error text was `extraction.error_message`, which the extractor
+      //    prompt explicitly asks Gemini to write ("user-friendly error if
+      //    invalid"). That meant the model scolded candidates in its own voice
+      //    and quoted their reply back at them: "❌ The reply 'Hello' does not
+      //    contain the requested information." A candidate saying "hello" or
+      //    "I want more info" got told they had failed a field they never
+      //    refused to fill in. getValidationError() is curated per field and
+      //    always shows the format we want, so we send that instead.
+      const refreshedInvalid = await getParticipantWithExtras(participantId);
+      if (!refreshedInvalid) {
+        return { success: false, action: 'next_step' };
+      }
+
       await sendStepQuestion(
-        await getParticipantWithExtras(participantId) as any,
+        refreshedInvalid,
         currentStepKey,
         participant.job_title,
-        participant.company_name
+        participant.company_name,
+        { prefix: getValidationError(currentStepKey) }
       );
-      
-      // Also send error message
-      await sendSessionMessage(participant.phone_number, `❌ ${extraction.error_message || 'Invalid input. Please try again.'}\n\n${getStepQuestion(currentStepKey, participant.candidate_name, participant.job_title, participant.company_name)}`);
-      
+
+      // Recorded as an internal event so a recruiter can see why we re-asked
+      // instead of inferring it from a duplicate bubble.
+      await appendWhatsappHistory(participantId, {
+        at: new Date().toISOString(),
+        kind: 'info_reask',
+        direction: 'internal',
+        text: `Could not read "${currentStepKey}" from the reply — re-asked once with a format hint.`,
+        status: 'sent',
+        stepKey: currentStepKey,
+        modelError: extraction.error_message || null,
+      });
+
       return { success: true, action: 'next_step' };
     }
     

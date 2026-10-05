@@ -257,6 +257,12 @@ function buildReviewCandidate(participant: any, application: Application): Revie
     infoReceivedAt: participant?.info_received_at || null,
     clarificationQuestion: participant?.clarification_question || null,
     clarificationAskedAt: participant?.clarification_asked_at || null,
+    // The thread itself. The review decision depends on what the candidate
+    // actually said, and the extracted fields alone do not show it — a field the
+    // model read as `clarify: yes` looks identical to one the candidate meant as
+    // their CTC. Reading the raw thread from here keeps that judgement with the
+    // person who has to make it.
+    whatsappHistory: participant?.whatsapp_history || null,
   }
 }
 
@@ -1320,6 +1326,10 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
           open={!!reviewCandidate}
           onClose={() => setReviewCandidate(null)}
           onReviewed={() => { fetchParticipants(); onRefresh() }}
+          // A message sent from inside the modal changes the participant row, so
+          // the object held in reviewCandidate is stale. Rebuild it from the
+          // refetched participant, or the thread the recruiter just replied in
+          // would keep showing the pre-reply history until the queue was reopened.
           totalCount={reviewList.length}
           currentIndex={reviewIndex}
           onNext={() => { const next = reviewIndex + 1; if (next < reviewList.length) { setReviewIndex(next); setReviewCandidate(reviewList[next]) } }}

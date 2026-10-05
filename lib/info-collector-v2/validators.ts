@@ -174,9 +174,15 @@ export function formatConfirmation(infoData: Record<string, any>): string {
     reason_for_switching: 'Reason for Switching',
   };
   
-  for (const [key, value] of Object.entries(infoData)) {
+  // Iterate the display map, NOT the incoming object. This summary is sent to the
+  // candidate verbatim, and info_data also carries internal bookkeeping keys
+  // (flow_token, clarify, extraction flags). Rendering every key with a
+  // `displayMap[key] || key` fallback printed those internals to the candidate —
+  // "• flow_token: 49898af8-…" in a message the candidate is meant to read as a
+  // summary of themselves. Only explicitly labelled fields may ever render.
+  for (const [key, label] of Object.entries(displayMap)) {
+    const value = infoData[key];
     if (value !== undefined && value !== null && value !== '') {
-      const label = displayMap[key] || key;
       lines.push(`• ${label}: ${value}`);
     }
   }

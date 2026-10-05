@@ -134,11 +134,18 @@ async function sendStepQuestion(
   participant: ParticipantInfo,
   stepKey: string,
   jobTitle: string,
-  companyName: string
+  companyName: string,
+  options?: { prefix?: string }
 ): Promise<{ success: boolean; messageId?: string; error?: string }> {
   const question = getStepQuestion(stepKey as InfoStepKey, participant.candidate_name, jobTitle, companyName);
   const step = getStep(stepKey as InfoStepKey);
-  const text = `${question}\n\n💡 ${step?.helpText || ''}`;
+  // The prefix lets a re-ask carry a gentle nudge ("not quite — try this format")
+  // in the SAME message as the question. Previously callers sent the question and
+  // then a second message repeating the question, so the candidate got two copies.
+  const prefix = options?.prefix?.trim();
+  const text = prefix
+    ? `${prefix}\n\n${question}\n\n💡 ${step?.helpText || ''}`
+    : `${question}\n\n💡 ${step?.helpText || ''}`;
   
   const result = await sendSessionMessage(participant.phone_number, text);
   
@@ -219,9 +226,12 @@ function formatConfirmation(infoData: Record<string, any>): string {
     reason_for_switching: 'Reason for Switching',
   };
   
-  for (const [key, value] of Object.entries(infoData)) {
+  // Whitelist-driven, same reason as validators.formatConfirmation: info_data
+  // contains internal keys (flow_token, clarify) and this text goes to the
+  // candidate verbatim. See that function for the full note.
+  for (const [key, label] of Object.entries(displayMap)) {
+    const value = infoData[key];
     if (value !== undefined && value !== null && value !== '') {
-      const label = displayMap[key] || key;
       lines.push(`• ${label}: ${value}`);
     }
   }

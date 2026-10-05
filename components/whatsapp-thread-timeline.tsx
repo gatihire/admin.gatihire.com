@@ -51,9 +51,13 @@ function summarise(entries: ThreadEntry[]): string {
 export function WhatsAppThreadTimeline({
   history,
   candidateName,
+  participantId,
+  onSent,
 }: {
   history: unknown
   candidateName?: string | null
+  participantId?: string | null
+  onSent?: () => void
 }) {
   const [open, setOpen] = useState(false)
   const entries = parseEntries(history)
@@ -109,6 +113,8 @@ export function WhatsAppThreadTimeline({
         <WhatsAppConversationModal
           history={history}
           candidateName={candidateName}
+          participantId={participantId}
+          onSent={onSent}
           open={open}
           onOpenChange={setOpen}
         />

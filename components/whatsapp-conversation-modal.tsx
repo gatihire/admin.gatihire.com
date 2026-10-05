@@ -202,6 +202,13 @@ function buildConversation(entries: ThreadEntry[]): Rendered[] {
 }
 
 function Ticks({ status }: { status?: string | null }) {
+  if (status === "sending") {
+    return (
+      <span className="inline-flex items-center gap-0.5 text-zinc-400" title="Sending…">
+        <Clock className="h-3 w-3" />
+      </span>
+    )
+  }
   if (status === "failed") {
     return (
       <span className="inline-flex items-center gap-0.5 text-red-500" title="Failed">
@@ -290,11 +297,17 @@ function Bubble({ item }: { item: Rendered }) {
 export function WhatsAppConversationModal({
   history,
   candidateName,
+  participantId,
+  onSent,
   open,
   onOpenChange,
 }: {
   history: unknown
   candidateName?: string | null
+  /** Enables the composer. Omit for a genuinely read-only view. */
+  participantId?: string | null
+  /** Called after a message is accepted, so the parent can refetch the row. */
+  onSent?: () => void
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
@@ -302,13 +315,84 @@ export function WhatsAppConversationModal({
   const scrollRef = useRef<HTMLDivElement>(null)
   const [showSystem, setShowSystem] = useState(true)
 
-  const visible = useMemo(
-    () => (showSystem ? conversation : conversation.filter((c) => c.direction !== "system")),
-    [conversation, showSystem]
+  // Outbound composer. The thread used to be strictly read-only — its footer
+  // said so — which meant the one moment a recruiter most needs to speak is the
+  // moment they could not: after the pre-screen held a candidate and before a
+  // decision was made. The only recruiter-authored message was `clarify`, which
+  // could ask one question and then misfiled the answer as a screening field.
+  const [draft, setDraft] = useState("")
+  const [sending, setSending] = useState(false)
+  const [sendError, setSendError] = useState<string | null>(null)
+  // Messages sent in this session, shown immediately rather than after a refetch.
+  const [pending, setPending] = useState<Rendered[]>([])
+
+  const canSend = !!participantId
+
+  useEffect(() => {
+    if (!open) return
+    // Clear transient composer state when the thread is reopened for someone else.
+    setDraft("")
+    setSendError(null)
+    setPending([])
+  }, [open, participantId])
+
+  async function send() {
+    const text = draft.trim()
+    if (!text || !participantId || sending) return
+
+    setSending(true)
+    setSendError(null)
+    // Optimistic bubble, keyed by the local clock so ordering stays stable. If
+    // the send fails it is replaced by the real failed entry from the refetch.
+    const optimistic: Rendered = {
+      id: `pending-${Date.now()}`,
+      direction: "out",
+      text,
+      at: new Date(),
+      status: "sending",
+      kind: "hr_manual_message",
+      reconstructed: false,
+    }
+    setPending((prev) => [...prev, optimistic])
+    setDraft("")
+
+    try {
+      const res = await fetch(`/api/phone-screening/participants/${participantId}/send-message`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      })
+      const data = await res.json().catch(() => ({}))
+
+      if (!res.ok) {
+        setDraft(text)
+        setSendError(data?.error || `Could not send (HTTP ${res.status})`)
+        setPending((prev) => prev.filter((p) => p.id !== optimistic.id))
+        return
+      }
+
+      onSent?.()
+    } catch (err: any) {
+      setDraft(text)
+      setSendError(err?.message || "Network error — message not sent")
+      setPending((prev) => prev.filter((p) => p.id !== optimistic.id))
+    } finally {
+      setSending(false)
+    }
+  }
+
+  const withPending = useMemo(
+    () => [...conversation, ...pending].sort((a, b) => (a.at?.getTime() || 0) - (b.at?.getTime() || 0)),
+    [conversation, pending]
   )
 
-  const unread = conversation.some((c) => c.direction === "in")
-  const systemCount = conversation.filter((c) => c.direction === "system").length
+  const visible = useMemo(
+    () => (showSystem ? withPending : withPending.filter((c) => c.direction !== "system")),
+    [withPending, showSystem]
+  )
+
+  const unread = withPending.some((c) => c.direction === "in")
+  const systemCount = withPending.filter((c) => c.direction === "system").length
 
   useEffect(() => {
     if (!open) return
@@ -328,7 +412,11 @@ export function WhatsAppConversationModal({
     return () => window.removeEventListener("keydown", onKey)
   }, [open, onOpenChange])
 
-  if (conversation.length === 0) return null
+  // An empty thread used to mean "render nothing", which also meant a recruiter
+  // could never open a conversation to start one. That is precisely the dead end
+  // this composer exists to remove, so an empty history is fine as long as we
+  // know who we are talking to.
+  if (withPending.length === 0 && !canSend) return null
 
   // Group by calendar day so long threads stay readable.
   let lastDay = ""
@@ -352,7 +440,7 @@ export function WhatsAppConversationModal({
               {candidateName || "Candidate"}
             </p>
             <p className="text-[11px] text-zinc-500">
-              {conversation.length} entries
+              {withPending.length} entries
               {systemCount > 0 && (
                 <button
                   type="button"
@@ -404,10 +492,51 @@ export function WhatsAppConversationModal({
           })}
         </div>
 
-        <footer className="border-t border-zinc-200 bg-zinc-50 px-4 py-2 text-[10px] leading-relaxed text-zinc-500">
-          Read-only. Delivery receipts are folded into the message they belong to; rows
-          marked “log only” predate message-body recording, so only the event is known.
-        </footer>
+        {canSend ? (
+          <div className="border-t border-zinc-200 bg-white px-3 py-2">
+            {sendError && (
+              <p className="mb-1.5 flex items-start gap-1 rounded-md bg-red-50 px-2 py-1 text-[11px] font-medium text-red-700">
+                <AlertCircle className="mt-px h-3 w-3 shrink-0" />
+                <span>{sendError}</span>
+              </p>
+            )}
+            <div className="flex items-end gap-2">
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  // Enter sends; Shift+Enter is a newline. Recruiters write
+                  // multi-line notes here, so a bare Enter must not eat them.
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault()
+                    void send()
+                  }
+                }}
+                rows={2}
+                maxLength={4096}
+                placeholder="Message the candidate…"
+                className="min-h-[38px] flex-1 resize-none rounded-lg border border-zinc-300 px-2.5 py-2 text-[12px] leading-relaxed text-zinc-800 outline-none placeholder:text-zinc-400 focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+              />
+              <button
+                type="button"
+                onClick={() => void send()}
+                disabled={!draft.trim() || sending}
+                className="inline-flex h-[38px] shrink-0 items-center gap-1 rounded-lg bg-emerald-600 px-3 text-[12px] font-semibold text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-zinc-300"
+              >
+                {sending ? "Sending…" : "Send"}
+              </button>
+            </div>
+            <p className="mt-1 text-[10px] leading-relaxed text-zinc-500">
+              Sent as you type — only inside WhatsApp&apos;s 24-hour service window.
+              Enter to send, Shift+Enter for a new line.
+            </p>
+          </div>
+        ) : (
+          <footer className="border-t border-zinc-200 bg-zinc-50 px-4 py-2 text-[10px] leading-relaxed text-zinc-500">
+            Read-only. Delivery receipts are folded into the message they belong to; rows
+            marked “log only” predate message-body recording, so only the event is known.
+          </footer>
+        )}
       </div>
     </div>
   )

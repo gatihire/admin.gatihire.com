@@ -1195,21 +1195,21 @@ async function finalizeCollectedInfo(
     }
 
     case 'needs_review': {
-      // Deliberately SILENT. needs_review means a human has to look at this
-      // profile before we spend a call slot on it, so nothing goes to the
-      // candidate here.
+      // Tell the candidate we have their details and a person is looking at them.
       //
-      // This branch used to send "when should we call you?" with slot buttons
-      // and the code comment argued that HR review "runs alongside — the
-      // candidate isn't blocked". That is backwards: the candidate booked
-      // themselves into a call nobody had approved, and the reviewer in the
-      // pre-screen queue was left looking at a candidate who had already been
-      // offered slots. Approval drives the next message (see the
-      // app/api/phone-screening/review route, which sends the confirm template
-      // and books Bolna on "approved").
+      // This branch used to be COMPLETELY silent. That was right about one thing
+      // and wrong about another. Right: before approval we must not send a verdict
+      // or offer call slots. Wrong: silence leaves the candidate with no idea
+      // whether they were heard at all. A live run showed the cost — the
+      // candidate's details landed, nothing came back, and then a scheduled
+      // reminder fired saying "one quick thing before we call you", contradicting
+      // the silence and promising a call nobody approved. The only thing the
+      // candidate could do meanwhile was reply, and those replies got parsed as
+      // answers to a screening field ("clarify: yes").
       //
-      // A silence is not a dead end: the follow-up scheduler still nudges these
-      // rows, and the review queue surfaces them to HR.
+      // So: acknowledge receipt, say a human is reviewing, commit to nothing, and
+      // invite replies — which is also what gives HR something to answer. The
+      // review gate itself is untouched.
       await supabaseAdmin
         .from("phone_screening_participants")
         .update({
@@ -1231,13 +1231,54 @@ async function finalizeCollectedInfo(
         at: new Date().toISOString(),
         kind: "pre_screen_review_queued",
         direction: "internal",
-        text: "Pre-screen flagged this profile for HR review. No message sent — waiting for recruiter approval.",
+        text: "Pre-screen flagged this profile for HR review. Candidate told a recruiter is reviewing — no verdict, no call slot and no booking until a human approves.",
         status: "sent",
         preScreenDecision: preScreenResult.decision,
         preScreenReasons: preScreenResult.reasons,
       })
 
-      logger.info("Pre-screen needs_review — held for HR approval, candidate not messaged", {
+      // The only candidate-facing message on this path, and it uses the
+      // pre-approved `info_review_pending` template rather than free text.
+      //
+      // A template matters here for a concrete reason: free-text session messages
+      // only reach a candidate inside WhatsApp's 24-hour service window, and this
+      // send can easily happen outside it. sendAndRecord would report success
+      // while Meta silently refused, re-creating the silence in a harder-to-spot
+      // form. The template also carries no verdict and promises nothing beyond
+      // "we will get back to you shortly", which is what makes it safe pre-approval.
+      const reviewPhone = participant.candidates?.phone
+      if (!reviewPhone) {
+        logger.warn("needs_review — no candidate phone; cannot acknowledge", {
+          participantId: participant.id,
+        })
+      } else {
+        const ack = await getWhatsAppService().sendInfoReviewPending({
+          phoneNumber: reviewPhone,
+          candidateName: participant.candidates?.name || "",
+          jobTitle: participant.jobs?.title || "this role",
+          companyName: participant.jobs?.client_name || "",
+        })
+
+        await appendToHistory(participant.id, {
+          at: new Date().toISOString(),
+          kind: "info_review_pending",
+          direction: "out",
+          template: "info_review_pending",
+          text: `Thanks ${participant.candidates?.name || ""} — we've received your details and our team is reviewing your profile. We'll be in touch shortly.`,
+          status: ack.success ? "sent" : "failed",
+          messageId: ack.messageId ?? null,
+          error: ack.success ? null : ack.error ?? null,
+        })
+
+        if (!ack.success) {
+          logger.error("Could not acknowledge needs_review to the candidate", {
+            participantId: participant.id,
+            error: ack.error,
+          })
+        }
+      }
+
+      logger.info("Pre-screen needs_review — held for HR approval; candidate told we're reviewing", {
         participantId: participant.id,
         reasons: preScreenResult.reasons,
       })
@@ -1294,11 +1335,44 @@ async function finalizeCollectedInfo(
         kind: "pre_screen_review",
         status: "pending",
         detail:
-          "AI suggests this candidate may not be a fit. Nothing has been sent to the candidate — " +
-          "a recruiter must confirm before they hear anything.",
+          "AI suggests this candidate may not be a fit. The candidate was told a recruiter " +
+          "is reviewing — no verdict has been sent, and a recruiter must confirm before they " +
+          "hear anything about the outcome.",
       })
 
-      logger.info("AI suggested rejection — escalated to HR, candidate NOT messaged", {
+      // Same template, and deliberately so. "AI suggests reject" must not read
+      // differently from "needs review": if the two branches sent different copy,
+      // the wording itself would leak the verdict we are refusing to state. The
+      // AI's opinion stays internal until a recruiter decides.
+      const rejectPhone = participant.candidates?.phone
+      if (rejectPhone) {
+        const ack = await getWhatsAppService().sendInfoReviewPending({
+          phoneNumber: rejectPhone,
+          candidateName: participant.candidates?.name || "",
+          jobTitle: participant.jobs?.title || "this role",
+          companyName: participant.jobs?.client_name || "",
+        })
+
+        await appendToHistory(participant.id, {
+          at: new Date().toISOString(),
+          kind: "info_review_pending",
+          direction: "out",
+          template: "info_review_pending",
+          text: `Thanks ${participant.candidates?.name || ""} — we've received your details and our team is reviewing your profile. We'll be in touch shortly.`,
+          status: ack.success ? "sent" : "failed",
+          messageId: ack.messageId ?? null,
+          error: ack.success ? null : ack.error ?? null,
+        })
+
+        if (!ack.success) {
+          logger.error("Could not acknowledge AI-suggested-rejection to the candidate", {
+            participantId: participant.id,
+            error: ack.error,
+          })
+        }
+      }
+
+      logger.info("AI suggested rejection — escalated to HR; candidate told we're reviewing, verdict withheld", {
         participantId: participant.id,
         reasons: preScreenResult.reasons,
       })
