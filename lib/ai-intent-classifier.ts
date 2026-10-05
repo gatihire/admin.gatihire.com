@@ -169,6 +169,18 @@ function fallbackClassify(message: string): IntentClassification {
   if (lower === 'evening' || lower === 'this evening' || lower === 'today evening') {
     return { intent: 'schedule_call_later', confidence: 0.9, delay_minutes: 480, reasoning: 'fallback: exact match' };
   }
+  // Greetings are not interest.
+  //
+  // The model reads "hi" as a warm opener and returns `interested`, so a
+  // candidate saying hello was told "Thanks for your interest — I've passed this
+  // to our team", which both overstates what they said and logged an interest
+  // the recruiter then had to dismiss. A greeting carries no intent; it should
+  // draw a greeting back and then ask for what we actually need.
+  const GREETING_RE = /^(hi|hey|hello|hola|hii+|helo|good\s?(morning|afternoon|evening|night)|namaste|yo)\b[\s!.,]*$/i
+  if (GREETING_RE.test(lower.trim())) {
+    return { intent: 'unclear', confidence: 0.3, delay_minutes: null, reasoning: 'fallback: bare greeting carries no intent' }
+  }
+
   if (lower === 'interested' || lower === 'yes interested' || lower === 'yes i am interested') {
     return { intent: 'interested', confidence: 0.85, delay_minutes: null, reasoning: 'fallback: exact match' };
   }

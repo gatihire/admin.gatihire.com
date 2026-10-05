@@ -745,19 +745,78 @@ async function handleTextMessage(participant: any, text: any, replyPhone?: strin
   await dispatchIntent(participant, classification, respondTo)
 }
 
+/**
+ * What to say when we did not understand the candidate.
+ *
+ * The old copy was a four-option menu ending in "Interested — we'll schedule
+ * your screening call" and "Call now — we'll call you right away". That was
+ * actively harmful twice over. It promised scheduling we had just decided only a
+ * recruiter may promise, and it fired on every unrecognised message, so a
+ * candidate saying "hi", "helllo" and "how are you" got the same wall of text
+ * three times and a recruiter saw three identical menu messages in the thread.
+ *
+ * Now: one short line, no menu, no promise, and a cooldown. A candidate writing
+ * to a human is not a funnel step, and repeated unrecognised replies mean the AI
+ * is out of its depth — so it says something brief, stops talking, and puts the
+ * thread in front of a person instead.
+ */
+const FALLBACK_COOLDOWN_MINUTES = 30
+
 async function sendReplyFallbackPrompt(participant: any) {
   const { sendSessionMessage } = await import('@/lib/info-collector-v2')
   const phoneNumber = participant.candidates?.phone
   if (!phoneNumber) return
 
+  const ctx = (participant.screening_context || {}) as Record<string, any>
+
+  // Already asked recently. Saying it again helps nobody and looks automated.
+  const lastAsked = ctx.fallbackPromptedAt ? new Date(ctx.fallbackPromptedAt).getTime() : 0
+  if (lastAsked && Date.now() - lastAsked < FALLBACK_COOLDOWN_MINUTES * 60 * 1000) {
+    logger.info("Skipping fallback prompt — still inside cooldown", {
+      participantId: participant.id,
+      lastAskedAt: ctx.fallbackPromptedAt,
+    })
+    return
+  }
+
+  // How many times have we failed to understand them? At three, escalate rather
+  // than keep replying: the honest read is that this needs a person.
+  const misses = ((ctx.ununderstoodCount as number) || 0) + 1
+  const escalated = misses >= 3
+
+  await supabaseAdmin
+    .from("phone_screening_participants")
+    .update({
+      screening_context: {
+        ...ctx,
+        fallbackPromptedAt: new Date().toISOString(),
+        ununderstoodCount: misses,
+        // Stops the AI talking over a recruiter who now owns the thread.
+        ...(escalated ? { awaitingHrAfterReply: true } : {}),
+      },
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", participant.id)
+
+  if (escalated) {
+    await appendThreadEntry(participant.id, {
+      at: new Date().toISOString(),
+      kind: "ai_out_of_depth",
+      direction: "internal",
+      text: `Could not understand ${misses} messages in a row from this candidate. Handing the conversation to a person rather than continuing to guess.`,
+      status: "sent",
+    })
+    logger.info("AI out of depth — escalating to recruiter", { participantId: participant.id, misses })
+  }
+
+  // No options, no scheduling language. Either we are still waiting on details,
+  // or we are looking at it. Both are honest; neither promises a call.
   await sendAndRecord(
     participant.id,
     phoneNumber,
-    "Thanks for replying! To help us move forward faster, please pick one:\n\n" +
-    "• Interested — we'll schedule your screening call\n" +
-    "• Call now — we'll call you right away\n" +
-    "• Not interested\n" +
-    "• Or share your details: Current CTC, Expected CTC, Total experience, Notice period, City, Willing to relocate, Reason for switching (in one message)"
+    escalated
+      ? "Thanks for your patience — I'm passing this to my team so they can pick it up directly."
+      : "Thanks for that — could you share your current CTC, expected CTC, total experience, notice period and city? That'll help us move forward."
   )
 }
 
