@@ -6,12 +6,14 @@ import {
   Check,
   CheckCheck,
   ChevronDown,
+  ClipboardList,
   Clock,
   MessageCircle,
   MousePointerClick,
   PhoneCall,
   XCircle,
 } from "lucide-react"
+import { CollectedInfoView, PreScreenVerdict } from "@/components/candidate-collected-info"
 import type { ThreadEntry } from "@/lib/whatsapp-thread-shared"
 import { describeTemplate, entryTime } from "@/lib/whatsapp-thread-shared"
 
@@ -301,6 +303,11 @@ export function WhatsAppConversationModal({
   onSent,
   open,
   onOpenChange,
+  infoData,
+  infoSources,
+  resumeFallback,
+  preScreenResult,
+  roleLabel,
 }: {
   history: unknown
   candidateName?: string | null
@@ -308,12 +315,36 @@ export function WhatsAppConversationModal({
   participantId?: string | null
   /** Called after a message is accepted, so the parent can refetch the row. */
   onSent?: () => void
+  /**
+   * What the candidate actually submitted, shown in the thread.
+   *
+   * Without this the conversation was messages only, so a recruiter could read
+   * "Replied 31m ago" and still have to leave and find the values somewhere
+   * else — and could not tell which numbers came from WhatsApp versus the resume.
+   */
+  infoData?: Record<string, unknown> | null
+  /** Per-field provenance. Fields collected here are tagged WhatsApp, resume ones Resume. */
+  infoSources?: Record<string, unknown> | null
+  /** Candidate-row values, used for RESUME-sourced fields only. */
+  resumeFallback?: Record<string, unknown> | null
+  /** Pre-screen outcome, so the AI's read is visible next to the transcript. */
+  preScreenResult?: unknown
+  /** "Store Incharge · Sharepal", so the thread is not context-free. */
+  roleLabel?: string | null
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
   const conversation = useMemo(() => buildConversation(parseEntries(history)), [history])
   const scrollRef = useRef<HTMLDivElement>(null)
   const [showSystem, setShowSystem] = useState(true)
+  const [showDetails, setShowDetails] = useState(false)
+
+  // Counted from info_data only. resumeFallback must not count here or the badge
+  // would claim the candidate told us things they never typed on WhatsApp.
+  const collectedKeyCount = Object.keys(infoData ?? {}).filter(
+    (k) => (infoData as Record<string, unknown>)?.[k] !== null && (infoData as Record<string, unknown>)?.[k] !== undefined && (infoData as Record<string, unknown>)?.[k] !== ""
+  ).length
+  const hasCollectedInfo = collectedKeyCount > 0
 
   // Outbound composer. The thread used to be strictly read-only — its footer
   // said so — which meant the one moment a recruiter most needs to speak is the
@@ -439,6 +470,9 @@ export function WhatsAppConversationModal({
             <p className="truncate text-sm font-semibold text-zinc-900">
               {candidateName || "Candidate"}
             </p>
+            {roleLabel && (
+              <p className="truncate text-[11px] text-zinc-500">{roleLabel}</p>
+            )}
             <p className="text-[11px] text-zinc-500">
               {withPending.length} entries
               {systemCount > 0 && (
@@ -468,6 +502,46 @@ export function WhatsAppConversationModal({
             </button>
           </div>
         </header>
+
+        {/* What they submitted, above the transcript. Collapsed by default: most
+            lookups are for the message, and the thread is the reason they opened
+            this. */}
+        {(hasCollectedInfo || !!preScreenResult) && (
+          <div className="border-b border-zinc-200 bg-white">
+            <button
+              type="button"
+              onClick={() => setShowDetails((v) => !v)}
+              className="flex w-full items-center justify-between gap-2 px-4 py-2 text-left hover:bg-zinc-50"
+            >
+              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-zinc-700">
+                <ClipboardList className="h-3.5 w-3.5 text-zinc-400" />
+                What they shared
+                {hasCollectedInfo && (
+                  <span className="rounded-full bg-zinc-100 px-1.5 py-px text-[10px] font-medium text-zinc-600">
+                    {collectedKeyCount}
+                  </span>
+                )}
+              </span>
+              <ChevronDown className={`h-3.5 w-3.5 text-zinc-400 transition-transform ${showDetails ? "" : "-rotate-90"}`} />
+            </button>
+            {showDetails && (
+              <div className="space-y-2 border-t border-zinc-100 px-4 pb-3 pt-3">
+                {preScreenResult ? (
+                  <PreScreenVerdict result={preScreenResult as any} />
+                ) : null}
+
+                {hasCollectedInfo && (
+                  <CollectedInfoView
+                    infoData={infoData ?? null}
+                    infoSources={infoSources as any}
+                    fallback={resumeFallback ?? null}
+                    compact
+                  />
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         <div
           ref={scrollRef}

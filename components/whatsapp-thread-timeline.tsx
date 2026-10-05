@@ -53,11 +53,21 @@ export function WhatsAppThreadTimeline({
   candidateName,
   participantId,
   onSent,
+  infoData,
+  infoSources,
+  resumeFallback,
+  preScreenResult,
+  roleLabel,
 }: {
   history: unknown
   candidateName?: string | null
   participantId?: string | null
   onSent?: () => void
+  infoData?: Record<string, unknown> | null
+  infoSources?: Record<string, unknown> | null
+  resumeFallback?: Record<string, unknown> | null
+  preScreenResult?: unknown
+  roleLabel?: string | null
 }) {
   const [open, setOpen] = useState(false)
   const entries = parseEntries(history)
@@ -115,6 +125,11 @@ export function WhatsAppThreadTimeline({
           candidateName={candidateName}
           participantId={participantId}
           onSent={onSent}
+          infoData={infoData}
+          infoSources={infoSources}
+          resumeFallback={resumeFallback}
+          preScreenResult={preScreenResult}
+          roleLabel={roleLabel}
           open={open}
           onOpenChange={setOpen}
         />

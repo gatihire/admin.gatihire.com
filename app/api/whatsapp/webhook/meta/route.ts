@@ -1465,7 +1465,7 @@ async function handleFlowFormReply(participant: any, nfmReply: any) {
     sendAndRecord(
       participant.id,
       phoneNumber,
-      "✅ Details received — ek second, mujhe aapka profile check karne dein..."
+      "Thanks — got it. Reviewing your profile now."
     ).catch(() => {})
 
     let fields: Record<string, any> = {}
@@ -1566,7 +1566,7 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
     sendAndRecord(
       participant.id,
       phoneNumber,
-      "✅ Details received — ek second, mujhe aapka profile check karne dein..."
+      "Thanks — got it. Reviewing your profile now."
     ).catch(() => {})
 
     // Parse all fields from the single message

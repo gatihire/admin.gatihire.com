@@ -98,6 +98,8 @@ interface CandidateCardProps {
   onReviewInfo?: () => void
   onStageChange: (applicationId: string, from: string, to: string, candidateName: string) => void
   onApplicationUpdated: (updated: Application) => void
+  /** Refetch participants so a message sent from the thread shows up in the card. */
+  onRefreshParticipants?: () => void
   interviewEntry?: InterviewEntry
   interviewDraft?: { notes: string; scheduledAtLocal: string }
   onInterviewUpdate?: (patch: Partial<{ status: string; notes: string; scheduled_at: string | null }>) => void
@@ -220,6 +222,39 @@ const NEXT_ACTION_CONFIG: Record<string, { label: string; cta: string; icon: any
   rejected: null,
 }
 
+/**
+ * One-line, recruiter-readable summary of what the candidate just submitted.
+ *
+ * Prefers the parsed info_data, which is what the pre-screen actually screened,
+ * and falls back to parsing the stored reply only when info_data is empty. Never
+ * echoes the raw value: `whatsapp_response` on the flow-form path is a JSON
+ * blob, and putting it in a status card told the recruiter nothing.
+ */
+function summarizeCollectedReply(participant: any): string | null {
+  const info = participant?.info_data
+  if (info && typeof info === "object" && !Array.isArray(info)) {
+    const keys = Object.keys(info).filter((k) => info[k] !== null && info[k] !== undefined && info[k] !== "")
+    if (keys.length) {
+      return `${keys.length} detail${keys.length === 1 ? "" : "s"} received`
+    }
+  }
+
+  // Fallback for rows where only the reply text was kept. Parse, don't echo.
+  const raw = participant?.whatsapp_response || participant?.whatsapp_reply_text
+  if (!raw) return null
+  const text = String(raw).trim()
+  if (text.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(text)
+      const n = Object.keys(parsed).filter((k) => parsed[k] !== null && parsed[k] !== "").length
+      if (n) return `${n} detail${n === 1 ? "" : "s"} received`
+    } catch { /* not JSON after all */ }
+    return "Details received"
+  }
+  const snippet = text.length > 60 ? `${text.slice(0, 57)}…` : text
+  return snippet ? `Replied "${snippet}"` : null
+}
+
 function buildReviewCandidate(participant: any, application: Application): ReviewCandidate {
   const c = participant?.candidates || {}
   const job = participant?.jobs || {}
@@ -299,8 +334,17 @@ function getActionForCard(application: Application, callStatus?: string, partici
     
     // ENGAGED
     if (callStatus === "engaged") {
-      const reply = participant?.whatsapp_response || participant?.whatsapp_reply_text
-      if (reply) return { label: `Candidate replied "${reply}" — ready to start AI call`, cta: "Start Call", icon: PhoneCall, color: "bg-green-50 border-green-200 text-green-800", action: "start_call" }
+      // Was `Candidate replied "${reply}"`. On the inbound resume-upload path
+      // whatsapp_response holds the flow form's response_json, so the card
+      // rendered the raw blob:
+      //   Candidate replied "{"current_ctc":"5","expected_ctc":"6",…}" — ready
+      // to start AI call
+      // That is storage format, not a message. It said nothing a recruiter can
+      // act on and buried the actual state — they had submitted their details.
+      const summary = summarizeCollectedReply(participant)
+      if (summary) {
+        return { label: `${summary} — ready to start AI call`, cta: "Start Call", icon: PhoneCall, color: "bg-green-50 border-green-200 text-green-800", action: "start_call" }
+      }
       return { label: "Info collected — ready to start AI call", cta: "Start Call", icon: PhoneCall, color: "bg-green-50 border-green-200 text-green-800", action: "start_call" }
     }
     
@@ -1211,6 +1255,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
                     onVerifyStatus={() => verifyCallStatus(app.candidate_id)}
                     onNudgeStart={() => setNudgeBusyCandidate(app.candidate_id)}
                     onNudgeEnd={() => { setNudgeBusyCandidate(null); fetchParticipants(); onRefresh() }}
+                    onRefreshParticipants={() => { fetchParticipants(); onRefresh() }}
                     onSelect={() => toggleSelect(app.id)}
                     onViewProfile={(c, app2, part, ai, fs) => {
                       setViewedCandidates(prev => new Set([...prev, app.candidate_id]))
@@ -1366,7 +1411,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
    CANDIDATE CARD — Premium Redesign
    ═══════════════════════════════════════════════════════════════════ */
 
-function CandidateCard({ application, jobId, callStatus, participant, aiInfo, clientDecision, selected, isNew, fitScore, callNowBusy, nudgeBusy, verifyBusy, onCallNow, onVerifyStatus, onNudgeStart, onNudgeEnd, onSelect, onViewProfile, onViewResults, onReviewInfo, onStageChange, onApplicationUpdated, interviewEntry, interviewDraft, onInterviewUpdate, onInterviewDraftChange }: CandidateCardProps) {
+function CandidateCard({ application, jobId, callStatus, participant, aiInfo, clientDecision, selected, isNew, fitScore, callNowBusy, nudgeBusy, verifyBusy, onCallNow, onVerifyStatus, onNudgeStart, onNudgeEnd, onSelect, onViewProfile, onViewResults, onReviewInfo, onStageChange, onApplicationUpdated, onRefreshParticipants, interviewEntry, interviewDraft, onInterviewUpdate, onInterviewDraftChange }: CandidateCardProps) {
   const c = application.candidates
   const { toast } = useToast()
   const [notesDraft, setNotesDraft] = useState<string>(application.notes || "")
@@ -1563,6 +1608,17 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                         <WhatsAppThreadTimeline
                           history={participant.whatsapp_history}
                           candidateName={participant.candidates?.name}
+                          participantId={participant.id}
+                          onSent={onRefreshParticipants}
+                          infoData={participant.info_data}
+                          infoSources={participant.info_sources}
+                          resumeFallback={application.candidates}
+                          preScreenResult={participant.screening_context?.preScreenResult}
+                          roleLabel={
+                            participant.jobs?.title
+                              ? `${participant.jobs.title}${participant.jobs.client_name ? ` · ${participant.jobs.client_name}` : ""}`
+                              : null
+                          }
                         />
                         <CandidateMetricsBar participant={participant} callStatus={callStatus || "pending"} />
                       </div>

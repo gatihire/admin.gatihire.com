@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
-import { toLpa, toNoticeDays, toExperienceYears, jobSalaryBandToLpa } from '@/lib/units'
+import { toLpa, toCtcLpa, toNoticeDays, toExperienceYears, jobSalaryBandToLpa } from '@/lib/units'
 import { logger } from '@/lib/logger'
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '')
@@ -106,8 +106,12 @@ export function buildCandidateInfoFromCollected(info: Record<string, any>): Cand
   const relocation = info.willing_to_relocate
 
   return {
-    currentCtcLpa: toLpa(info.current_ctc) ?? undefined,
-    expectedCtcLpa: toLpa(info.expected_ctc) ?? undefined,
+    // toCtcLpa, not toLpa: candidates answer the CTC question with a bare
+    // integer ("5", "6"), which toLpa reads as a rupee figure and returns null
+    // for. That silently skipped the salary check on the strongest signal we
+    // collect — see toCtcLpa for why the bare-integer reading is correct here.
+    currentCtcLpa: toCtcLpa(info.current_ctc) ?? undefined,
+    expectedCtcLpa: toCtcLpa(info.expected_ctc) ?? undefined,
     totalExperienceYears: toExperienceYears(experienceRaw) ?? undefined,
     // 0 days ("Immediate") is a real answer, so check for null rather than falsy.
     noticePeriodDays: toNoticeDays(info.notice_period) ?? undefined,

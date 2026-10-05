@@ -183,6 +183,48 @@ export function toLpa(value: unknown): number | null {
  *  - A band whose top is under 1 LPA/yr is placeholder data (we have a real job
  *    stored as 2345-5678), not a salary.
  */
+/**
+ * Normalise an answer to a CTC question, where the unit is implied by the field.
+ *
+ * toLpa is deliberately strict: a bare number is read as a rupee figure, because
+ * that same function normalises the JOB band, where 800000 means 800000. That
+ * strictness is right for jobs and wrong for candidates.
+ *
+ * A candidate answering "current CTC" with "5" or "6" is stating lakhs per annum
+ * — nobody's CTC is 6 rupees — but toLpa("6") returns null, because 6 is below
+ * the ambiguity floor and never resolves to a magnitude. The result was that the
+ * one field we most want to screen on was skipped, and the review screen reported
+ * "Could not check: Salary — the value was missing or unreadable" while the value
+ * sat in info_data as a perfectly good 6.
+ *
+ * So this only relaxes the bare-integer case, and only for values that cannot be
+ * a rupee figure. Everything with an explicit unit still goes through toLpa, so
+ * there is one implementation of every unit conversion and one place that can be
+ * wrong about them.
+ */
+export function toCtcLpa(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null
+  if (typeof value === "number") return toLpa(value)
+
+  const raw = String(value).trim().toLowerCase()
+  if (!raw) return null
+
+  // Any explicit unit is unambiguous — defer rather than second-guess it.
+  if (/[a-z]/.test(raw)) return toLpa(raw)
+
+  const digitsOnly = raw.replace(/[^0-9.,]/g, "")
+  const n = parseNumericToken(digitsOnly)
+  if (n === null || n <= 0) return null
+
+  // No unit anywhere in the string, so there is nothing to scale by: the candidate
+  // is quoting lakhs per annum. This is the "6" case. Anything at or above the
+  // ambiguity floor is left to toLpa, which may be reading a monthly figure and
+  // needs the yearly/annual context that only the DB columns carry.
+  if (n >= AMBIGUOUS_FLOOR) return toLpa(raw)
+
+  return clampToPlausible(n)
+}
+
 export function jobSalaryBandToLpa(
   rawMin: unknown,
   rawMax: unknown,
