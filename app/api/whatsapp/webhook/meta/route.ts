@@ -278,11 +278,36 @@ async function handleIncomingMessage(message: any, contact: any) {
     return
   }
   
+  // Which number do we answer?
+  //
+  // When the sender matched a candidate row, that row's phone IS the number that
+  // wrote, so either value is correct. When we had to fall back to "most recent
+  // awaiting_interest participant" the sender's number belongs to *nobody* on the
+  // row — it is a different SIM (recruiter testing from their own phone, candidate
+  // replying from a new number, forwarded SIM). Answering participant.candidates.phone
+  // in that case replies to a stranger and leaves the person who actually wrote
+  // staring at silence, which is indistinguishable from the message being dropped.
+  // Prefer the number the message really came from whenever we can send to it.
+  const matchedByCandidatePhone = matchedCandidateIds.length > 0
+  const replyPhone = matchedByCandidatePhone
+    ? participant.candidates?.phone
+    : senderE164 || participant.candidates?.phone
+
+  if (!matchedByCandidatePhone && replyPhone) {
+    logger.warn("Replying to sender number, not participant phone — participant was matched by fallback", {
+      participantId: participant.id,
+      senderPhone: phoneNumber,
+      participantPhone: participant.candidates?.phone,
+      replyingTo: replyPhone,
+    })
+  }
+
   logger.info("Found participant for incoming message", { 
     participantId: participant.id, 
     candidateId: participant.candidate_id,
     candidateName: participant.candidates?.name,
     candidatePhone: participant.candidates?.phone,
+    replyPhone,
     status: participant.status,
     whatsappOutboundTemplate: participant.whatsapp_outbound_template,
     screeningMode: participant.screening_mode,
@@ -311,9 +336,76 @@ async function handleIncomingMessage(message: any, contact: any) {
   // discarded — which is exactly the silent no-call this guard was meant to
   // prevent.
   if (messageType === "interactive") {
-    await handleInteractiveMessage(participant, message.interactive)
+    await handleInteractiveMessage(participant, message.interactive, replyPhone)
+  } else if (messageType === "button") {
+    // Quick-reply buttons on legacy templates arrive as their own top-level type,
+    // NOT wrapped in `interactive`:
+    //
+    //   { "type": "button", "button": { "payload": "interested", "text": "Interested" } }
+    //
+    // The dispatch only ever tested for "interactive" and "text", so every tap on
+    // such a template fell through to no handler at all: acked with 200, no reply,
+    // no state change, no record. Confirmed in production on 2026-10-05 — a
+    // candidate tapped Interested on talent_outreach_v2 at 05:48:14Z and the
+    // participant was still sitting on `whatsapp_sent` / `awaiting_interest`.
+    //
+    // Normalised into the interactive shape so it runs through the identical
+    // handler, error isolation and idempotency as a modern interactive reply.
+    const button = message.button || {}
+    logger.warn("Legacy quick-reply button received — normalising to interactive", {
+      participantId: participant.id,
+      payload: button.payload,
+      title: button.text,
+    })
+    await handleInteractiveMessage(
+      participant,
+      { type: "button_reply", button_reply: { id: button.payload, title: button.text } },
+      replyPhone
+    )
   } else if (messageType === "text") {
-    await handleTextMessage(participant, message.text)
+    await handleTextMessage(participant, message.text, replyPhone)
+  } else {
+    // Anything that is neither text nor interactive used to fall through this
+    // `if/else if` with no handler at all — then get stamped as processed and
+    // acked with 200. That is the worst possible outcome: Meta considers the
+    // message delivered, we have no record of it, the candidate's recruiter card
+    // shows them as still "waiting for reply", and nothing anywhere says a
+    // message was dropped. Confirmed happening in production: a message arrived
+    // at 05:48:14, got stamped, and left zero trace.
+    //
+    // Types that legitimately reach here: image/audio/video/document/sticker
+    // (a candidate attaching their CTC screenshot, which is a normal reply to
+    // "share your details"), contacts/location, and `unsupported` which Meta
+    // uses for messages it could not decode. None of them can be auto-answered,
+    // but they must never be invisible.
+    logger.warn("Unhandled WhatsApp message type — recorded, not answered", {
+      participantId: participant.id,
+      messageType,
+      messageId: message.id,
+    })
+
+    await appendToHistory(participant.id, {
+      at: new Date().toISOString(),
+      kind: "unhandled_message",
+      direction: "in",
+      messageType,
+      text: describeUnhandledMessage(message),
+      messageId: message.id ?? null,
+    })
+
+    // An attachment is nearly always an attempt to answer the screening
+    // questions ("here is my CTC"), so treat it as needing a human rather than
+    // letting it sit unanswered. `unsupported` is left alone: it is usually a
+    // malformed or duplicate delivery, not a candidate waiting on us.
+    if (messageType !== "unsupported") {
+      await supabaseAdmin
+        .from("phone_screening_participants")
+        .update({
+          needs_manual_followup: true,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", participant.id)
+    }
   }
 
   if (msgKey) {
@@ -337,7 +429,43 @@ async function handleIncomingMessage(message: any, contact: any) {
   }
 }
 
-async function handleInteractiveMessage(participant: any, interactive: any) {
+/**
+ * One-line, human-readable label for a message we deliberately do not answer,
+ * so the recruiter card shows *something* instead of a gap. Prefer the candidate's
+ * own caption where they sent one — an image captioned "my CTC" tells the
+ * recruiter far more than "Sent an image".
+ */
+function describeUnhandledMessage(message: any): string {
+  const caption = typeof message.caption === "string" ? message.caption.trim() : ""
+  const suffix = caption ? `: ${caption}` : ""
+
+  switch (message?.type) {
+    case "image":
+      return `Sent a photo${suffix}`
+    case "audio":
+      return "Sent a voice note"
+    case "video":
+      return `Sent a video${suffix}`
+    case "document":
+      return caption
+        ? `Sent a document — ${caption}`
+        : "Sent a document"
+    case "sticker":
+      return "Sent a sticker"
+    case "location":
+      return "Sent their location"
+    case "contacts":
+      return "Sent a contact card"
+    case "reaction":
+      return "Reacted to a message"
+    case "unsupported":
+      return "Message could not be read by WhatsApp"
+    default:
+      return `Sent a ${message?.type || "message"}`
+  }
+}
+
+async function handleInteractiveMessage(participant: any, interactive: any, replyPhone?: string) {
   if (interactive.type === "button_reply") {
     const buttonId = interactive.button_reply.id
     const buttonTitle = interactive.button_reply.title
@@ -358,7 +486,7 @@ async function handleInteractiveMessage(participant: any, interactive: any) {
     // swallowed, so the tap vanished with no trace and no way to replay it.
     try {
       const { handleInteractiveButton } = await import('@/lib/info-collector-v2')
-      await handleInteractiveButton(participant.id, buttonId, buttonTitle)
+      await handleInteractiveButton(participant.id, buttonId, buttonTitle, replyPhone)
     } catch (err: any) {
       logger.error("Failed to handle button reply — returning 500 so Meta retries", {
         participantId: participant.id,
@@ -383,7 +511,12 @@ async function handleInteractiveMessage(participant: any, interactive: any) {
   }
 }
 
-async function handleTextMessage(participant: any, text: any) {
+async function handleTextMessage(participant: any, text: any, replyPhone?: string) {
+  // The number to answer. Defaults to the participant's own phone, but the caller
+  // overrides it when the sender was matched by fallback rather than by phone —
+  // see handleIncomingMessage. Sending to the participant row instead would reply
+  // to someone who never wrote.
+  const respondTo = replyPhone || participant.candidates?.phone
   const messageBody = text.body?.trim() || ""
   const lower = messageBody.toLowerCase()
 
@@ -485,7 +618,7 @@ async function handleTextMessage(participant: any, text: any) {
     return
   }
   
-  await dispatchIntent(participant, classification)
+  await dispatchIntent(participant, classification, respondTo)
 }
 
 async function sendReplyFallbackPrompt(participant: any) {
@@ -504,7 +637,16 @@ async function sendReplyFallbackPrompt(participant: any) {
   )
 }
 
-async function dispatchIntent(participant: any, classification: { intent: string; delay_minutes: number | null }) {
+async function dispatchIntent(
+  participant: any,
+  classification: { intent: string; delay_minutes: number | null },
+  replyPhone?: string
+) {
+  // Number to answer. See handleIncomingMessage: when the sender was matched by
+  // fallback rather than by phone, the participant row holds a different number
+  // than the one that actually wrote, and replying to the row leaves the real
+  // sender with silence.
+  const respondTo = replyPhone || participant.candidates?.phone
   const { intent, delay_minutes } = classification
   
   switch (intent) {
@@ -531,13 +673,17 @@ async function dispatchIntent(participant: any, classification: { intent: string
       // pre-screen, which is where the schedule buttons are sent from.
       const awaitingInterest = !!participant.screening_context?.awaitingInterest
       if (awaitingInterest) {
+        // info_data is deliberately preserved. It is NOT reset here: a candidate
+        // can reply "interested" after already typing some details (or after a
+        // pre-screen was started), and blanking it threw away real CTC/notice
+        // data and forced them to re-type everything. Resetting on a fresh
+        // interest is the caller's decision, not something a reply should do.
         await supabaseAdmin
           .from("phone_screening_participants")
           .update({
             status: "info_requested",
             screening_mode: "collect_info_first",
             info_step: "collect_form",
-            info_data: {},
             info_confirmed: false,
             screening_context: {
               ...(participant.screening_context || {}),
@@ -548,12 +694,12 @@ async function dispatchIntent(participant: any, classification: { intent: string
           })
           .eq("id", participant.id)
 
-        if (participant.candidates?.phone) {
+        if (respondTo) {
           try {
             // sendCollectInfoForm is a method on the service, not a standalone
             // export.
             const formResult = await getWhatsAppService().sendCollectInfoForm({
-              phoneNumber: participant.candidates.phone,
+              phoneNumber: respondTo,
               candidateName: participant.candidates?.name || "Candidate",
               jobTitle: participant.jobs?.title || "the role",
               companyName: participant.jobs?.client_name || "",
@@ -574,7 +720,7 @@ async function dispatchIntent(participant: any, classification: { intent: string
                 .eq("id", participant.id)
               await sendAndRecord(
                 participant.id,
-                participant.candidates.phone,
+                respondTo,
                 "Sorry, we couldn't open the details form just now. 🙏 Reply here and our team will help you directly."
               )
             }
@@ -584,6 +730,23 @@ async function dispatchIntent(participant: any, classification: { intent: string
               error: err.message,
             })
           }
+        } else {
+          // Interested but we have nowhere to reply. Previously this just fell
+          // through the `if` and hit `break`, leaving the row sitting in
+          // info_requested with no form, no reply and no flag — it looked like
+          // the candidate was mid-flow when in fact nobody had been contacted.
+          logger.error("Interested with no reachable phone — flagging for manual followup", {
+            participantId: participant.id,
+            candidateId: participant.candidate_id,
+          })
+          await supabaseAdmin
+            .from("phone_screening_participants")
+            .update({
+              status: "needs_manual_followup",
+              needs_manual_followup: true,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", participant.id)
         }
         break
       }
@@ -594,11 +757,11 @@ async function dispatchIntent(participant: any, classification: { intent: string
         .eq("id", participant.id)
 
       // Send schedule options if we have their phone
-      if (participant.candidates?.phone) {
+      if (respondTo) {
         try {
           const whatsapp = getWhatsAppService()
           await whatsapp.sendScheduleOptions({
-            phoneNumber: participant.candidates.phone,
+            phoneNumber: respondTo,
             candidateName: participant.candidates?.name || 'Candidate',
             jobTitle: participant.jobs?.title || 'the role',
           })
@@ -972,10 +1135,20 @@ async function finalizeCollectedInfo(
         .update({ status: "info_received", updated_at: new Date().toISOString() })
         .eq("id", participant.id)
 
-      const { getWhatsAppService } = await import('@/lib/whatsapp')
+      const { getWhatsAppService, AI_CALLER_NUMBER } = await import('@/lib/whatsapp')
       // Body text is recorded alongside the send so the conversation view shows
       // what was actually offered, not just that a send happened.
-      const proceedBody = "✅ Thanks for sharing your details! Your profile looks like a good fit.\n\nWhen should our AI recruiter call you for the quick screening?"
+      //
+      // The caller number is named here because this is the exact moment the
+      // candidate commits to a call: carrier unknown-number screening makes
+      // candidates decline an unrecognised one, and an unrecognised screening
+      // call is indistinguishable from a scam call. This is a session message
+      // inside the 24-hour customer service window, so it needs no approved
+      // template and therefore no Meta re-approval.
+      const proceedBody =
+        "✅ Thanks for sharing your details! Your profile looks like a good fit.\n\n" +
+        `When should our AI recruiter call you for the quick screening?\n\n` +
+        `Expect the call on ${AI_CALLER_NUMBER}. Please keep your phone handy.`
       const sendResult = await getWhatsAppService().sendInteractiveButtons({
         phoneNumber,
         body: proceedBody,

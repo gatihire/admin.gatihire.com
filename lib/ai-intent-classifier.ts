@@ -2,7 +2,11 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { logger } from './logger';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-const MODEL_NAME = process.env.GEMINI_INTENT_MODEL || 'gemini-2.0-flash-lite';
+// gemini-2.0-flash-lite was retired by Google and now 404s, which silently
+// downgraded every inbound message to the keyword fallback (observed 2026-10-05:
+// "AI intent classification failed" then "intent: unclear, confidence: 0.3" for
+// every reply). Matches the model the rest of the codebase already uses.
+const MODEL_NAME = process.env.GEMINI_INTENT_MODEL || 'gemini-3.1-flash-lite-preview';
 
 export type Intent =
   | 'schedule_call_now'

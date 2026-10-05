@@ -17,7 +17,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     .from("phone_screening_participants")
     .select(`
       *,
-      candidates: candidate_id (id, name, email, phone, current_role, current_company, total_experience, location, technical_skills, resume_text)
+      candidates: candidate_id (id, name, email, phone, current_role, current_company, total_experience, location, technical_skills, resume_text),
+      jobs: job_id (id, title, client_name)
     `)
     .eq("id", id)
     .single()

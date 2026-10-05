@@ -70,7 +70,15 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
       // Notify candidate
       if (phoneNumber) {
-        await sendSessionMessage(phoneNumber, `✅ Great news! Your profile has been reviewed and approved. Our AI recruiter will call you shortly to conduct the screening for ${jobTitle} at ${companyName}.`)
+        // Name the caller number: this is the message that tells the candidate a
+        // call is imminent, and carrier unknown-number screening makes them
+        // decline one they cannot identify. Session message inside the 24-hour
+        // window, so no approved template and no Meta re-approval is needed.
+        const { AI_CALLER_NUMBER } = await import('@/lib/whatsapp')
+        await sendSessionMessage(phoneNumber,
+          `✅ Great news! Your profile has been reviewed and approved. Our AI recruiter will call you shortly to conduct the screening for ${jobTitle} at ${companyName}.\n\n` +
+          `Expect the call on ${AI_CALLER_NUMBER}. Please keep your phone handy.`
+        )
       }
 
       // Place the call directly — the candidate was just told it is coming, so

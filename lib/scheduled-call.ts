@@ -46,6 +46,26 @@ export async function getMaxCallAttempts(campaignId?: string | null): Promise<nu
 // Synchronous fallback for callers without campaign context
 export const MAX_CALL_ATTEMPTS = 2
 
+/**
+ * Hard ceiling on how many times we will ever dial one candidate.
+ *
+ * The automatic ladder and manual HR retries used to draw from separate budgets
+ * — the ladder stopped at `MAX_CALL_ATTEMPTS` (2) but the retry button had no
+ * ceiling at all, and it even accepted `completed`. Combined that allowed an
+ * unbounded number of outbound AI calls to one phone number, which is both a
+ * spend risk and a harassment/complaint risk.
+ *
+ * `call_attempts` is now the single shared budget for every placement path:
+ * automatic ladder, WhatsApp "call now", pipeline "Call Now", and manual retry
+ * all increment the same counter and all respect this ceiling. Campaign config
+ * (`getMaxCallAttempts`) may lower it but never raise it above this.
+ *
+ * This is intentionally NOT bypassable by `force`. `force` exists to skip
+ * accidental-double-dial protection when a human explicitly asks for a call
+ * now; it is not a licence to exceed the attempt budget.
+ */
+export const MAX_TOTAL_CALL_ATTEMPTS = 3
+
 // QStash accepts delays up to 24 hours.
 const MAX_DELAY_SEC = 24 * 60 * 60
 
@@ -154,6 +174,17 @@ export interface PlaceCallResult {
   success: boolean
   skipped?: boolean
   error?: string
+  /** Machine-readable cause when nothing was placed, so callers can tell an
+   *  exhausted budget apart from a duplicate dial or a provider rejection. */
+  reason?:
+    | "attempt_cap"
+    | "already_calling"
+    | "already_booked"
+    | "not_due"
+    | "not_found"
+    | "no_phone"
+    | "provider_rejected"
+    | "no_longer_waiting"
 }
 
 interface ParticipantRow {
@@ -202,7 +233,7 @@ export async function placeCallForParticipant(
 
   if (partError || !participant) {
     logger.warn("Participant not found", { participantId, error: partError?.message })
-    return { success: false, error: "Participant not found" }
+    return { success: false, reason: "not_found", error: "Participant not found" }
   }
 
   const row = participant as unknown as ParticipantRow
@@ -219,6 +250,39 @@ export async function placeCallForParticipant(
     candidateName: candidate?.name
   })
 
+  // Hard attempt budget, checked before anything else so an exhausted budget is
+  // never reported as "already calling" or "not due". Applies to every path —
+  // automatic ladder, WhatsApp reply, pipeline "Call Now" and manual retry share
+  // this one counter, which is what makes the ceiling real.
+  const attemptsSoFar = Number(row.call_attempts || 0)
+  if (attemptsSoFar >= MAX_TOTAL_CALL_ATTEMPTS) {
+    // Flag for HR rather than failing silently. `needs_manual_followup` is the
+    // existing hold flag; Phase 2 replaces this with dedicated attention columns
+    // (needs_attention / attention_reason / attention_since) plus ownership.
+    const now = new Date().toISOString()
+    await supabaseAdmin
+      .from("phone_screening_participants")
+      .update({
+        status: "needs_manual_followup",
+        needs_manual_followup: true,
+        bolna_status: "max_retries",
+        next_retry_at: null,
+        updated_at: now,
+      })
+      .eq("id", participantId)
+    logger.warn("Call attempt budget exhausted — flagged for manual followup", {
+      participantId,
+      attempts: attemptsSoFar,
+      cap: MAX_TOTAL_CALL_ATTEMPTS,
+    })
+    return {
+      success: false,
+      skipped: true,
+      reason: "attempt_cap",
+      error: `Attempt limit reached (${attemptsSoFar} of ${MAX_TOTAL_CALL_ATTEMPTS}) — flagged for manual followup`,
+    }
+  }
+
   if (guard) {
     // No blind calls: only fire when the participant opted in (call_scheduled
     // or scheduled with an elapsed time) or a retry window for an already-attempted
@@ -226,7 +290,7 @@ export async function placeCallForParticipant(
     if (row.status === "call_scheduled" || row.status === "scheduled") {
       const scheduledTime = row.scheduled_call_at || row.next_retry_at
       if (!scheduledTime || new Date(scheduledTime).getTime() > Date.now()) {
-        return { success: false, skipped: true, error: "Callback not due yet" }
+        return { success: false, skipped: true, reason: "not_due", error: "Callback not due yet" }
       }
     } else if (row.status === "failed") {
       const maxAttempts = await getMaxCallAttempts(row.campaign_id)
@@ -235,13 +299,18 @@ export async function placeCallForParticipant(
           .from("phone_screening_participants")
           .update({ bolna_status: "max_retries", updated_at: new Date().toISOString() })
           .eq("id", participantId)
-        return { success: false, skipped: true, error: "Max attempts reached" }
+        return { success: false, skipped: true, reason: "attempt_cap", error: "Max attempts reached" }
       }
       if (!row.next_retry_at || new Date(row.next_retry_at).getTime() > Date.now()) {
-        return { success: false, skipped: true, error: "Retry not due yet" }
+        return { success: false, skipped: true, reason: "not_due", error: "Retry not due yet" }
       }
     } else {
-      return { success: false, skipped: true, error: `Participant no longer waiting (${row.status})` }
+      return {
+        success: false,
+        skipped: true,
+        reason: "no_longer_waiting",
+        error: `Participant no longer waiting (${row.status})`,
+      }
     }
   }
 
@@ -250,7 +319,7 @@ export async function placeCallForParticipant(
       .from("phone_screening_participants")
       .update({ status: "failed", updated_at: new Date().toISOString() })
       .eq("id", participantId)
-    return { success: false, error: "Candidate has no phone number" }
+    return { success: false, reason: "no_phone", error: "Candidate has no phone number" }
   }
 
   const payload = row.call_payload_json
@@ -270,8 +339,8 @@ export async function placeCallForParticipant(
 
   if (!result.success || !result.executionId) {
     // Leave the participant untouched so an at-least-once QStash retry can re-run
-    // this step cleanly.
-    return { success: false, error: result.error || "Failed to place call" }
+    // this step cleanly. Nothing was dialled, so the budget is untouched.
+    return { success: false, reason: "provider_rejected", error: result.error || "Failed to place call" }
   }
 
   const now = new Date().toISOString()
@@ -308,15 +377,17 @@ export async function scheduleCall(participant: any, delayMs: number): Promise<v
  * actions can all fire for the same candidate. If a call is already with the
  * provider and no outcome has come back yet, we refuse a second execution rather
  * than double-dialling the candidate.
+ *
+ * `force` skips ONLY the already-*booked* check, for the explicit human "Call Now"
+ * action: an HR overriding a future retry/callback slot. It does not skip the
+ * in-flight check, because a live execution is not a booking to override — dialling
+ * again would put two calls in front of the candidate at once — and it does not skip
+ * the hard attempt budget in `placeCallForParticipant`.
  */
 export async function placeCallImmediately(
   participantId: string,
   opts?: { force?: boolean }
 ): Promise<PlaceCallResult> {
-  if (opts?.force) {
-    return placeCallForParticipant(participantId, { guard: false });
-  }
-
   const { data: existing } = await supabaseAdmin
     .from("phone_screening_participants")
     .select("bolna_execution_id, bolna_status, next_retry_at, scheduled_call_at")
@@ -327,25 +398,29 @@ export async function placeCallImmediately(
     | { bolna_execution_id?: string | null; bolna_status?: string | null; next_retry_at?: string | null; scheduled_call_at?: string | null }
     | null) || {}
 
+  // Checked before `force` is honoured, and before the attempt budget. If the last
+  // permitted call is still ringing, the honest answer is "already calling" — not
+  // "attempt limit reached", which would also flag the row for manual followup while
+  // the recruiter is in the middle of a call that may still succeed.
   if (prior.bolna_execution_id && isLiveProviderStatus(prior.bolna_status)) {
     return {
       success: false,
       skipped: true,
+      reason: "already_calling",
       error: `A call is already with the provider (${prior.bolna_status}) — waiting for its outcome`,
     }
   }
 
-  // A prior call finished, but a retry/callback is already booked. Dialling now
-  // would create a second concurrent execution, so defer to the booked retry.
   const booked = [prior.next_retry_at, prior.scheduled_call_at].find((t) => {
     if (!t) return false
     const ms = new Date(t).getTime()
     return Number.isFinite(ms) && ms > Date.now()
   })
-  if (booked) {
+  if (booked && !opts?.force) {
     return {
       success: false,
       skipped: true,
+      reason: "already_booked",
       error: `A call is already booked for ${new Date(booked).toISOString()}`,
     }
   }

@@ -19,9 +19,13 @@ import {
 } from "@/components/ui/select"
 import { useToast } from "@/hooks/use-toast"
 import { cn } from "@/lib/utils"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
 import { CollectedInfoView, PreScreenVerdict } from "@/components/candidate-collected-info"
 import { WhatsAppConversationModal } from "@/components/whatsapp-conversation-modal"
 import { getCallTruth } from "@/lib/call-truth"
+import { MAX_TOTAL_CALL_ATTEMPTS as MAX_CALL_ATTEMPTS } from "@/lib/scheduled-call"
 
 interface TranscriptSegment {
   id: string
@@ -62,6 +66,8 @@ interface ParticipantDetail {
   call_ended_at?: string | null
   scheduled_call_at?: string | null
   recording_url: string | null
+  call_attempts?: number | null
+  bolna_status?: string | null
   review_status?: string | null
   reviewed_by?: string | null
   review_note?: string | null
@@ -122,6 +128,7 @@ interface ParticipantDetail {
     total_experience: string
     location: string
   }
+  jobs?: { id: string; title: string; client_name?: string | null } | null
   transcripts: TranscriptSegment[]
   answers: ScreeningAnswer[]
 }
@@ -220,6 +227,8 @@ export function PhoneScreeningResultsSheet({
   const [data, setData] = useState<ParticipantDetail | null>(null)
   const [approveStage, setApproveStage] = useState("shortlist")
   const [reviewBusy, setReviewBusy] = useState(false)
+  const [retryDialogOpen, setRetryDialogOpen] = useState(false)
+  const [retryReason, setRetryReason] = useState("")
   const [activeTab, setActiveTab] = useState<TabId>("transcript")
   const [isPlaying, setIsPlaying] = useState(false)
   const [audioProgress, setAudioProgress] = useState(0)
@@ -312,18 +321,58 @@ export function PhoneScreeningResultsSheet({
     }
   }
 
+  const RETRY_REASON_MIN = 10
+
+  const openRetryDialog = () => {
+    setRetryReason("")
+    setRetryDialogOpen(true)
+  }
+
   const handleRetryCall = async () => {
     if (!participantId) return
+    if (retryReason.trim().length < RETRY_REASON_MIN) {
+      toast({
+        title: "Reason required",
+        description: `Give at least ${RETRY_REASON_MIN} characters so the audit trail records why this attempt was spent.`,
+        variant: "destructive",
+      })
+      return
+    }
     setReviewBusy(true)
     try {
       const res = await fetch(`/api/phone-screening/participants/${participantId}/retry`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: retryReason.trim() }),
       })
       const json = await res.json()
-      if (!res.ok) throw new Error(json.error || "Failed to retry call")
-      toast({ title: "Call queued", description: "AI call will be placed shortly" })
-      setData((prev) => (prev ? { ...prev, status: "calling", review_status: "pending" } : prev))
+      if (!res.ok) {
+        // A 409 on the attempt cap is a permanent refusal, not a transient error.
+        // Reflect it in the local counter so the button locks immediately instead
+        // of inviting another click that will also fail.
+        if (json?.reason === "attempt_cap") {
+          setData((prev) =>
+            prev ? { ...prev, call_attempts: json.maxAttempts ?? MAX_CALL_ATTEMPTS } : prev
+          )
+        }
+        throw new Error(json.error || "Failed to retry call")
+      }
+      setRetryDialogOpen(false)
+      toast({
+        title: "Call queued",
+        description: `AI call will be placed shortly — attempt ${json.callAttempts} of ${json.maxAttempts}.`,
+      })
+      setData((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: "calling",
+              review_status: "pending",
+              call_attempts: json.callAttempts ?? (prev.call_attempts ?? 0) + 1,
+              bolna_status: json.bolnaStatus || "queued",
+            }
+          : prev
+      )
     } catch (e: any) {
       toast({ title: "Failed", description: e.message, variant: "destructive" })
     } finally {
@@ -418,6 +467,26 @@ export function PhoneScreeningResultsSheet({
   const isTerminal = callTruth.terminal
   const isSuccessfulCompletion = callTruth.state === "completed"
   const isFailedOrPartial = callTruth.state === "our_side_failed" || callTruth.state === "partial" || callTruth.state === "not_placed"
+
+  // Shared attempt budget. Every placement path — the automatic ladder, the
+  // pipeline "Call Now" action and this retry button — draws from the same
+  // counter, so this is the number HR has left, not a per-button allowance.
+  const attemptsUsed = data?.call_attempts ?? 0
+  const attemptsLeft = Math.max(0, MAX_CALL_ATTEMPTS - attemptsUsed)
+  const atAttemptCap = attemptsUsed >= MAX_CALL_ATTEMPTS
+
+  // Why the last attempt ended, so the recruiter retries knowingly rather than
+  // blindly re-dialling a candidate who asked to be called back later.
+  const lastFailureReason: string | null = (() => {
+    if (!data) return null
+    if (data.callback_preference) return `Candidate asked to be called: ${data.callback_preference}`
+    if (data.bolna_status === "busy") return "Line was busy"
+    if (data.bolna_status === "no-answer") return "Nobody answered"
+    if (data.bolna_status === "voicemail") return "Reached voicemail, not a human"
+    if (data.bolna_status === "failed_partial") return "Candidate hung up mid-conversation"
+    if (data.call_cost_cents != null) return `Previous attempt cost ₹${(data.call_cost_cents / 100).toFixed(2)}`
+    return null
+  })()
   const alreadyReviewed = d.review_status === "approved" || d.review_status === "rejected"
 
   return (
@@ -676,10 +745,37 @@ export function PhoneScreeningResultsSheet({
                           <UserX className="h-3.5 w-3.5" />
                           Manual Follow-up
                         </Button>
-                        <Button size="sm" className="h-9 text-xs bg-zinc-600 hover:bg-zinc-700 gap-1 flex-1 sm:flex-none" onClick={() => handleRetryCall()} disabled={reviewBusy}>
-                          <RefreshCw className="h-3.5 w-3.5" />
-                          Retry Call
+                        <Button
+                          size="sm"
+                          className="h-9 text-xs bg-zinc-600 hover:bg-zinc-700 gap-1 flex-1 sm:flex-none"
+                          onClick={openRetryDialog}
+                          disabled={reviewBusy || atAttemptCap}
+                          title={
+                            atAttemptCap
+                              ? `All ${MAX_CALL_ATTEMPTS} attempts used — this candidate is flagged for manual followup`
+                              : `Place attempt ${attemptsUsed + 1} of ${MAX_CALL_ATTEMPTS}`
+                          }
+                        >
+                          {reviewBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                          {atAttemptCap ? "No attempts left" : "Retry Call"}
                         </Button>
+                      </div>
+                      {/* Spend visibility: which attempt this is, what is left, and
+                          why the last one ended. Without this the recruiter cannot
+                          tell "one more try" from "this is the last try". */}
+                      <div className="w-full sm:w-auto sm:min-w-[15rem]">
+                        <p className="text-[11px] text-zinc-600">
+                          Attempt <span className="font-semibold text-zinc-900">{attemptsUsed}</span> of{" "}
+                          <span className="font-semibold text-zinc-900">{MAX_CALL_ATTEMPTS}</span>
+                          {attemptsLeft > 0 ? (
+                            <span> · {attemptsLeft} left</span>
+                          ) : (
+                            <span className="font-semibold text-red-700"> · limit reached</span>
+                          )}
+                        </p>
+                        {lastFailureReason && (
+                          <p className="text-[11px] text-zinc-500 mt-0.5">Last attempt: {lastFailureReason}</p>
+                        )}
                       </div>
                     </div>
                   )}
@@ -1197,6 +1293,90 @@ export function PhoneScreeningResultsSheet({
           </div>
         )}
       </SheetContent>
+
+      {/* Retry confirmation. Every retry spends one of a candidate's three shared
+          attempts, so it is a spend decision: it names the candidate and job, shows
+          the remaining budget, requires a reason for the audit trail, and cannot be
+          submitted at the cap. */}
+      <Dialog open={retryDialogOpen} onOpenChange={setRetryDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-base">Retry AI screening call</DialogTitle>
+            <DialogDescription className="text-xs">
+              This places a real phone call and uses one of the candidate&rsquo;s{" "}
+              {MAX_CALL_ATTEMPTS} total attempts
+              {attemptsLeft === 1 ? "" : "s"}.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3 py-1">
+            <div className="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs space-y-0.5">
+              <p>
+                <span className="text-zinc-500">Candidate: </span>
+                <span className="font-medium text-zinc-900">{cand?.name || "—"}</span>
+              </p>
+              <p>
+                <span className="text-zinc-500">Role: </span>
+                <span className="font-medium text-zinc-900">
+                  {data?.jobs?.title || cand?.current_role || "—"}
+                </span>
+              </p>
+              <p>
+                <span className="text-zinc-500">Number: </span>
+                <span className="font-mono text-zinc-900">{cand?.phone || "—"}</span>
+              </p>
+              <p>
+                <span className="text-zinc-500">Attempts: </span>
+                <span className="font-medium text-zinc-900">
+                  {attemptsUsed} of {MAX_CALL_ATTEMPTS} used · {attemptsLeft} remaining
+                </span>
+              </p>
+            </div>
+
+            {lastFailureReason && (
+              <p className="text-[11px] text-zinc-600">Last attempt: {lastFailureReason}</p>
+            )}
+
+            <div className="space-y-1.5">
+              <Label htmlFor="retry-reason" className="text-xs font-medium">
+                Why are you retrying? <span className="text-red-600">*</span>
+              </Label>
+              <Textarea
+                id="retry-reason"
+                value={retryReason}
+                onChange={(e) => setRetryReason(e.target.value)}
+                placeholder="e.g. Candidate was in a meeting, asked us to call back after 4pm"
+                rows={3}
+                className="text-xs"
+                autoFocus
+              />
+              <p className="text-[11px] text-zinc-500">
+                Recorded against the candidate for the audit trail.
+              </p>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setRetryDialogOpen(false)}
+              disabled={reviewBusy}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              className="bg-zinc-700 hover:bg-zinc-800"
+              onClick={handleRetryCall}
+              disabled={reviewBusy || retryReason.trim().length < RETRY_REASON_MIN || atAttemptCap}
+            >
+              {reviewBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+              Place attempt {attemptsUsed + 1}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Sheet>
   )
 }

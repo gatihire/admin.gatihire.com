@@ -6,7 +6,7 @@
 
 import { supabaseAdmin } from "@/lib/supabase"
 import { placeBolnaCall } from "@/lib/bolna"
-import { getWhatsAppService } from "@/lib/whatsapp"
+import { getWhatsAppService, talentOutreachTemplateName } from "@/lib/whatsapp"
 import { generateJDQuestions } from "@/lib/jd-questions"
 import { buildAlreadyCollectedUserData, buildResumeInfo } from "@/lib/prompt-user-data"
 import { scheduleOutreachFollowup, scheduleBolnaCall, outreachNudgeHours, outreachEscalateHours } from "@/lib/scheduled-call"
@@ -289,20 +289,40 @@ async function sendOutboundWithJobLink(opts: {
   const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(
     candidate, job, client, origin, participantId
   )
-  const jobLink = getPublicJobUrl(job.id)
+const jobLink = getPublicJobUrl(job.id)
 
-    const outreachResult = await getWhatsAppService().sendTalentOutreach({
+  // Hoisted so the values recorded in the thread are literally the values sent.
+  // They were previously re-derived on each side and could drift apart.
+  const outreachTemplate = talentOutreachTemplateName()
+  const outreachLocation = jobLocation(job) || "Multiple locations"
+  const outreachSalary = formatSalaryRange(job) || "As per industry standards"
+  const outreachCompany = job.client_name || client?.name || "our client"
+
+  const outreachResult = await getWhatsAppService().sendTalentOutreach({
     phoneNumber: candidate.phone as string,
     candidateName: candidate.name || "",
     jobTitle: job.title || "",
-    companyName: job.client_name || client?.name || "",
+    companyName: outreachCompany,
     // talent_outreach_v2 has five required body parameters. Meta rejects the
     // whole send with #131008 if any one arrives empty, so a job with no city
     // and no salary took down the message rather than degrading the text.
-    location: jobLocation(job) || "Multiple locations",
-    salary: formatSalaryRange(job) || "As per industry standards",
+    location: outreachLocation,
+    salary: outreachSalary,
   })
   if (!outreachResult.success) return { sent: false, error: outreachResult.error }
+
+  // Preserve the webhook idempotency ledger. Replacing screening_context wholesale
+  // dropped processedMessages, so every message Meta had ever delivered for this
+  // participant became "unseen" again: a single retry of an old webhook event was
+  // then re-run as a fresh reply. Observed live — an old message was stamped as
+  // processed at 05:48:14 against a nudge sent at 05:47:44.
+  const { data: existingParticipant } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .select("id, screening_context")
+    .eq("campaign_id", campaignId)
+    .eq("candidate_id", candidate.id)
+    .maybeSingle()
+  const existingContext = (existingParticipant?.screening_context || {}) as Record<string, any>
 
   const now = new Date().toISOString()
   await supabaseAdmin
@@ -318,25 +338,24 @@ async function sendOutboundWithJobLink(opts: {
       whatsapp_message_id: outreachResult.messageId || null,
       whatsapp_sent_at: now,
       whatsapp_delivery_status: "sent",
-      whatsapp_outbound_template: "talent_outreach",
+      whatsapp_outbound_template: outreachTemplate,
       whatsapp_outbound_params: {
         jobTitle: job.title,
         location: jobLocation(job),
         salaryBudget: formatSalaryRange(job),
       },
-      whatsapp_history: [{
-        messageId: outreachResult.messageId || null,
-        template: "talent_outreach",
-        direction: "out",
-        text: `Hi ${candidate.name || "there"}, we have an opening for ${job.title || "a role"} at ${job.client_name || client?.name || "our client"}${job.city ? ` in ${job.city}` : ""}. Would you be interested?`,
-        sentAt: now,
-        status: "sent",
-      }],
+      // whatsapp_history is deliberately NOT written here. Assigning it
+      // replaced the whole array, so re-running outreach erased the entire
+      // existing conversation — every prior reply, button tap and delivery
+      // receipt — leaving a recruiter card that looked like a brand-new thread.
+      // The thread is appended below instead.
       call_payload_json: userData,
       generated_questions: generatedQuestions.join("\n"),
       gemini_prompt_used: geminiPromptUsed,
       screening_context: {
         ...screeningContextFor(job, client, origin, { preScreenConfig }),
+        ...existingContext,
+        processedMessages: existingContext.processedMessages || {},
         awaitingInterest: true,
         jobUrl: jobLink,
       },
@@ -344,6 +363,28 @@ async function sendOutboundWithJobLink(opts: {
     })
     .eq("campaign_id", campaignId)
     .eq("candidate_id", candidate.id)
+
+  // Record only what we know is true: the template that was sent and the exact
+  // parameter values it was sent with. The rendered body lives in Meta and cannot
+  // be read back, so it is summarised from those values rather than invented.
+  // The old hand-written sentence ("we have an opening for ... Would you be
+  // interested?") bore no relation to the template the candidate actually read,
+  // which showed location and salary and asked a different question.
+  const resolvedParticipantId = participantId || existingParticipant?.id
+  if (resolvedParticipantId) {
+    await appendThreadEntry(resolvedParticipantId, {
+      messageId: outreachResult.messageId || null,
+      template: outreachTemplate,
+      direction: "out",
+      text: [
+        `${candidate.name || "there"} — ${job.title || "an open role"} at ${outreachCompany}`,
+        `Location: ${outreachLocation}`,
+        `Salary: ${outreachSalary}`,
+      ].join("\n"),
+      sentAt: now,
+      status: "sent",
+    })
+  }
 
   if (jobLink) {
     // Hold the link back so it cannot overtake the outreach. Meta delivered a

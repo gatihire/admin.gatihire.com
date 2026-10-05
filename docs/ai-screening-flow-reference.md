@@ -187,14 +187,16 @@ the code default.
 
 | Template | Params | Trigger |
 |---|---|---|
-| `schedule_options` | `candidateName`, `jobTitle` | Post-pre-screen `proceed`, and portal slot booking |
-| `ai_call_reassurance` | `candidateName`, `jobTitle`, `companyName` | Candidate anxious about an AI call |
+| `schedule_options` | `candidateName`, `jobTitle`, **`callerNumber`** | Post-pre-screen `proceed`, and portal slot booking |
+| `ai_call_reassurance` | `candidateName`, `jobTitle`, `companyName`, **`callerNumber`** | Candidate anxious about an AI call |
 
 `schedule_options` is accompanied by interactive buttons:
 
 ```ts
 // app/api/whatsapp/webhook/meta/route.ts
-body:   "✅ Thanks for sharing your details! Your profile looks like a good fit.\n\nWhen should our AI recruiter call you for the quick screening?"
+body:   "✅ Thanks for sharing your details! Your profile looks like a good fit.\n\n" +
+        "When should our AI recruiter call you for the quick screening?\n\n" +
+        `Expect the call on ${AI_CALLER_NUMBER}. Please keep your phone handy.`
 footer: "Reply 'call now' or pick a slot"
 buttons: [ { id: "call_now" }, { id: "in_10_min" }, { id: "in_30_min" } ]
 ```
@@ -203,15 +205,84 @@ buttons: [ { id: "call_now" }, { id: "in_10_min" }, { id: "in_30_min" } ]
 
 | Template | Params | Trigger |
 |---|---|---|
-| `call_nudge` | `candidateName`, `jobTitle`, `companyName` | No reply after `nudgeHours` (default from `outreachNudgeHours()`) |
+| `call_nudge` | `candidateName`, `jobTitle`, `companyName`, **`callerNumber`** | No reply after `nudgeHours` (default from `outreachNudgeHours()`) |
 | `reminder_nudge` | `candidateName`, `jobTitle`, `companyName`, `location` | Second follow-up |
 | `second_reminder_nudge` | *(none)* | Final nudge before escalation at `escalateHours` |
-| `tried_calling` | `candidateName`, `jobTitle`, `companyName` | After an attempted call |
-| `missed_call_reschedule` | `candidateName`, `jobTitle`, `companyName` | Candidate didn't pick up |
-| `call_completed` | `candidateName`, `jobTitle`, `companyName` | Screening call finished |
+| `tried_calling` | `candidateName`, `jobTitle`, `companyName`, **`callerNumber`** | After an attempted call |
+| `missed_call_reschedule` | `candidateName`, `jobTitle`, `companyName`, **`callerNumber`** | Candidate didn't pick up |
+| `call_completed` | `candidateName`, `jobTitle`, `companyName`, **`callerNumber`** | Screening call finished |
 
 Default ladder: `nudgeHours` **4** → `escalateHours` **8**, `maxCallAttempts: 2`
 (`outreachNudgeHours()` / `outreachEscalateHours()`, env-overridable and clamped to 1–24).
+
+### The caller number (`+918031805503`)
+
+Every message that announces or books an AI call names the number the call will
+come from. Carrier unknown-number screening and caller-ID blocking make a large
+share of candidates decline an unrecognised call, and an unrecognised screening
+call is indistinguishable from a scam call — which loses the candidate and reads
+against the sender's WhatsApp quality rating.
+
+The number lives in one place, `AI_CALLER_NUMBER` in `lib/whatsapp.ts`
+(env-overridable via `WHATSAPP_AI_CALLER_NUMBER`).
+
+**No re-approval needed** — session messages inside the 24-hour customer service
+window. These already name the number:
+
+- `app/api/whatsapp/webhook/meta/route.ts` — the post-pre-screen slot offer
+  (`proceedBody`), the exact moment the candidate commits to a call
+- `app/api/phone-screening/participants/[id]/pre-screen-review/route.ts` — the
+  "our AI recruiter will call you shortly" approval notice
+
+> The Aisensy sender is not used (the fallback branch in `sendTemplateMessage`
+> is unreachable — it guards on `this.aisensy`, which is only ever assigned
+> inside `getAisensyService()`). Meta is the only live provider.
+
+#### ⚠️ Meta re-approval required for 7 templates
+
+These seven bodies must be edited in **WhatsApp Manager → Message Templates** to
+add the caller-number placeholder, then resubmitted. Meta returns any edit to
+`PENDING`, and sends are blocked until `APPROVED`.
+
+The placeholder index is **the next one after the parameters the template already
+has**, so it is not always `{{4}}` — `schedule_options` carries only a name and a
+role, so its slot is `{{3}}`. Adding `{{4}}` there leaves the send permanently
+rejected for a parameter-count mismatch.
+
+| Template | Existing params | Add to body (suggested wording) |
+|---|---|---|
+| `schedule_options` | 2 | `Expect our AI recruiter's call on {{3}}.` |
+| `call_nudge` | 3 | `Expect our AI recruiter's call on {{4}}.` |
+| `tried_calling` | 3 | `Expect our AI recruiter's call on {{4}}.` |
+| `missed_call_reschedule` | 3 | `Expect our AI recruiter's call on {{4}}.` |
+| `shortlist_call_schedule_v2` | 3 | `Expect our AI recruiter's call on {{4}}.` |
+| `ai_call_reassurance` | 3 | `Our AI recruiter will call you from {{4}}.` |
+| `call_completed` | 3 | `Questions? Our AI recruiter can be reached on {{4}}.` |
+
+Meta rejects the **entire send** when the supplied parameter count does not match
+the approved body, so the code cannot simply send the extra value ahead of
+approval. Two mechanisms keep this safe:
+
+1. **Opt-in switch (default OFF)** — the slot is only ever sent when
+   `WHATSAPP_INCLUDE_CALLER_NUMBER=true`. Anything else omits it, so a deploy can
+   never break a send on its own. The number lives in
+   `WHATSAPP_AI_CALLER_NUMBER` (defaults to `+918031805503`).
+2. **Per-template gate** — `CALLER_NUMBER_TEMPLATES` in `lib/whatsapp.ts`. Only
+   names in this set get the extra parameter; every other template is sent
+   without it and still succeeds. The safe outcome is always "number omitted",
+   never "message failed".
+
+> Because approval is tracked per WABA and per environment, the switch is
+> deliberately per-environment too. Do not enable it in production until **that
+> environment's** seven bodies are back to `APPROVED`.
+
+**Deployment order:** update and re-approve the seven Meta templates *first*, set
+`WHATSAPP_INCLUDE_CALLER_NUMBER=true` in that environment, then deploy. To roll
+back without a code change, unset the variable or set it to anything other than
+`true`. `sendShortlistSchedule` degrades safely on its own — a parameter-count
+rejection (`132000`) on `shortlist_call_schedule_v2` falls through to the legacy
+`shortlist_call_schedule`, which sends without the number rather than dropping the
+candidate.
 
 ### Confirmations and closures
 

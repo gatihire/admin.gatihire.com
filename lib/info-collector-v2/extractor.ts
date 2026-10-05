@@ -4,7 +4,9 @@ import { logger } from '@/lib/logger';
 import { extractCtcNumber, extractNoticePeriod } from './validators';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-const MODEL_NAME = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+// gemini-1.5-flash is retired and 404s on v1beta, so CTC/notice extraction was
+// failing open. Matches the model the rest of the codebase already uses.
+const MODEL_NAME = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite-preview';
 
 interface ExtractionResult {
   extracted_value: string | null;
@@ -143,7 +145,7 @@ export async function extractStepValue(
 
   try {
     const model = genAI.getGenerativeModel({ 
-      model: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+      model: process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite-preview',
       generationConfig: {
         temperature: 0.1,
         maxOutputTokens: 500,
@@ -214,7 +216,7 @@ export async function extractAllFieldsFromReply(
 
   try {
     const model = genAI.getGenerativeModel({ 
-      model: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
+      model: process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite-preview',
       generationConfig: {
         temperature: 0.1,
         maxOutputTokens: 500,

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
-import { placeCallImmediately } from "@/lib/scheduled-call"
+import { placeCallImmediately, MAX_TOTAL_CALL_ATTEMPTS } from "@/lib/scheduled-call"
 import { supabaseAdmin } from "@/lib/supabase"
 import { logger } from "@/lib/logger"
 
@@ -20,15 +20,33 @@ export async function POST(request: NextRequest) {
     const participantId = String(body?.participantId || "")
     if (!participantId) return NextResponse.json({ error: "participantId required" }, { status: 400 })
 
-    // HR clicked "Call now": an explicit human override, so the automatic
-    // duplicate-protection is bypassed here (it still applies to the WhatsApp and
-    // automated paths). If the provider still rejects it we say so rather than
-    // implying a call was placed.
+    // HR clicked "Call now": an explicit human override of the accidental
+    // double-dial guard (it still applies to the WhatsApp and automated paths).
+    // It is NOT an override of the hard attempt budget — placeCallForParticipant
+    // refuses to dial past MAX_TOTAL_CALL_ATTEMPTS even with force, and flags the
+    // row for manual followup when it does.
     const result = await placeCallImmediately(participantId, { force: true })
 
     if (!result.success) {
-      const status = result.error === "Participant not found" ? 404 : 502
-      return NextResponse.json({ error: result.error || "Failed to place call", callPlaced: false }, { status })
+      // Distinguish "you already used all your attempts" from "the provider
+      // refused". A 409 with the cap attached is what lets the UI explain the
+      // refusal instead of showing a generic failure the recruiter retries blindly.
+      if (result.reason === "attempt_cap") {
+        return NextResponse.json(
+          {
+            error: result.error || "Attempt limit reached",
+            callPlaced: false,
+            reason: "attempt_cap",
+            maxAttempts: MAX_TOTAL_CALL_ATTEMPTS,
+          },
+          { status: 409 }
+        )
+      }
+      const status = result.reason === "not_found" ? 404 : 502
+      return NextResponse.json(
+        { error: result.error || "Failed to place call", callPlaced: false, reason: result.reason || "provider_rejected" },
+        { status }
+      )
     }
 
     // Return the execution id so the UI can show a verifiable reference instead of

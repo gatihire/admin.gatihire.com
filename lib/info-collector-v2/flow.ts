@@ -514,10 +514,20 @@ async function handleIncomingSchedule(participantId: string, delayMs: number): P
   }
 }
 
-async function handleInteractiveButton(participantId: string, buttonId: string, _buttonTitle: string): Promise<{ success: boolean; error?: string }> {
+async function handleInteractiveButton(participantId: string, buttonId: string, _buttonTitle: string, phoneOverride?: string): Promise<{ success: boolean; error?: string }> {
   try {
     const participant = await getParticipantWithExtras(participantId);
     if (!participant) return { success: false, error: 'Participant not found' };
+
+    // Where to send the reply.
+    //
+    // The webhook passes the number the tap actually came from. Normally that is
+    // identical to the participant's stored phone, but when the sender matched no
+    // candidate row the webhook had to attribute the tap by fallback — and then
+    // participant.candidates.phone belongs to somebody else entirely. Sending to
+    // the stored phone there meant the person who tapped "Interested" got no
+    // answer at all, and the tap looked like it had been dropped.
+    const replyPhone = phoneOverride || participant.candidates?.phone;
     
     logger.info('Handling interactive button', { participantId, buttonId, buttonTitle: _buttonTitle });
 
@@ -562,23 +572,34 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
             .eq('id', participantId);
 
           const whatsapp = getWhatsAppService();
-          if (participant.candidates?.phone) {
+          if (replyPhone) {
             await whatsapp.sendScheduleOptions({
-              phoneNumber: participant.candidates.phone,
+              phoneNumber: replyPhone,
               candidateName: participant.candidate_name,
               jobTitle: participant.job_title,
             });
+          } else {
+            logger.error('Interested with no reachable phone', { participantId });
+            await supabaseAdmin
+              .from('phone_screening_participants')
+              .update({
+                needs_manual_followup: true,
+                updated_at: new Date().toISOString()
+              })
+              .eq('id', participantId);
           }
           break;
         }
 
+        // info_data is intentionally preserved. Blanking it discarded CTC/notice
+        // details the candidate had already given and forced a restart of the
+        // questionnaire.
         await supabaseAdmin
           .from('phone_screening_participants')
           .update({
             status: 'info_requested',
             screening_mode: 'collect_info_first',
             info_step: 'collect_form',
-            info_data: {},
             info_confirmed: false,
             screening_context: {
               ...((participant as any).screening_context || {}),
@@ -589,13 +610,24 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
           })
           .eq('id', participantId);
 
-        if (!participant.candidates?.phone) {
-          throw new Error('interested but no phone on participant');
+        // Previously a hard throw. The catch turned it into a generic failure and
+        // the row was left in info_requested with no form sent and no flag, so it
+        // read as "form in progress" when nobody had been contacted.
+        if (!replyPhone) {
+          logger.error('Interested but no phone to send the details form to', { participantId });
+          await supabaseAdmin
+            .from('phone_screening_participants')
+            .update({
+              needs_manual_followup: true,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', participantId);
+          break;
         }
 
         const whatsapp = getWhatsAppService();
         const form = await whatsapp.sendCollectInfoForm({
-          phoneNumber: participant.candidates.phone,
+          phoneNumber: replyPhone,
           candidateName: participant.candidate_name,
           jobTitle: participant.job_title,
           companyName: participant.company_name,
@@ -621,7 +653,7 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
         // open instead of interrogating them for a reason. The reason-asking
         // template reads as pressure and was what a tapped "Not Interested"
         // used to trigger.
-        const phone = participant.candidates?.phone;
+        const phone = replyPhone;
         if (!phone) break;
 
         await supabaseAdmin

@@ -3,7 +3,7 @@ import { supabaseAdmin } from "@/lib/supabase"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { deriveOrigin, deriveCandidateFlow, type CandidateOrigin } from "@/lib/origin"
 import { orchestrateScreening, systemDecidesMode, getPublicJobUrl, formatSalaryRange, jobLocation } from "@/lib/call-orchestrator"
-import { getWhatsAppService } from "@/lib/whatsapp"
+import { getWhatsAppService, talentOutreachTemplateName } from "@/lib/whatsapp"
 import { placeCallImmediately } from "@/lib/scheduled-call"
 import { logger } from "@/lib/logger"
 import { sendSessionMessage, hasEnoughToScreen } from "@/lib/info-collector-v2"
@@ -88,6 +88,10 @@ async function renudgeExistingParticipant(opts: {
     let template: string
     let status: string
     let outboundLink: string | null = null
+    // Hoisted so the thread records exactly what the template was sent with.
+    let outboundLocation = ""
+    let outboundSalary = ""
+    let outboundCompany = ""
     const portalShortlist = flow === "portal"
 
     // Outbound re-nudges always re-run the full outbound opener — outreach plus
@@ -100,19 +104,25 @@ async function renudgeExistingParticipant(opts: {
     // generic branch and sent collect_info_form directly — asking a stranger for
     // their CTC before they had agreed to anything.
     if (flow === "outbound") {
-      template = "talent_outreach"
+      // Must match the name the send actually uses. Hardcoding "talent_outreach"
+      // recorded a template the candidate never received, making a correct
+      // re-nudge look like the wrong message had gone out.
+      template = talentOutreachTemplateName()
+      outboundLocation = jobLocation(job) || "Multiple locations"
+      outboundSalary = formatSalaryRange(job) || "As per industry standards"
+      outboundCompany = job.client_name || client?.name || "our client"
       msgResult = await whatsapp.sendTalentOutreach({
         phoneNumber: candidate.phone as string,
         candidateName: candidate.name || "",
         jobTitle: job.title || "",
-        companyName: job.client_name || client?.name || "",
+        companyName: outboundCompany,
         // Empty parameters make Meta reject the entire send with #131008, so
         // both fallbacks here are load-bearing, not cosmetic.
-        location: jobLocation(job) || "Multiple locations",
+        location: outboundLocation,
         // Shared with the orchestrator. The inline `${min} - ${max}` this
         // replaced printed raw rupees ("Rs 500000 - 600000") to candidates and
         // "?" whenever either bound was unset.
-        salary: formatSalaryRange(job) || "As per industry standards",
+        salary: outboundSalary,
       })
       status = "whatsapp_sent"
       outboundLink = getPublicJobUrl(job.id)
@@ -183,9 +193,18 @@ async function renudgeExistingParticipant(opts: {
       messageId: msgResult.messageId || null,
       template,
       direction: "out",
+      // Record the parameters actually sent rather than an invented sentence.
+      // The rendered body lives in Meta and cannot be read back; the previous
+      // hand-written "following up ... Would you be interested?" matched nothing
+      // the candidate received, so the recruiter card could not be trusted when
+      // a candidate disputed what they were told.
       text:
-        template === "talent_outreach"
-          ? `Hi ${candidate.name || "there"}, following up on the ${job.title || "role"} at ${job.client_name || client?.name || "our client"}. Would you be interested?`
+        flow === "outbound"
+          ? [
+              `${candidate.name || "there"} — ${job.title || "an open role"} at ${outboundCompany}`,
+              `Location: ${outboundLocation}`,
+              `Salary: ${outboundSalary}`,
+            ].join("\n")
           : `Following up on your screening for ${job.title || "the role"}.`,
       sentAt: now,
       status: "sent",

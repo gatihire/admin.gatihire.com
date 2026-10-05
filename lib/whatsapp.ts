@@ -52,6 +52,90 @@ function templateParam(value: string | undefined | null, fallback: string): stri
   return s || fallback
 }
 
+/**
+ * The number the AI screener calls from.
+ *
+ * Candidates are told to expect the call on this specific number because carrier
+ * "unknown number" screening and caller-ID blocking make a large share of
+ * candidates silently reject an unrecognised call. A screening call the
+ * candidate does not recognise is indistinguishable from a scam call, which
+ * loses the candidate and reads against the sender's WhatsApp quality rating.
+ */
+export const AI_CALLER_NUMBER = (
+  process.env.WHATSAPP_AI_CALLER_NUMBER || "+918031805503"
+).trim()
+
+/**
+ * Templates whose approved Meta body carries an extra caller-number slot.
+ *
+ * Meta rejects the ENTIRE send when the supplied parameter count does not match
+ * the approved body, so a template that has not yet been re-approved cannot be
+ * sent with the extra slot — the send fails outright rather than rendering
+ * nothing. Adding a name here is therefore the deploy-time switch that goes
+ * live once the re-approved template is published in WhatsApp Manager.
+ *
+ * A name that is NOT in this set is sent without the slot and still succeeds,
+ * so the safe outcome is always "number omitted", never "message failed". The
+ * legacy no-suffix `shortlist_call_schedule` is deliberately excluded so the
+ * fallback chain retains a template that is known to send.
+ */
+const CALLER_NUMBER_TEMPLATES = new Set([
+  "schedule_options",
+  "call_nudge",
+  "tried_calling",
+  "missed_call_reschedule",
+  "shortlist_call_schedule_v2",
+  "ai_call_reassurance",
+  "call_completed",
+])
+
+/** Caller-number slot is opt-in and defaults to OFF.
+ *
+ *  Meta rejects an ENTIRE template send when the supplied parameter count does not
+ *  match the approved body. The slot is therefore only safe to send once the body
+ *  carrying it has been re-approved for that specific WABA, which is a manual step
+ *  in WhatsApp Manager and is tracked per environment.
+ *
+ *  Defaulting to on meant that deploying the code broke all seven call-related
+ *  sends for anyone whose templates had not yet been re-approved, with the only
+ *  remedy being an emergency env change. So enabling now requires saying so
+ *  explicitly: `WHATSAPP_INCLUDE_CALLER_NUMBER=true`. */
+function callerNumberEnabled(templateName: string): boolean {
+  if (process.env.WHATSAPP_INCLUDE_CALLER_NUMBER !== "true") return false
+  return CALLER_NUMBER_TEMPLATES.has(templateName)
+}
+
+/**
+ * Body parameters for a call-related template, with the caller number appended
+ * only when the approved template actually carries the slot.
+ */
+function callTemplateParams(
+  templateName: string,
+  values: Array<{ value: string | undefined | null; fallback: string }>
+): TemplateParameter[] {
+  const params: TemplateParameter[] = values.map((v) => ({
+    type: "text",
+    text: templateParam(v.value, v.fallback),
+  }))
+  if (callerNumberEnabled(templateName)) {
+    params.push({ type: "text", text: AI_CALLER_NUMBER })
+  }
+  return params
+}
+
+/**
+ * The outreach template name that will actually be used for this send.
+ *
+ * Exported because callers persist this on the participant row and in the
+ * conversation timeline. Those places used to hardcode "talent_outreach" while
+ * the send itself defaulted to "talent_outreach_v2", so the recruiter card named
+ * a template the candidate never received — which made a healthy send look like
+ * the wrong message had gone out.
+ */
+export function talentOutreachTemplateName(): string {
+  return process.env.WHATSAPP_TEMPLATE_TALENT_OUTREACH || "talent_outreach_v2"
+}
+
 export class WhatsAppService {
   private config: WhatsAppConfig
   private baseUrl: string
@@ -330,7 +414,7 @@ export class WhatsAppService {
     // Falling back to "talent_outreach" (no suffix) means every outbound send
     // fails with #132001 "Template name does not exist" whenever the env var is
     // missing from a deployed environment.
-    const templateName = process.env.WHATSAPP_TEMPLATE_TALENT_OUTREACH || "talent_outreach_v2"
+    const templateName = talentOutreachTemplateName()
 
     return this.sendTemplateMessage({
       to: params.phoneNumber,
@@ -387,10 +471,10 @@ export class WhatsAppService {
       components: [
         {
           type: "body",
-          parameters: [
-            { type: "text", text: params.candidateName },
-            { type: "text", text: params.jobTitle }
-          ]
+          parameters: callTemplateParams(templateName, [
+            { value: params.candidateName, fallback: "there" },
+            { value: params.jobTitle, fallback: "an open role" },
+          ])
         }
       ]
     })
@@ -410,11 +494,11 @@ export class WhatsAppService {
       components: [
         {
           type: "body",
-          parameters: [
-            { type: "text", text: params.candidateName },
-            { type: "text", text: params.jobTitle },
-            { type: "text", text: params.companyName }
-          ]
+          parameters: callTemplateParams(templateName, [
+            { value: params.candidateName, fallback: "there" },
+            { value: params.jobTitle, fallback: "an open role" },
+            { value: params.companyName, fallback: "our client" },
+          ])
         }
       ]
     })
@@ -434,11 +518,11 @@ export class WhatsAppService {
       components: [
         {
           type: "body",
-          parameters: [
-            { type: "text", text: params.candidateName },
-            { type: "text", text: params.jobTitle },
-            { type: "text", text: params.companyName }
-          ]
+          parameters: callTemplateParams(templateName, [
+            { value: params.candidateName, fallback: "there" },
+            { value: params.jobTitle, fallback: "an open role" },
+            { value: params.companyName, fallback: "our client" },
+          ])
         }
       ]
     })
@@ -458,11 +542,11 @@ export class WhatsAppService {
       components: [
         {
           type: "body",
-          parameters: [
-            { type: "text", text: params.candidateName },
-            { type: "text", text: params.jobTitle },
-            { type: "text", text: params.companyName }
-          ]
+          parameters: callTemplateParams(templateName, [
+            { value: params.candidateName, fallback: "there" },
+            { value: params.jobTitle, fallback: "an open role" },
+            { value: params.companyName, fallback: "our client" },
+          ])
         }
       ]
     })
@@ -602,11 +686,11 @@ export class WhatsAppService {
           components: [
             {
               type: "body",
-              parameters: [
-                { type: "text", text: templateParam(params.candidateName, "there") },
-                { type: "text", text: templateParam(params.jobTitle, "an open role") },
-                { type: "text", text: templateParam(params.companyName, "our client") }
-              ]
+              parameters: callTemplateParams(templateName, [
+                { value: params.candidateName, fallback: "there" },
+                { value: params.jobTitle, fallback: "an open role" },
+                { value: params.companyName, fallback: "our client" },
+              ])
             }
           ]
         })
@@ -618,9 +702,18 @@ export class WhatsAppService {
       const retryable = [
         131042, // Message template in non-approved state
         131047, // Template paused / not ready
-        132000, // Missing template text
+        132000, // Missing template text / parameter count mismatch
         132001, // Template name does not exist in the translation
       ].includes(code)
+      // 132000 on a caller-number template means the approved body still has
+      // only three placeholders, i.e. the re-approved template is not live yet.
+      // The chain falls through to the legacy name (no caller slot) so the
+      // candidate is still contacted — without the number — rather than lost.
+      if (code === 132000 && callerNumberEnabled(templateName)) {
+        logger.warn("Shortlist template rejected: caller-number slot not yet approved in Meta", {
+          templateName,
+        })
+      }
       if (!retryable) break
     }
 
@@ -687,11 +780,11 @@ export class WhatsAppService {
       components: [
         {
           type: "body",
-          parameters: [
-            { type: "text", text: params.candidateName },
-            { type: "text", text: params.jobTitle },
-            { type: "text", text: params.companyName }
-          ]
+          parameters: callTemplateParams(templateName, [
+            { value: params.candidateName, fallback: "there" },
+            { value: params.jobTitle, fallback: "an open role" },
+            { value: params.companyName, fallback: "our client" },
+          ])
         }
       ]
     })
@@ -924,11 +1017,11 @@ export class WhatsAppService {
       components: [
         {
           type: "body",
-          parameters: [
-            { type: "text", text: params.candidateName },
-            { type: "text", text: params.jobTitle },
-            { type: "text", text: params.companyName }
-          ]
+          parameters: callTemplateParams(templateName, [
+            { value: params.candidateName, fallback: "there" },
+            { value: params.jobTitle, fallback: "an open role" },
+            { value: params.companyName, fallback: "our client" },
+          ])
         }
       ]
     })
