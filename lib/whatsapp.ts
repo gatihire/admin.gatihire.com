@@ -1,6 +1,6 @@
 import { logger } from "./logger"
 import { renderTemplateBody } from "./whatsapp-template-body"
-import { toDial } from "./phone"
+import { toDial, toE164 } from "./phone"
 
 interface WhatsAppConfig {
   phoneNumberId: string
@@ -144,6 +144,46 @@ function callTemplateParams(
  */
 export function talentOutreachTemplateName(): string {
   return process.env.WHATSAPP_TEMPLATE_TALENT_OUTREACH || "talent_outreach_v2"
+}
+
+// Which numbers are we?
+//
+// Meta echoes messages sent from the business number back into the same
+// webhook. Without knowing our own number we cannot tell a candidate's reply
+// from our own outbound traffic, and the bot ends up replying to itself.
+//
+// Resolved from the Graph API rather than an env var because the business
+// number is a property of the WhatsApp account, not something we configure —
+// and an env var that drifts silently is worse than a fetch. Cached for an hour
+// since it cannot change without a re-registration.
+let selfNumbersCache: { nums: string[]; at: number } | null = null
+
+export async function getOwnWhatsAppNumbers(): Promise<string[]> {
+  const override = (process.env.WHATSAPP_BUSINESS_NUMBER || "").trim()
+  if (override) return [toE164(override)].filter(Boolean)
+
+  if (selfNumbersCache && Date.now() - selfNumbersCache.at < 60 * 60 * 1000) {
+    return selfNumbersCache.nums
+  }
+
+  const token = process.env.WHATSAPP_ACCESS_TOKEN
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID
+  const version = process.env.WHATSAPP_API_VERSION
+  if (!token || !phoneNumberId || !version) return []
+
+  try {
+    const res = await fetch(
+      `https://graph.facebook.com/${version}/${phoneNumberId}?fields=display_phone_number`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    )
+    if (!res.ok) return selfNumbersCache?.nums ?? []
+    const json: any = await res.json()
+    const nums = [toE164(json?.display_phone_number)].filter(Boolean)
+    selfNumbersCache = { nums, at: Date.now() }
+    return nums
+  } catch {
+    return selfNumbersCache?.nums ?? []
+  }
 }
 
 export class WhatsAppService {

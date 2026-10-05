@@ -15,7 +15,7 @@ import { evaluatePreScreenWithAI, buildCandidateInfoFromCollected } from "@/lib/
 import { mergeSources, stampSources, isMeaningfulValue } from "@/lib/info-provenance"
 import { updateParticipant } from "@/lib/participant-update"
 import { buildResumeInfo } from "@/lib/prompt-user-data"
-import { getWhatsAppService } from "@/lib/whatsapp"
+import { getWhatsAppService, getOwnWhatsAppNumbers } from "@/lib/whatsapp"
 import { scheduleOrPlaceCall } from "@/lib/scheduled-call"
 import { classifyIntent } from "@/lib/ai-intent-classifier"
 import { toE164 } from "@/lib/phone"
@@ -131,9 +131,62 @@ async function processMessageEvent(value: any) {
   }
 }
 
+// Record a template send into the recruiter's thread.
+//
+// Every template went out through the WhatsApp service, which has no idea a
+// participant exists, so none of them ever reached the thread. Only free-text
+// sends routed through sendAndRecord were recorded. The result was a thread that
+// showed the candidate's half of the conversation and nothing of ours — three
+// slot pickers were delivered to the candidate and the recruiter saw none of
+// them, which is exactly backwards when judging whether a candidate was ever
+// offered a call.
+//
+// `renderedBody` is the text Meta actually accepted, parameters substituted, so
+// what the thread shows is what was sent rather than our paraphrase of it.
+async function recordTemplateSend(participantId: string, result: any, extra: Record<string, any> = {}) {
+  if (!result?.success) return
+  const body = result.renderedBody
+  if (!body) {
+    logger.warn("Template send succeeded but carried no rendered body; thread entry skipped", {
+      participantId,
+      kind: extra.kind,
+    })
+    return
+  }
+  await recordOutboundText(participantId, body, {
+    kind: extra.kind || "outbound_template",
+    messageId: result.messageId ?? null,
+    ...extra,
+  })
+}
+
 async function handleIncomingMessage(message: any, contact: any) {
   const phoneNumber = message.from
   const messageType = message.type
+
+  // Is this one of ours?
+  //
+  // Meta delivers messages sent from the business number back through this same
+  // webhook, so without this the recruiter's own manual WhatsApp messages arrive
+  // looking exactly like a candidate reply. Every "hello" they typed came back
+  // as an inbound, classified `interested`, and drew another slot picker:
+  //
+  //   12:01:32  recruiter: hello      ->  12:01:34  schedule template
+  //   12:17:24  recruiter: ok no problem -> 12:17:28 schedule template
+  //   12:30:12  recruiter: hii       ->  12:30:18  schedule template
+  //
+  // Three identical slot pickers, each firing seconds after a recruiter typed
+  // rather than after the candidate said anything. It reads like the candidate
+  // kept asking to be scheduled; it was us answering ourselves.
+  const ownNumbers = await getOwnWhatsAppNumbers()
+  if (ownNumbers.length && phoneNumber && ownNumbers.includes(toE164(phoneNumber))) {
+    logger.info("Ignoring WhatsApp message from our own number", {
+      phoneNumber,
+      messageType,
+      messageId: message.id,
+    })
+    return
+  }
   
   logger.info("Received WhatsApp message", { phoneNumber, messageType, messageId: message.id })
   
@@ -858,6 +911,7 @@ async function dispatchIntent(
               companyName: participant.jobs?.client_name || "",
               flowToken: participant.id,
             })
+            await recordTemplateSend(participant.id, formResult, { kind: "collect_info_form" })
             if (!formResult.success) {
               logger.error("Failed to send details form after interest", {
                 participantId: participant.id,
@@ -919,11 +973,12 @@ async function dispatchIntent(
         if (ctx.awaitingScheduleDecision !== true) {
           try {
             const whatsapp = getWhatsAppService()
-            await whatsapp.sendScheduleOptions({
+            const sent = await whatsapp.sendScheduleOptions({
               phoneNumber: respondTo,
               candidateName: participant.candidates?.name || 'Candidate',
               jobTitle: participant.jobs?.title || 'the role',
             })
+            await recordTemplateSend(participant.id, sent, { kind: "schedule_buttons" })
             // Only now is it true that we are expecting a scheduling answer.
             await markSchedulingOffer(participant)
           } catch (err: any) {
@@ -990,16 +1045,14 @@ async function dispatchIntent(
             candidateName: participant.candidates?.name || 'Candidate',
             jobTitle: participant.jobs?.title || 'the role',
           })
-          if (sent.success) {
-            await appendToHistory(participant.id, {
-              at: new Date().toISOString(),
-              kind: "schedule_buttons",
-              direction: "out",
-              text: `Thanks ${participant.candidates?.name || ''} — we already have your details from your application, so let's set up your screening call.`.trim(),
-              status: "sent",
-              messageId: sent.messageId ?? null,
-            })
-          }
+          // Was a hand-written paraphrase: "Thanks <name> — we already have
+          // your details from your application, so let's set up your screening
+          // call." The candidate actually received "Great, <name>! Let us
+          // schedule your screening call for the <job> position... Expect our AI
+          // recruiter's call on <number>." Different words, and the real one
+          // names a call number the paraphrase omits. A recruiter auditing
+          // whether a call was offered cannot tell which they are looking at.
+          await recordTemplateSend(participant.id, sent, { kind: "schedule_buttons" })
         }
         break
       }
@@ -1325,6 +1378,14 @@ async function finalizeCollectedInfo(
           { id: "in_30_min", title: "In 30 min" },
         ],
       })
+      // Interactive buttons carry their own body, not a template, so the thread
+      // needs it passed explicitly.
+      if (sendResult.success) {
+        await recordOutboundText(participant.id, proceedBody, {
+          kind: "schedule_buttons",
+          messageId: sendResult.messageId ?? null,
+        })
+      }
 
       if (!sendResult.success) {
         logger.warn("Failed to send schedule buttons after proceed", {
@@ -1424,6 +1485,7 @@ async function finalizeCollectedInfo(
           jobTitle: participant.jobs?.title || "this role",
           companyName: participant.jobs?.client_name || "",
         })
+            await recordTemplateSend(participant.id, ack, { kind: "info_review_pending" })
 
         await appendToHistory(participant.id, {
           at: new Date().toISOString(),
@@ -1518,6 +1580,7 @@ async function finalizeCollectedInfo(
           jobTitle: participant.jobs?.title || "this role",
           companyName: participant.jobs?.client_name || "",
         })
+            await recordTemplateSend(participant.id, ack, { kind: "info_review_pending" })
 
         await appendToHistory(participant.id, {
           at: new Date().toISOString(),
