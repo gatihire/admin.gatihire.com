@@ -14,8 +14,12 @@ import {
   XCircle,
 } from "lucide-react"
 import { CollectedInfoView, PreScreenVerdict } from "@/components/candidate-collected-info"
-/** How often an open thread refetches. */
-const LIVE_POLL_INTERVAL_MS = 5000
+import { supabase } from "@/lib/supabase"
+/**
+ * Fallback refresh cadence. Only used before the first realtime event arrives,
+ * and only while the tab is visible and focused. Realtime is the real path.
+ */
+const LIVE_POLL_INTERVAL_MS = 45_000
 
 import type { ThreadEntry } from "@/lib/whatsapp-thread-shared"
 import { describeTemplate, entryTime } from "@/lib/whatsapp-thread-shared"
@@ -381,65 +385,110 @@ export function WhatsAppConversationModal({
   const canSend = !!participantId
 
   /**
-   * Live updates.
+   * Live updates: push, with a cheap bounded fallback.
    *
-   * The thread is a chat: a recruiter sitting on it needs a reply to appear
-   * without re-opening anything. Polling rather than Supabase Realtime because
-   * this app does not subscribe to postgres_changes anywhere, so enabling a
-   * publication for this one view would be a wider change than it looks.
+   * This was a 5s poll per open thread, which is not defensible — every open
+   * conversation cost a request every five seconds whether or not anything had
+   * happened, and it kept costing that while the tab sat in the background.
    *
-   * Pauses when the tab is hidden, and skips when the document is not visible,
-   * so a backgrounded tab is not hammering the endpoint. Interval is a
-   * deliberate trade: short enough that "live" feels true, long enough that a
-   * recruiter watching a handful of threads is not a meaningful load.
+   * Now: subscribe to the participant row over Supabase Realtime and refetch
+   * only when it actually changes. The payload that comes back is just the
+   * changed row, and the refetch it triggers hits a conditional GET, so an idle
+   * thread costs nothing at all.
+   *
+   * The fallback poll exists on purpose. Realtime silently does nothing if the
+   * table is not in the `supabase_realtime` publication — no error, no event,
+   * just a thread that quietly stops updating. A pure-realtime view would look
+   * live and lie about it. This poll is deliberately slow (45s), pauses when the
+   * tab is hidden or unfocused, sends If-None-Match so an unchanged thread
+   * returns a 304 with no body, and stops entirely once a realtime event has
+   * been seen for this modal — so on a correctly configured project it is
+   * effectively off, and on a misconfigured one the thread degrades to slow
+   * rather than to broken.
    */
   useEffect(() => {
     if (!open || !participantId) return
 
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | null = null
+    let sawRealtime = false
+    let etag: string | undefined
+    let inFlight = false
 
-    const poll = async () => {
-      if (cancelled) return
-      if (typeof document !== "undefined" && document.hidden) {
-        timer = setTimeout(poll, LIVE_POLL_INTERVAL_MS)
-        return
-      }
+    const refetch = async (force: boolean) => {
+      if (cancelled || inFlight) return
+      inFlight = true
       try {
         const res = await fetch(`/api/phone-screening/participants/${participantId}/thread`, {
           cache: "no-store",
+          headers: etag && !force ? { "If-None-Match": etag } : undefined,
         })
-        if (res.ok) {
-          const data = await res.json()
-          if (!cancelled) {
-            // Only adopt changed slices, so an unchanged poll does not force a
-            // re-render of every bubble.
-            setLiveHistory((prev: unknown) => (prev === data.whatsapp_history ? prev : data.whatsapp_history))
-            setLiveInfo((prev: { infoData?: any; infoSources?: any; preScreenResult?: any }) => {
-              const next = {
-                infoData: data.info_data ?? undefined,
-                infoSources: data.info_sources ?? undefined,
-                preScreenResult: data.screening_context?.preScreenResult,
-              }
-              const same =
-                prev.infoData === next.infoData &&
-                prev.infoSources === next.infoSources &&
-                prev.preScreenResult === next.preScreenResult
-              return same ? prev : next
-            })
+        if (res.status === 304) return
+        const nextEtag = res.headers.get("etag")
+        if (nextEtag) etag = nextEtag
+        if (!res.ok) return
+        const data = await res.json()
+        if (cancelled) return
+        setLiveHistory((prev: unknown) => (prev === data.whatsapp_history ? prev : data.whatsapp_history))
+        setLiveInfo((prev: { infoData?: any; infoSources?: any; preScreenResult?: any }) => {
+          const next = {
+            infoData: data.info_data ?? undefined,
+            infoSources: data.info_sources ?? undefined,
+            preScreenResult: data.screening_context?.preScreenResult,
           }
-        }
+          const same =
+            prev.infoData === next.infoData &&
+            prev.infoSources === next.infoSources &&
+            prev.preScreenResult === next.preScreenResult
+          return same ? prev : next
+        })
       } catch {
-        // Offline or aborted: the thread keeps whatever it had. Never blank it.
+        // Never blank the thread on a failed refresh.
       } finally {
-        if (!cancelled) timer = setTimeout(poll, LIVE_POLL_INTERVAL_MS)
+        inFlight = false
       }
     }
 
+    // Coalesce bursts: a webhook can write the participant row several times in
+    // quick succession, and each write fires its own event.
+    let debounce: ReturnType<typeof setTimeout> | null = null
+    const channel = supabase
+      .channel(`participant-thread:${participantId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "phone_screening_participants",
+          filter: `id=eq.${participantId}`,
+        },
+        () => {
+          if (cancelled) return
+          sawRealtime = true
+          if (debounce) clearTimeout(debounce)
+          debounce = setTimeout(() => void refetch(true), 250)
+        }
+      )
+      .subscribe()
+
+    const poll = () => {
+      if (cancelled) return
+      if (sawRealtime || (typeof document !== "undefined" && (document.hidden || !document.hasFocus()))) {
+        timer = setTimeout(poll, LIVE_POLL_INTERVAL_MS)
+        return
+      }
+      timer = setTimeout(async () => {
+        await refetch(false)
+        poll()
+      }, LIVE_POLL_INTERVAL_MS)
+    }
     timer = setTimeout(poll, LIVE_POLL_INTERVAL_MS)
+
     return () => {
       cancelled = true
       if (timer) clearTimeout(timer)
+      if (debounce) clearTimeout(debounce)
+      void supabase.removeChannel(channel)
     }
   }, [open, participantId])
 

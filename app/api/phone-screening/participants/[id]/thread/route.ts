@@ -1,3 +1,4 @@
+import { createHash } from "crypto"
 import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
@@ -43,7 +44,15 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     return NextResponse.json({ error: "Participant not found" }, { status: 404 })
   }
 
+  // Conditional GET, so an unchanged thread costs a 304 and an empty body rather
+  // than a full round-trip of the transcript. The thread grows monotonically, so
+  // a content hash is a sound validator: any new message changes it.
+  const etag = `"${createHash("sha1").update(JSON.stringify(data)).digest("hex")}"`
+  if (request.headers.get("if-none-match") === etag) {
+    return new NextResponse(null, { status: 304, headers: { ETag: etag } })
+  }
+
   return NextResponse.json(data, {
-    headers: { "Cache-Control": "no-store" },
+    headers: { "Cache-Control": "no-store", ETag: etag },
   })
 }
