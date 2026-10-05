@@ -43,6 +43,27 @@ function screeningSubSection(p: any): string {
   return "pending"
 }
 
+/**
+ * True when the candidate has replied and the next move is a human's.
+ *
+ * The pre-screen hold is the state this exists for. The candidate submitted
+ * details, the AI flagged the profile (most often pay outside the band), and
+ * nobody can act until HR accepts or passes them. Previously the job list showed
+ * only the outbound "replied Yes" bucket, so these candidates were invisible
+ * above the pipeline — the recruiter had to open every job to find out that
+ * anyone was waiting.
+ *
+ * A candidate who replied to a clarification question counts even though their
+ * status is still info_requested: the answer is in hand, the decision is not.
+ */
+function awaitingHrAfterReply(p: any): boolean {
+  const status = String(p?.status || "")
+  const answered = !!p?.clarification_answered_at
+  const replied = answered || !!p?.whatsapp_response || !!p?.whatsapp_reply_text
+  if (!replied) return false
+  return answered || status === "needs_review" || p?.review_status === "needs_review"
+}
+
 export async function GET(request: NextRequest) {
   const ctx = await getInternalAuthContext(request)
   if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
@@ -66,6 +87,10 @@ export async function GET(request: NextRequest) {
   const appCounts: Record<string, number> = {}
   const pendingCounts: Record<string, number> = {}
   const reviewCounts: Record<string, number> = {}
+  // Candidates who have actually spoken back and are now blocked on a human.
+  // Distinct from `screening.replied`, which is the outbound "replied Yes" bucket
+  // and the whole point of which is that the AI takes it from there.
+  const replyCounts: Record<string, number> = {}
   const shortlistCounts: Record<string, number> = {}
   const clientDecisions: Record<string, DecisionCounts> = {}
   const screeningStats: Record<string, ScreeningCounts> = {}
@@ -75,6 +100,7 @@ export async function GET(request: NextRequest) {
     appCounts[id] = 0
     pendingCounts[id] = 0
     reviewCounts[id] = 0
+    replyCounts[id] = 0
     shortlistCounts[id] = 0
     clientDecisions[id] = { approved: 0, rejected: 0, pending: 0 }
     screeningStats[id] = emptyScreening()
@@ -110,7 +136,7 @@ export async function GET(request: NextRequest) {
   if (campaignIds.length > 0) {
     const { data: participants, error: partErr } = await supabaseAdmin
       .from("phone_screening_participants")
-      .select("campaign_id, status, review_status, whatsapp_delivery_status, whatsapp_response, whatsapp_reply_text")
+      .select("campaign_id, status, review_status, whatsapp_delivery_status, whatsapp_response, whatsapp_reply_text, clarification_asked_at, clarification_answered_at, screening_context")
       .in("campaign_id", campaignIds)
     if (!partErr && Array.isArray(participants)) {
       participants.forEach((p: any) => {
@@ -120,6 +146,7 @@ export async function GET(request: NextRequest) {
         screeningStats[jobId][sub as keyof ScreeningCounts]++
         // call_done also counts as review awaiting HR
         if (sub === "call_done") reviewCounts[jobId]++
+        if (awaitingHrAfterReply(p)) replyCounts[jobId]++
       })
     }
   }
@@ -176,6 +203,7 @@ export async function GET(request: NextRequest) {
     appCounts,
     pendingCounts,
     reviewCounts,
+    replyCounts,
     shortlistCounts,
     clientDecisions,
     screeningStats,

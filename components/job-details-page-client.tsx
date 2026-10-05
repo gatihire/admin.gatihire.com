@@ -10,6 +10,9 @@ export function JobDetailsPageClient({ jobId }: { jobId: string }) {
   const sp = useSearchParams()
   const tab = sp.get("tab") || undefined
   const stage = sp.get("stage") || undefined
+  // Written by the job list's metric badges. Previously ignored, so every badge
+  // deep link landed on the unfiltered pipeline.
+  const callsub = sp.get("callsub") || undefined
   const [job, setJob] = useState<any | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -57,7 +60,7 @@ export function JobDetailsPageClient({ jobId }: { jobId: string }) {
     )
   }
 
-  return <JobDetails job={job} onBack={() => {
+  return <JobDetails job={job} initialCallSubFilter={callsub} onBack={() => {
     if (window.history.length > 1) {
       router.back()
     } else {

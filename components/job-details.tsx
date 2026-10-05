@@ -73,9 +73,10 @@ interface JobDetailsProps {
   onBack: () => void
   initialTab?: string
   initialStage?: string
+  initialCallSubFilter?: string
 }
 
-export function JobDetails({ job, onBack, initialTab, initialStage }: JobDetailsProps) {
+export function JobDetails({ job, onBack, initialTab, initialStage, initialCallSubFilter }: JobDetailsProps) {
   const router = useRouter()
   const { toast } = useToast()
   const [applications, setApplications] = useState<Application[]>([])
@@ -99,7 +100,19 @@ export function JobDetails({ job, onBack, initialTab, initialStage }: JobDetails
   useEffect(() => {
     setCandidateStage(initialStage || "applied")
   }, [initialStage])
-  const [candidateSubFilter, setCandidateSubFilter] = useState<string>("all")
+  // Seeded from the URL so the job list's metric badges actually land on the
+  // slice they advertise. `?callsub=` was written by jobs-dashboard on every
+  // badge click but never read here, so all of those deep links silently
+  // dropped the recruiter on the unfiltered list — the metric said "Replied —
+  // Need You" and the page showed everyone.
+  const [candidateSubFilter, setCandidateSubFilter] = useState<string>(
+    () => initialCallSubFilter || "all"
+  )
+
+  // Keep it in step when the param changes without remounting the component.
+  useEffect(() => {
+    if (initialCallSubFilter) setCandidateSubFilter(initialCallSubFilter)
+  }, [initialCallSubFilter])
   const [selectedCandidate, setSelectedCandidate] = useState<any | null>(null)
   const [selectedApplication, setSelectedApplication] = useState<Application | null>(null)
   const [selectedParticipant, setSelectedParticipant] = useState<any | null>(null)

@@ -93,6 +93,7 @@ export function JobsDashboard() {
   const [appCounts, setAppCounts] = useState<Record<string, number>>({})
   const [pendingCounts, setPendingCounts] = useState<Record<string, number>>({})
   const [reviewCounts, setReviewCounts] = useState<Record<string, number>>({})
+  const [replyCounts, setReplyCounts] = useState<Record<string, number>>({})
   const [shortlistCounts, setShortlistCounts] = useState<Record<string, number>>({})
   const [clientDecisions, setClientDecisions] = useState<Record<string, { approved: number; rejected: number; pending: number }>>({})
   const [screeningStats, setScreeningStats] = useState<Record<string, ScreeningCounts>>({})
@@ -101,13 +102,14 @@ export function JobsDashboard() {
   const jobsCacheKey = "internal:jobs:/api/jobs"
   const jobCountsCacheKey = "internal:jobs:counts"
 
-  const EMPTY_STATS: JobStatsPayload = { appCounts: {}, pendingCounts: {}, reviewCounts: {}, shortlistCounts: {}, clientDecisions: {}, screeningStats: {}, interviewStats: {} }
+  const EMPTY_STATS: JobStatsPayload = { appCounts: {}, pendingCounts: {}, reviewCounts: {}, replyCounts: {}, shortlistCounts: {}, clientDecisions: {}, screeningStats: {}, interviewStats: {} }
 
   const applyCounts = (payload: JobStatsPayload) => {
     const p = payload || EMPTY_STATS
     setAppCounts(p.appCounts || {})
     setPendingCounts(p.pendingCounts || {})
     setReviewCounts(p.reviewCounts || {})
+    setReplyCounts(p.replyCounts || {})
     setShortlistCounts(p.shortlistCounts || {})
     setClientDecisions(p.clientDecisions || {})
     setScreeningStats(p.screeningStats || {})
@@ -140,6 +142,7 @@ export function JobsDashboard() {
     appCounts: Record<string, number>
     pendingCounts: Record<string, number>
     reviewCounts: Record<string, number>
+    replyCounts: Record<string, number>
     shortlistCounts: Record<string, number>
     clientDecisions: Record<string, { approved: number; rejected: number; pending: number }>
     screeningStats: Record<string, ScreeningCounts>
@@ -403,6 +406,7 @@ export function JobsDashboard() {
                 stats={{
                   newApps: pendingCounts[job.id] || 0,
                   aiReview: reviewCounts[job.id] || 0,
+                  awaitingReply: replyCounts[job.id] || 0,
                   shortlist: shortlistCounts[job.id] || 0,
                   client: clientDecisions[job.id] || { approved: 0, rejected: 0, pending: 0 },
                   screening,
@@ -441,6 +445,7 @@ export function JobsDashboard() {
 interface JobRowStats {
   newApps: number
   aiReview: number
+  awaitingReply: number
   shortlist: number
   client: { approved: number; rejected: number; pending: number }
   screening: ScreeningCounts
@@ -624,6 +629,15 @@ function JobCard({
           emptyColor="bg-zinc-50 text-zinc-400 ring-zinc-200"
           tooltip="Candidates who replied 'Yes' — ready for an AI screening call"
           onClick={() => onOpenStage("ai_screen", "replied")}
+        />
+        <MetricBadge
+          value={stats.awaitingReply}
+          label="Replied — Need You"
+          color="bg-sky-50 text-sky-700 ring-sky-200"
+          emptyColor="bg-zinc-50 text-zinc-400 ring-zinc-200"
+          highlight={stats.awaitingReply > 0}
+          tooltip="Candidates who replied on WhatsApp and are now waiting on a person — typically a salary mismatch the AI cannot decide. Open the conversation, then approve or chat."
+          onClick={() => onOpenStage("ai_screen", "review")}
         />
         <MetricBadge
           value={stats.aiReview}
