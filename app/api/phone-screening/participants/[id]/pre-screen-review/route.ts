@@ -81,6 +81,28 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         )
       }
 
+      // Record the human decision before placing the call. The eligibility gate
+      // in scheduleOrPlaceCall requires either this or a pre-screen pass, and it
+      // reads the flag rather than trusting that we got here through the review
+      // endpoint — that is the whole point of the gate.
+      const { data: forGate } = await supabaseAdmin
+        .from("phone_screening_participants")
+        .select("screening_context")
+        .eq("id", id)
+        .maybeSingle()
+      await supabaseAdmin
+        .from("phone_screening_participants")
+        .update({
+          screening_context: {
+            ...((forGate?.screening_context || {}) as Record<string, any>),
+            approvalGranted: true,
+            approvedBy: ctx.authUser?.email ?? ctx.authUser?.id ?? null,
+            approvedAt: new Date().toISOString(),
+          },
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", id)
+
       // Place the call directly — the candidate was just told it is coming, so
       // waiting on a queue message (and silently skipping if the publish fails)
       // is what left approved candidates with no call at all. If the provider

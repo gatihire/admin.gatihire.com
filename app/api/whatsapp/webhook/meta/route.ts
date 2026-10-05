@@ -958,37 +958,54 @@ async function dispatchIntent(
         break
       }
 
+      // Interest is not a scheduling decision.
+      //
+      // This branch used to send the slot picker on the spot, which is how an
+      // unaudited LLM verdict turned one positive-sounding sentence into a
+      // concrete offer of a call at a specific time. Nothing had checked the
+      // requirement against the job, and nobody had agreed to anything.
+      //
+      // Interest during a conversation is now recorded and handed to a person.
+      // We tell the candidate only that we're passing it on — never that a call
+      // is coming, because we have not decided that. The slot picker is sent from
+      // exactly one place: after pre-screen clears the candidate against the
+      // requirement, which is the one path where the decision is evidence-based.
+      const ctx = (participant.screening_context || {}) as Record<string, any>
       await supabaseAdmin
         .from("phone_screening_participants")
-        .update({ status: "interested", updated_at: new Date().toISOString() })
+        .update({
+          status: "interested",
+          screening_context: {
+            ...ctx,
+            // Drives the recruiter card copy: an approval is now outstanding.
+            interestNeedsApproval: true,
+            interestFlaggedAt: new Date().toISOString(),
+          },
+          updated_at: new Date().toISOString(),
+        })
         .eq("id", participant.id)
 
-      // Send schedule options if we have their phone.
-      //
-      // Only once. `interested` fires on any confident positive-sounding reply,
-      // so without the flag a candidate saying "thanks" three times in a row got
-      // three slot pickers queued up.
+      await appendThreadEntry(participant.id, {
+        at: new Date().toISOString(),
+        kind: "interest_awaiting_approval",
+        direction: "internal",
+        text: "Candidate expressed interest or asked about the role on WhatsApp. No call has been scheduled and no slot has been offered — awaiting recruiter approval.",
+        status: "sent",
+      })
+
+      logger.info("AI: interest recorded, not scheduled — recruiter approval required", {
+        participantId: participant.id,
+      })
+
+      // Say nothing that implies a call is coming. Wording is deliberately
+      // about review, not booking: "we'll get back to you" cannot be read as a
+      // scheduled call, which "let's set up a time" absolutely can.
       if (respondTo) {
-        const ctx = (participant.screening_context || {}) as Record<string, any>
-        if (ctx.awaitingScheduleDecision !== true) {
-          try {
-            const whatsapp = getWhatsAppService()
-            const sent = await whatsapp.sendScheduleOptions({
-              phoneNumber: respondTo,
-              candidateName: participant.candidates?.name || 'Candidate',
-              jobTitle: participant.jobs?.title || 'the role',
-            })
-            await recordTemplateSend(participant.id, sent, { kind: "schedule_buttons" })
-            // Only now is it true that we are expecting a scheduling answer.
-            await markSchedulingOffer(participant)
-          } catch (err: any) {
-            logger.error("Failed to send schedule options", { participantId: participant.id, error: err.message })
-          }
-        } else {
-          logger.info("AI: slot picker already outstanding, not re-sending", {
-            participantId: participant.id,
-          })
-        }
+        await sendAndRecord(
+          participant.id,
+          respondTo,
+          "Thanks for your interest — I've passed this to our team and someone will get back to you shortly."
+        )
       }
       break
     }

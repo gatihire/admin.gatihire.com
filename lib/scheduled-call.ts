@@ -436,11 +436,88 @@ export async function placeCallImmediately(
  * "scheduled" in the database and then silently never happened. This is the one
  * path: try now, and on failure persist the due time AND enqueue the callback.
  */
+/**
+ * May we place an AI screening call for this participant?
+ *
+ * Kept here rather than at the call sites so a fourth caller cannot invent its
+ * own policy by accident.
+ */
+async function callEligibilityGate(
+  participantId: string
+): Promise<{ allowed: boolean; reason: string; status: string | null }> {
+  const { data } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .select("status, screening_context")
+    .eq("id", participantId)
+    .maybeSingle()
+
+  if (!data) return { allowed: false, reason: "participant not found", status: null }
+
+  const ctx = (data.screening_context || {}) as Record<string, any>
+
+  if (ctx.approvalGranted === true) {
+    return { allowed: true, reason: "recruiter approved", status: data.status }
+  }
+
+  // A hold means a person is mid-decision. Booking over the top of that is how
+  // a flagged-for-review candidate ends up being called anyway.
+  if (["needs_review", "info_review_pending", "clarification_requested", "rejected"].includes(data.status)) {
+    return { allowed: false, reason: `participant is on hold (${data.status})`, status: data.status }
+  }
+
+  const decision = ctx.preScreenResult?.decision
+  if (decision !== "proceed") {
+    return {
+      allowed: false,
+      reason: `pre-screen has not cleared this candidate (decision: ${decision ?? "none"})`,
+      status: data.status,
+    }
+  }
+
+  if (ctx.awaitingScheduleDecision !== true) {
+    return {
+      allowed: false,
+      reason: "no slot was offered after pre-screen cleared",
+      status: data.status,
+    }
+  }
+
+  return { allowed: true, reason: "pre-screen cleared and slot offered", status: data.status }
+}
+
 export async function scheduleOrPlaceCall(
   participantId: string,
   delaySeconds: number
 ): Promise<PlaceCallResult & { scheduled?: boolean }> {
   const delay = Math.max(0, Math.round(delaySeconds))
+
+  // Last line of defence before a real phone call happens.
+  //
+  // Three call sites existed and each had its own idea of when calling was
+  // allowed: a pre-screen approval endpoint, the webhook's intent dispatcher,
+  // and the form flow when a slot was picked. Whichever one a change reached
+  // decided the policy by accident, and the slot flow placed calls with no
+  // requirement check at all — the chain was pre-screen -> picker -> tap ->
+  // call, so tapping a button was the only approval that ever happened.
+  //
+  // There are exactly two doors:
+  //
+  //   1. A recruiter approved them. Explicit and authoritative.
+  //   2. Pre-screen cleared them against the job requirement, and we sent a slot
+  //      picker afterwards. Evidence-based, so the candidate can self-serve.
+  //
+  // Anything else is refused, including a scheduling intent the AI inferred from
+  // free text. Interest is not consent to be called, and an LLM's confidence
+  // score is not a decision.
+  const gate = await callEligibilityGate(participantId)
+  if (!gate.allowed) {
+    logger.warn("Refusing to place AI call — eligibility gate closed", {
+      participantId,
+      reason: gate.reason,
+      status: gate.status,
+    })
+    return { success: false, skipped: false, scheduled: false, error: gate.reason }
+  }
 
   if (delay <= DIRECT_PLACE_WINDOW_SECONDS) {
     const placed = await placeCallImmediately(participantId)
