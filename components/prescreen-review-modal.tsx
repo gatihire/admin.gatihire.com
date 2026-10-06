@@ -546,6 +546,20 @@ export function PrescreenReviewModal({
                       Sends one WhatsApp message and waits. No call is booked until they reply and you decide again.
                     </p>
                   )}
+                  {/* The first click swaps this panel in, but it looked like
+                      nothing happened: the previous row disappeared and a new
+                      green "Approve" button appeared in its place, so it read as
+                      two identical approve buttons where one was broken rather
+                      than as two steps. Naming the step and restating the
+                      consequence is what makes it a two-step flow. */}
+                  <p className="text-xs font-semibold text-zinc-700">
+                    Step 2 of 2 — confirm
+                    <span className="ml-1.5 font-normal text-zinc-500">
+                      {decision === "approved" && "This books the screening call straight away."}
+                      {decision === "rejected" && "This tells the candidate the role isn't a fit."}
+                      {decision === "clarify" && "This sends your question and waits."}
+                    </span>
+                  </p>
                   <div className="flex gap-2">
                     <Button
                       onClick={() => submit(decision)}

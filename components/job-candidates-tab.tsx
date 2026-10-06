@@ -68,9 +68,6 @@ interface Application {
   source?: string
   origin?: string
   match_score?: number
-  // Derived from screening_context; see buildReviewCandidate.
-  interestNeedsApproval?: boolean
-  interestFlaggedAt?: string | null
   candidates: CandidateData
 }
 
@@ -321,10 +318,22 @@ function getActionForCard(application: Application, callStatus?: string, partici
   // a person can unblock, so it outranks the status-derived action below. The
   // candidate has already been told we're passing it to the team; until someone
   // acts on that they are waiting on us and nothing else will move.
-  if (application.status === "ai_screen" && application.interestNeedsApproval) {
+  // Read off the participant row, not `application`. The flag is written into
+  // screening_context, and threading a new field through Application meant it was
+  // declared but never populated — so this branch was dead and the button never
+  // appeared, while the typechecker was satisfied.
+  const interestNeedsApproval =
+    participant?.screening_context?.interestNeedsApproval === true
+
+  if (application.status === "ai_screen" && interestNeedsApproval) {
     return {
-      label: "Candidate said they're interested — no call scheduled yet. Approve to send a slot picker, or just reply.",
-      cta: "Approve to Schedule",
+      // Named "Send Call Options", not "Approve": the review modal's approve
+      // books a call outright, while this only asks the candidate to choose a
+      // time. Two green approvals that mean different things is exactly the
+      // confusion that led here.
+      label:
+        "Candidate said they're interested — nothing is scheduled. Send call options so they can pick a time.",
+      cta: "Send Call Options",
       icon: CalendarCheck,
       color: "bg-emerald-50 border-emerald-200 text-emerald-800",
       action: "offer_schedule",
@@ -1507,6 +1516,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
     if (application.status !== "ai_screen") return false
     if (callStatus === "replied") return true
     if (!participant) return false
+    if (participant?.screening_context?.interestNeedsApproval === true) return true
     return ["needs_review", "info_review_pending", "clarification_requested"].includes(participant.status)
   }, [application.status, callStatus, participant?.status])
 
@@ -1632,7 +1642,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
         {repliedWaiting && (
           <div className="flex items-center gap-2 bg-emerald-500 px-4 py-1.5 text-[11px] font-semibold text-white">
             <MessageCircle className="h-3.5 w-3.5 shrink-0" />
-            {application.interestNeedsApproval
+            {participant?.screening_context?.interestNeedsApproval === true
               ? "Said they're interested — your call whether to offer a slot"
               : "Replied — waiting on you"}
           </div>
