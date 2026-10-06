@@ -20,6 +20,12 @@ import { scheduleOrPlaceCall } from "@/lib/scheduled-call"
 import { classifyIntent } from "@/lib/ai-intent-classifier"
 import { toE164 } from "@/lib/phone"
 import { appendThreadEntry, recordInboundText, recordOutboundText } from "@/lib/whatsapp-thread"
+
+// The coalescing window plus intent classification plus pre-screen evaluation
+// can add up past the platform's default function budget. Raising it here rather
+// than shrinking the window: cutting the window below the four seconds people
+// actually type a follow-up in would make the fix theoretical.
+export const maxDuration = 30
 import { logCandidateActivity } from "@/lib/activity-logger"
 import crypto from "crypto"
 
@@ -578,7 +584,54 @@ async function handleTextMessage(participant: any, text: any, replyPhone?: strin
   // is the only place inbound text exists — after this the value lives in local
   // variables and in no persisted field, so a recruiter reviewing the thread
   // later would see our replies with none of their answers.
-  await recordInboundText(participant.id, messageBody)
+  //
+  // The timestamp is pinned here and passed through so this message can be told
+  // apart from ones arriving behind it.
+  const receivedAt = new Date().toISOString()
+  await recordInboundText(participant.id, messageBody, { at: receivedAt })
+
+  // Coalesce a burst into one turn.
+  //
+  // People type in bursts, and each message used to be classified and answered
+  // independently, so two seconds apart could produce two replies pointing in
+  // opposite directions:
+  //
+  //   15:02:23  why              -> "Thanks for your interest — I've passed this
+  //                                 to our team"
+  //   15:02:26  i want job       -> "Would you like to schedule it? Reply
+  //                                 'call now' or pick a slot"
+  //
+  // One human sentence, two answers, neither of them one a person would give.
+  // Whoever speaks last speaks for the turn: earlier messages in the window are
+  // recorded and then deliberately left unanswered.
+  // One wait, one read. Polling on an interval would spend roughly ten queries
+  // on every inbound message just in case a second one was behind it — on the
+  // busiest path in this webhook — to save a few seconds on a reply nobody sees.
+  // The message itself is already persisted; holding the response a few extra
+  // seconds costs nothing observable.
+  const COALESCE_MS = 4000
+  await new Promise((resolve) => setTimeout(resolve, COALESCE_MS))
+
+  const { data: latestRow } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .select("whatsapp_history")
+    .eq("id", participant.id)
+    .maybeSingle()
+
+  const latestInboundAt = ((latestRow?.whatsapp_history as any[]) || [])
+    .filter((e) => e?.direction === "in" && typeof e?.at === "string")
+    .map((e) => e.at as string)
+    .sort()
+    .pop()
+
+  if (latestInboundAt && latestInboundAt > receivedAt) {
+    logger.info("Coalescing burst — a later message will answer for this turn", {
+      participantId: participant.id,
+      message: messageBody.substring(0, 60),
+      supersededBy: latestInboundAt,
+    })
+    return
+  }
 
   logger.info("Received text message", { 
     participantId: participant.id, 
