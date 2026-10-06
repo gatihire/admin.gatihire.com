@@ -1748,14 +1748,18 @@ async function handleFlowFormReply(participant: any, nfmReply: any) {
   const phoneNumber = participant.candidates?.phone
 
   try {
-    // Instant ack so the candidate isn't staring at silence while the
-    // pre-screen runs. Fire-and-forget; the decision messages supersede it.
-    sendAndRecord(
-      participant.id,
-      phoneNumber,
-      "Thanks — got it. Reviewing your profile now."
-    ).catch(() => {})
-
+    // No instant ack here. It was fire-and-forget on the theory that "the
+    // decision messages supersede it", but superseding is not the same as
+    // cancelling: the candidate got both, seven seconds apart, saying the same
+    // thing twice —
+    //
+    //   15:00:06  Thanks — got it. Reviewing your profile now.
+    //   15:00:13  Hi Bipul Sikder, Thank you for sharing your details... Our team
+    //             is reviewing your profile. We will get back to you shortly.
+    //
+    // Every branch that follows sends its own message: parse failure, each
+    // pre-screen decision, and the catch handler. The candidate was never looking
+    // at silence for more than the pre-screen took, which is seconds.
     let fields: Record<string, any> = {}
     let parseFailed = false
     try {
@@ -1849,13 +1853,9 @@ async function handleCollectAllReply(participant: any, messageBody: string) {
 
   try {
     // Instant ack so the candidate isn't staring at silence while Gemini
-    // extracts fields and runs the pre-screen. Fire-and-forget; the decision
-    // messages below supersede it.
-    sendAndRecord(
-      participant.id,
-      phoneNumber,
-      "Thanks — got it. Reviewing your profile now."
-    ).catch(() => {})
+    // No instant ack. Same reasoning as handleFlowFormReply: the decision
+    // messages that follow each send their own text, so this one arrived as a
+    // second, redundant "Reviewing your profile now" seconds later.
 
     // Parse all fields from the single message
     const allFields = await extractAllFieldsFromReply(messageBody, participant.info_data || {})

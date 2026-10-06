@@ -34,7 +34,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const { data: participant, error: pError } = await supabaseAdmin
       .from("phone_screening_participants")
       .select(`
-        id, candidate_id, job_id, status,
+        id, candidate_id, job_id, status, scheduled_call_at,
         candidates: candidate_id (id, name, phone),
         jobs: job_id (id, title, client_name, city)
       `)
@@ -52,6 +52,37 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
     if (!candidate?.phone) {
       return NextResponse.json({ error: "Candidate has no phone number", reason: "no_phone" }, { status: 400 })
+    }
+
+    // A call must actually exist before we tell one is coming.
+    //
+    // This endpoint sent unconditionally, so "Send call nudge" from the review
+    // modal promised the candidate a call that nothing had scheduled:
+    //
+    //   15:04:12  "our Senior AI Agent will call you shortly... Please answer when
+    //              we call. Expect our AI recruiter's call on +918031805503"
+    //
+    // No call had been approved or booked. The candidate was then asked, three
+    // times over the next minute, whether they wanted a call. A recruiter reading
+    // a decline message at 15:01:53 and a call promise at 15:04:12 on the same
+    // thread is being shown two systems that do not know about each other.
+    const CALL_STATES = ["call_scheduled", "calling", "call_in_progress", "awaiting_call"]
+    const callIsReal =
+      CALL_STATES.includes(participant.status) ||
+      (typeof participant.scheduled_call_at === "string" && participant.scheduled_call_at.length > 0)
+
+    if (!callIsReal) {
+      logger.info("call nudge refused — no call scheduled", {
+        participantId: id,
+        status: participant.status,
+      })
+      return NextResponse.json(
+        {
+          error: "No screening call is scheduled for this candidate, so a call reminder would promise something that isn't happening. Approve them for a call first.",
+          reason: "no_call_scheduled",
+        },
+        { status: 409 }
+      )
     }
 
     const sent = await getWhatsAppService().sendCallNudge({
