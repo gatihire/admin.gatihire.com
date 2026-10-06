@@ -713,7 +713,32 @@ async function handleTextMessage(participant: any, text: any, replyPhone?: strin
     return
   }
 
-  // 3. AI intent classification for outreach/general messages
+  // 3. Are we still allowed to talk?
+  //
+  // After a decline the bot sent its closing message and then kept responding.
+  // A candidate who said "no sorry" was asked for details, then offered a slot,
+  // then thanked for their interest — and a later "yes" (answering nothing in
+  // particular) flipped them back to interested. A decision the recruiter made
+  // cannot be overturned by the next incoming sentence.
+  //
+  // The message is still recorded so nothing is lost, but the AI says nothing:
+  // the thread belongs to a person from here until someone reopens it.
+  if (["not_interested", "needs_manual_followup", "rejected", "closed"].includes(participant.status)) {
+    logger.info("AI quiet — conversation already decided, not classifying", {
+      participantId: participant.id,
+      status: participant.status,
+    })
+    await appendThreadEntry(participant.id, {
+      at: new Date().toISOString(),
+      kind: "inbound_after_close",
+      direction: "internal",
+      text: `Candidate messaged again while the conversation is ${participant.status}. Recorded, no automated reply sent.`,
+      status: "sent",
+    })
+    return
+  }
+
+  // 4. AI intent classification for outreach/general messages
   const classification = await classifyIntent(messageBody, {
     candidate_name: participant.candidates?.name || 'Candidate',
     job_title: participant.jobs?.title || participant.job_title || 'the role',
@@ -1059,12 +1084,32 @@ async function dispatchIntent(
       // Say nothing that implies a call is coming. Wording is deliberately
       // about review, not booking: "we'll get back to you" cannot be read as a
       // scheduled call, which "let's set up a time" absolutely can.
-      if (respondTo) {
-        await sendAndRecord(
-          participant.id,
-          respondTo,
-          "Thanks for your interest — I've passed this to our team and someone will get back to you shortly."
-        )
+      //
+      // Also rate-limited. It fired on every confident positive-sounding reply —
+      // five times in a single conversation — so the candidate read as if a
+      // person were repeating themselves. Asking for a chance once is review;
+      // four times is a bot we cannot switch off.
+      const interestCtx = (participant.screening_context || {}) as Record<string, any>
+      const lastAck = interestCtx.interestAckedAt ? new Date(interestCtx.interestAckedAt).getTime() : 0
+      const alreadyAcked = lastAck && Date.now() - lastAck < 15 * 60 * 1000
+
+      if (!alreadyAcked) {
+        if (respondTo) {
+          await sendAndRecord(
+            participant.id,
+            respondTo,
+            "Thanks for your interest — I've passed this to our team and someone will get back to you shortly."
+          )
+        }
+        await supabaseAdmin
+          .from("phone_screening_participants")
+          .update({
+            screening_context: { ...interestCtx, interestAckedAt: new Date().toISOString() },
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", participant.id)
+      } else {
+        logger.info("Skipping repeated interest acknowledgement", { participantId: participant.id })
       }
       break
     }
@@ -1173,12 +1218,21 @@ async function dispatchIntent(
       // for half-filled jobs.
       const salary = formatSalaryRange(participant.jobs || {}) || "competitive"
 
-      // Do not invite a portal applicant to re-send details they already typed
-      // into the apply form — that invitation is what turned a question into an
-      // info-collection exchange.
+      // Answering a question must not also offer a call.
+      //
+      // This branch appended "Would you like to schedule it? Reply 'call now' or
+      // pick a slot" to every role answer — an unapproved slot offer from a path
+      // that had not been through pre-screen or a recruiter. Worse, following it
+      // set `schedule_call_now`, which the eligibility gate now refuses because no
+      // slot was ever actually offered, so the candidate did as instructed and
+      // received the fallback "could you share your current CTC" instead. An
+      // invitation we cannot honour is worse than no invitation.
+      //
+      // We answer the question and say where things stand. If we still need
+      // details to screen them, asking for details is the honest next step.
       const nextStep = hasEnoughToScreen(participant)
-        ? `Would you like to schedule it? Reply "call now" or pick a slot.`
-        : `Would you like to schedule it? Reply "call now", or share your CTC / notice period / experience and we'll proceed.`
+        ? `We'll be in touch about next steps shortly.`
+        : `If you'd like to be considered, send your current CTC, expected CTC, total experience, notice period and city and we'll take it from there.`
 
       if (phoneNumber) {
         await sendAndRecord(

@@ -83,6 +83,16 @@ export async function classifyIntent(
   message: string,
   participant: ParticipantContext
 ): Promise<IntentClassification> {
+  // Greetings are not interest. Checked before the model, not in the keyword
+  // fallback — that is where this was originally placed, which meant it only ran
+  // when GEMINI_API_KEY was missing or the call errored. In production the model
+  // answered every time, so "hi" came back as `interested` and the candidate was
+  // told we had passed their interest to the team four times in one conversation.
+  // A greeting carries no intent; it should draw a greeting back.
+  if (isBareGreeting(message)) {
+    return { intent: 'unclear', confidence: 0.3, delay_minutes: null, reasoning: 'bare greeting carries no intent' }
+  }
+
   if (!process.env.GEMINI_API_KEY) {
     logger.warn('Gemini API key not set, falling back to keyword matching');
     return fallbackClassify(message);
@@ -148,6 +158,14 @@ export async function classifyIntent(
   }
 }
 
+/** A greeting with nothing else in it — not "hi, I am interested". */
+const BARE_GREETING_RE =
+  /^(hi|hey|hello|hola|hii+|helo|hey\s+there|good\s?(morning|afternoon|evening|night)|namaste|yo)[\s!.,]*$/i
+
+function isBareGreeting(message: string): boolean {
+  return BARE_GREETING_RE.test((message || "").trim())
+}
+
 function fallbackClassify(message: string): IntentClassification {
   const lower = message.toLowerCase().trim();
 
@@ -169,18 +187,6 @@ function fallbackClassify(message: string): IntentClassification {
   if (lower === 'evening' || lower === 'this evening' || lower === 'today evening') {
     return { intent: 'schedule_call_later', confidence: 0.9, delay_minutes: 480, reasoning: 'fallback: exact match' };
   }
-  // Greetings are not interest.
-  //
-  // The model reads "hi" as a warm opener and returns `interested`, so a
-  // candidate saying hello was told "Thanks for your interest — I've passed this
-  // to our team", which both overstates what they said and logged an interest
-  // the recruiter then had to dismiss. A greeting carries no intent; it should
-  // draw a greeting back and then ask for what we actually need.
-  const GREETING_RE = /^(hi|hey|hello|hola|hii+|helo|good\s?(morning|afternoon|evening|night)|namaste|yo)\b[\s!.,]*$/i
-  if (GREETING_RE.test(lower.trim())) {
-    return { intent: 'unclear', confidence: 0.3, delay_minutes: null, reasoning: 'fallback: bare greeting carries no intent' }
-  }
-
   if (lower === 'interested' || lower === 'yes interested' || lower === 'yes i am interested') {
     return { intent: 'interested', confidence: 0.85, delay_minutes: null, reasoning: 'fallback: exact match' };
   }
