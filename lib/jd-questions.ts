@@ -100,14 +100,64 @@ const COLLECTED_FIELD_KEYS = [
   "reason_for_switching",
 ]
 
-function collectAlreadyKnown(infoData: Record<string, unknown> | null | undefined): string {
+/**
+ * Topics the voice call must never raise, because the candidate already gave the
+ * answer on WhatsApp or the talent board. The prompt states them, and the same
+ * list is applied as a hard filter below — the prompt is guidance, the filter is
+ * the guarantee, since an LLM asked for "3-6 questions" will happily invent a
+ * CTC question the moment it cannot see the collected value.
+ */
+const NEVER_ASK: { label: string; re: RegExp }[] = [
+  { label: "phone number", re: /(phone|mobile|contact number|whatsapp number|apna number|number (daal|dijiye|share|bata)|kaun sa number)/i },
+  { label: "salary / CTC", re: /(\bctc\b|salary|\bpackage\b|compensation|pay structure)/i },
+  { label: "notice period", re: /(notice period|\bnotice\b)/i },
+  { label: "total experience", re: /(kitne saal|years of experience|total experience|experience (kaisa|kitna|kya|hai|ho))/i },
+  { label: "current city / relocation", re: /(\bcity\b|\blocation\b|relocat|shift (to|kar)|kahan reh)/i },
+  { label: "reason for switching", re: /(switching ka reason|reason for (switch|leaving|changing)|kyun (badal|leave|chhod)|job (change|badal))/i },
+]
+
+export function dropAlreadyAnswered(questions: string[]): string[] {
+  const kept: string[] = []
+  for (const q of questions) {
+    const hit = NEVER_ASK.find((rule) => rule.re.test(q))
+    if (hit) {
+      logger.info("Dropped JD question: already collected", { topic: hit.label, question: q })
+      continue
+    }
+    kept.push(q)
+  }
+  return kept
+}
+
+/**
+ * Every field is printed on every call, present or not. Printing only the
+ * collected ones was the bug: an empty `info_data` produced
+ * "None collected yet (WhatsApp details phase)" — which told the question
+ * generator it was free to ask for salary, notice and experience again, and
+ * exactly that reached the candidate.
+ *
+ * `candidate` supplies the two resume-sourced fields the WhatsApp flow never
+ * asks for, so they stop falling through the gap too.
+ */
+function collectAlreadyKnown(
+  infoData: Record<string, unknown> | null | undefined,
+  candidate?: CandidateContext | null
+): string {
   const data = infoData && typeof infoData === "object" ? infoData : {}
-  const present = COLLECTED_FIELD_KEYS.filter((k) => {
-    const v = data[k]
-    return v !== undefined && v !== null && v !== ""
-  })
-  if (present.length === 0) return "None collected yet (WhatsApp details phase)."
-  return present.map((k) => `- ${k.replace(/_/g, " ")}: ${String(data[k])}`).join("\n")
+  const resume: Record<string, unknown> = {}
+  if (candidate) {
+    if (candidate.total_experience != null) resume.total_experience = String(candidate.total_experience)
+    if (candidate.location) resume.location = candidate.location
+  }
+  return [
+    ...COLLECTED_FIELD_KEYS.map((k) => {
+      const value = data[k] ?? resume[k]
+      const has = value !== undefined && value !== null && String(value) !== ""
+      // "Not collected" still means never ask — none of these are this call's job.
+      return `- ${k.replace(/_/g, " ")}: ${has ? String(value) : "not collected — and not needed on this call"}`
+    }),
+    "- phone number: already on file, we are calling it right now",
+  ].join("\n")
 }
 
 export async function generateJDQuestions(
@@ -118,10 +168,10 @@ export async function generateJDQuestions(
   const jobDescription = buildJobDescription(job)
   const candidateProfile = buildCandidateProfile(candidate)
   const resumeExcerpt = candidate.resume_text ? candidate.resume_text.slice(0, 3000) : ""
-  const alreadyCollected = collectAlreadyKnown(infoData)
+  const alreadyCollected = collectAlreadyKnown(infoData, candidate)
 
   if (!process.env.GEMINI_API_KEY) {
-    return { questions: buildFallbackQuestions(job, candidate, infoData), promptUsed: "fallback" }
+    return { questions: dropAlreadyAnswered(buildFallbackQuestions(job)), promptUsed: "fallback" }
   }
 
   const prompt = `You are a recruiter preparing a SHORT first-round confirmation call for a candidate whose basic screening details were already collected on WhatsApp. Generate exactly 3 to 6 highly specific, job-relevant questions in natural Hinglish (Hindi + English mix) that probe ONLY the signals NOT yet collected.
@@ -139,9 +189,9 @@ ${alreadyCollected}
 
 Requirements for the questions:
 - Speak them in natural Hinglish (e.g. "Tell me about a time when aapne iska use kiya tha"), phrased for a voice conversation, one at a time.
-- Do NOT repeat any of the ALREADY COLLECTED signals above (no salary/CTC, notice period, total experience, city, relocation, or switching-reason questions).
+- NEVER ask about salary, CTC, notice period, total experience, current city, relocation, or reason for switching — every one of those is listed above and none of them is a question this call exists to ask. Questions on those topics will be discarded.
 - Probe the role's must-have skills and key responsibilities: verify claimed experience with concrete examples ("tell me about a time you used X").
-- Ask about firm availability / joining timing if not already implied by the collected notice period.
+- Firm availability / joining timing: ask ONLY as a confirm, phrased as "aap kab tak join kar sakte hain?" — never "what is your notice period?".
 - Ask 1-2 category-specific questions where relevant (license type, shifts, WMS/TMS tools, account scale) if the job description hints at them (driver/fleet, warehouse/ops, SCM/TMS, sales/BD).
 - Do NOT repeat the candidate's own resume back to them.
 - Keep each question to one clear ask — 2 sentences max.
@@ -154,32 +204,25 @@ Return ONLY a JSON array of strings, e.g. ["Q1", "Q2"]. No markdown, no code fen
     const text = result.response.text().trim().replace(/^```(json)?\s*/i, "").replace(/```$/, "").trim()
     const parsed = JSON.parse(text)
     if (Array.isArray(parsed) && parsed.length > 0) {
-      return { questions: parsed.map((q) => String(q)).slice(0, 6), promptUsed: prompt }
+      const filtered = dropAlreadyAnswered(parsed.map((q) => String(q))).slice(0, 6)
+      if (filtered.length > 0) return { questions: filtered, promptUsed: prompt }
     }
   } catch (err: any) {
     logger.warn("JD question generation failed, using fallback", { error: err?.message })
   }
 
-  return { questions: buildFallbackQuestions(job, candidate, infoData), promptUsed: prompt }
+  return { questions: buildFallbackQuestions(job), promptUsed: prompt }
 }
 
-export function buildFallbackQuestions(
-  job: JobContext,
-  candidate: CandidateContext,
-  infoData?: Record<string, unknown> | null
-): string[] {
+export function buildFallbackQuestions(job: JobContext): string[] {
   const mustHave = skillsToText(job.skills_must_have) || "the required skills"
-  const present = new Set(
-    COLLECTED_FIELD_KEYS.filter((k) => {
-      const v = infoData?.[k]
-      return v !== undefined && v !== null && v !== ""
-    })
-  )
 
   const questions: string[] = []
 
-  // Must-have skill depth (never collected via WhatsApp)
-  questions.push(`${mustHave} me aapka experience kaisa hai? Ek concrete example batao jab aapne iska use kiya ho.`)
+  // Must-have skill depth. Never phrased as "aapka experience kaisa hai" — that
+  // reads as the total-experience question the candidate already answered on
+  // WhatsApp, and dropAlreadyAnswered() discards it on sight.
+  questions.push(`${mustHave} me se kaun sa aap roz kaam me use karte ho? Ek situation batao jab isne aapka kaam aasaan kiya ho.`)
 
   if (job.key_responsibilities?.length) {
     questions.push(`Is role me ${job.key_responsibilities[0].toLowerCase()} aana hoga — aisi koi specific task pehle kiya hai aapne?`)
@@ -190,22 +233,17 @@ export function buildFallbackQuestions(
   // Category-specific probes
   const cat = String(job.role_category || "").toLowerCase()
   if (/(driver|fleet|delivery|route|transport|line_haul|long_haul|last_mile)/.test(cat) || /(driver|fleet|delivery)/.test(job.title || "")) {
-    questions.push(`Aapke paas LMV ya HMV license kaunsa hai, aur kitne saal driving experience hai?`)
+    questions.push(`Aapke paas LMV ya HMV license kaunsa hai, aur kaunse routes ya regions pe aap regular chalte ho?`)
   } else if (/(warehouse|ops|store|inventory|loader)/.test(cat)) {
-    questions.push(`Kya aapne kisi WMS ya inventory system pe kaam kiya hai? Kitne warehouse operations ka experience hai?`)
+    questions.push(`WMS ya kisi inventory system pe kaam kiya hai? Dispatch, inbound ya outbound kaunsa handle karte ho?`)
   } else if (/(scm|supply chain|planning|tms|forecast|operations)/.test(cat)) {
-    questions.push(`Aap SAP, TMS platform, ya advanced Excel kya use karte aaye hain? Planning ka experience kaisa hai?`)
+    questions.push(`Aap SAP, TMS platform, ya advanced Excel me se kaun sa use karte aaye hain? Planning ya forecasting me kya kiya hai?`)
   } else if (/(sales|bd|account manager|corporate|key account)/.test(cat)) {
-    questions.push(`Client-facing ya account management experience kaisa hai? Revenue ya portfolio kitna handle kiya hai?`)
+    questions.push(`Client meetings aapne khud ki hain? Portfolio ya revenue scale kitna handle kiya tha aapne?`)
   }
 
-  // Firm availability (notice may be collected, but joining timeline is a new signal)
-  questions.push(`Aap kitne time me join kar sakte hain — confirm karo, taki hum next steps schedule kar sakein.`)
-
-  // Salary consistency (verify only if expectation exists, never re-scrape)
-  if (present.has("expected_ctc")) {
-    questions.push(`Aapne expected CTC WhatsApp pe share kiya tha — usme variable component kaisa hai, aur kya negotiation possible hai?`)
-  }
+  // Firm availability — a confirm of joining timing, never of notice period.
+  questions.push(`Aap kab tak join kar sakte hain? Confirm kar dijiye taki hum next steps schedule kar sakein.`)
 
   return questions.slice(0, 6)
 }

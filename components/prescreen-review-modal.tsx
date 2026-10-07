@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useState } from "react"
+import { useEffect, useCallback, useState } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import {
   AlertTriangle,
@@ -157,6 +157,17 @@ export function PrescreenReviewModal({
   // spend a call slot routinely needs to read what the candidate actually said
   // first, and that text was previously only visible by hunting for the row.
   const [showThread, setShowThread] = useState(false)
+
+  // The thread must not outlive the review modal or survive a switch of
+  // candidate. It is rendered at the root now, so nothing unmounts it when the
+  // review modal closes — without this, the next candidate opened would inherit
+  // the previous one's conversation.
+  useEffect(() => {
+    if (!open) setShowThread(false)
+  }, [open])
+  useEffect(() => {
+    setShowThread(false)
+  }, [candidate?.participantId])
   const [nudging, setNudging] = useState(false)
   // The parent's copy of the thread is a snapshot taken when the queue was built,
   // so it does not contain anything sent from inside this modal. The thread is
@@ -358,6 +369,7 @@ export function PrescreenReviewModal({
   }
 
   return (
+    <>
     <AnimatePresence>
       {open && (
         <motion.div
@@ -665,22 +677,30 @@ export function PrescreenReviewModal({
                 </div>
               )}
             </div>
-            {showThread && (
-              <WhatsAppConversationModal
-                history={threadHistory}
-                candidateName={candidate.name}
-                participantId={candidate.participantId}
-                onSent={() => {
-                  void refreshThread()
-                  onReviewed()
-                }}
-                open={showThread}
-                onOpenChange={setShowThread}
-              />
-            )}
           </motion.div>
         </motion.div>
       )}
     </AnimatePresence>
+    {/* Rendered OUTSIDE AnimatePresence, not inside the review panel.
+        The panel animates `scale`, which turns it into the containing block for
+        fixed-position descendants, so the conversation's `fixed inset-0` was
+        resolving to the panel box instead of the viewport — and with
+        `overflow-hidden` on the panel, its header (which carries the close
+        button) sat outside the visible area depending on how much content was
+        above it. The close control was there; it was clipped off-screen. */}
+    {showThread && (
+      <WhatsAppConversationModal
+        history={threadHistory}
+        candidateName={candidate.name}
+        participantId={candidate.participantId}
+        onSent={() => {
+          void refreshThread()
+          onReviewed()
+        }}
+        open={showThread}
+        onOpenChange={setShowThread}
+      />
+    )}
+    </>
   )
 }

@@ -214,6 +214,53 @@ export async function writeTranscriptSegments(
   }
 }
 
+/**
+ * Build a verdict from the transcript when Bolna's own extraction gave us
+ * nothing. Every call must leave a summary behind — a recruiter opening a
+ * candidate whose call produced no JSON cannot tell a short conversation from a
+ * broken one, and that is exactly what was happening on the failed-call path.
+ *
+ * Returns the patch keys to merge, or null when generation failed.
+ */
+async function buildFallbackVerdictPatch(
+  participantId: string,
+  transcript: string
+): Promise<Record<string, unknown> | null> {
+  if (!transcript) return null
+  try {
+    const { data: participantMeta } = await supabaseAdmin
+      .from("phone_screening_participants")
+      .select(`
+        candidate_id, job_id,
+        candidates: candidate_id (id, name, phone, current_role),
+        jobs: job_id (id, title, client_name)
+      `)
+      .eq("id", participantId)
+      .single()
+
+    if (!participantMeta) return null
+    const fallback = await generateFallbackSummary(
+      participantId,
+      transcript,
+      participantMeta.candidates as any,
+      participantMeta.jobs as any
+    )
+    if (!fallback) return null
+
+    await writeScreeningAnswers(participantId, fallback as any)
+    return {
+      verdict_json: fallback,
+      ai_summary: fallback.comprehensive_summary,
+      ai_recommendation: fallback.overall_verdict,
+      ai_score: fallback.confidence_score,
+      fallback_summary_used: true,
+    }
+  } catch (err: any) {
+    logger.warn("Fallback summary generation failed", { participantId, error: err.message })
+    return null
+  }
+}
+
 export async function handleCompletedExecution(
   participantId: string,
   execution: BolnaExecution
@@ -310,35 +357,8 @@ export async function handleCompletedExecution(
     }
 
   } else if (transcript) {
-    // Fallback: generate summary from transcript when Bolna doesn't provide verdict
-    try {
-      const { data: participantMeta } = await supabaseAdmin
-        .from("phone_screening_participants")
-        .select(`
-          candidate_id, job_id,
-          candidates: candidate_id (id, name, phone, current_role),
-          jobs: job_id (id, title, client_name)
-        `)
-        .eq("id", participantId)
-        .single()
-
-      if (participantMeta) {
-        const candidate = participantMeta.candidates as any
-        const job = participantMeta.jobs as any
-        const fallback = await generateFallbackSummary(participantId, transcript, candidate, job)
-        if (fallback) {
-          patch.verdict_json = fallback
-          patch.ai_summary = fallback.comprehensive_summary
-          patch.ai_recommendation = fallback.overall_verdict
-          patch.ai_score = fallback.confidence_score
-          patch.fallback_summary_used = true
-
-          await writeScreeningAnswers(participantId, fallback as any)
-        }
-      }
-    } catch (err: any) {
-      logger.warn("Fallback summary generation failed", { participantId, error: err.message })
-    }
+    const fallbackPatch = await buildFallbackVerdictPatch(participantId, transcript)
+    if (fallbackPatch) Object.assign(patch, fallbackPatch)
   }
 
   // Log call completed event
@@ -845,6 +865,13 @@ export async function handleFailedExecution(
       if (typeof partialVerdict.score === "number") patch.ai_score = partialVerdict.score
       if (partialVerdict.recommendation) patch.ai_recommendation = partialVerdict.recommendation
       await writeScreeningAnswers(participant.id, partialVerdict)
+    } else {
+      // The model ended without emitting its JSON — a dropped line, a busy tone,
+      // a candidate who hung up first. The conversation still happened, so it
+      // still gets a summary; without this the candidate showed up in review
+      // with a transcript and no score, indistinguishable from a no-op call.
+      const fallbackPatch = await buildFallbackVerdictPatch(participant.id, execution.transcript)
+      if (fallbackPatch) Object.assign(patch, fallbackPatch)
     }
   }
 
