@@ -98,6 +98,32 @@ const DEFAULT_CONFIG: PreScreenConfig = {
  * candidate whose CTC came through as "30% hike" must reach a human, not be
  * discarded by a parser.
  */
+/**
+ * Map a `jobs` row onto the shape the evaluator wants. The webhook inlined this
+ * and the scheduling helper needs the identical mapping — two copies would
+ * drift, and a drifted experience band silently changes who gets called.
+ */
+export function buildJobRequirementsFromJob(job: {
+  salary_min?: number | null
+  salary_max?: number | null
+  experience_min_years?: number | null
+  experience_max_years?: number | null
+  city?: string | null
+  location?: string | null
+  title?: string | null
+}): JobRequirements {
+  const undef = <T>(v: T | null | undefined): T | undefined => v ?? undefined
+  return {
+    salaryMinLpa: undef(job?.salary_min),
+    salaryMaxLpa: undef(job?.salary_max),
+    experienceMinYears: undef(job?.experience_min_years),
+    experienceMaxYears: undef(job?.experience_max_years),
+    city: undef(job?.city),
+    location: undef(job?.location),
+    title: undef(job?.title),
+  }
+}
+
 export function buildCandidateInfoFromCollected(info: Record<string, any>): CandidateInfo {
   // Total experience and location are trusted from the resume. They reach the
   // call prompt via buildResumeInfo(); here we only read them so the

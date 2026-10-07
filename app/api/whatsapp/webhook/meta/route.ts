@@ -16,7 +16,7 @@ import { mergeSources, stampSources, isMeaningfulValue } from "@/lib/info-proven
 import { updateParticipant } from "@/lib/participant-update"
 import { buildResumeInfo } from "@/lib/prompt-user-data"
 import { getWhatsAppService, getOwnWhatsAppNumbers } from "@/lib/whatsapp"
-import { scheduleOrPlaceCall } from "@/lib/scheduled-call"
+import { scheduleOrPlaceCall, prepareScheduleOffer, markScheduleOffer } from "@/lib/scheduled-call"
 import { classifyIntent } from "@/lib/ai-intent-classifier"
 import { toE164 } from "@/lib/phone"
 import { appendThreadEntry, recordInboundText, recordOutboundText } from "@/lib/whatsapp-thread"
@@ -955,19 +955,6 @@ async function clearSchedulingOffer(participant: any) {
     .eq("id", participant.id)
 }
 
-// Record that we asked, so the candidate's answer to *our* offer is the only
-// thing that can move us to booking.
-async function markSchedulingOffer(participant: any) {
-  const ctx = (participant.screening_context || {}) as Record<string, any>
-  await supabaseAdmin
-    .from("phone_screening_participants")
-    .update({
-      screening_context: { ...ctx, awaitingScheduleDecision: true, scheduleOfferAt: new Date().toISOString() },
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", participant.id)
-}
-
 async function dispatchIntent(
   participant: any,
   classification: { intent: string; delay_minutes: number | null; confidence?: number },
@@ -1234,7 +1221,19 @@ async function dispatchIntent(
           .update({ status: "interested", info_step: "confirmed", updated_at: new Date().toISOString() })
           .eq("id", participant.id)
 
-        if (participant.candidates?.phone) {
+        const offer = await prepareScheduleOffer(participant.id)
+        if (!offer.ok) {
+          logger.warn("No slot picker sent — call would be refused", {
+            participantId: participant.id,
+            reason: offer.reason,
+          })
+          await appendToHistory(participant.id, {
+            at: new Date().toISOString(),
+            kind: "internal",
+            text: `No call slots offered: ${offer.reason}`,
+          })
+        }
+        if (offer.ok && participant.candidates?.phone) {
           const sent = await getWhatsAppService().sendScheduleOptions({
             phoneNumber: participant.candidates.phone,
             candidateName: participant.candidates?.name || 'Candidate',
@@ -1248,6 +1247,7 @@ async function dispatchIntent(
           // names a call number the paraphrase omits. A recruiter auditing
           // whether a call was offered cannot tell which they are looking at.
           await recordTemplateSend(participant.id, sent, { kind: "schedule_buttons" })
+          if (sent.success) await markScheduleOffer(participant.id)
         }
         break
       }
@@ -1589,6 +1589,9 @@ async function finalizeCollectedInfo(
           kind: "schedule_buttons",
           messageId: sendResult.messageId ?? null,
         })
+        // The gate's second door reads this. Sending the picker without writing
+        // it means the candidate picks a time and is refused.
+        await markScheduleOffer(participant.id)
       }
 
       if (!sendResult.success) {

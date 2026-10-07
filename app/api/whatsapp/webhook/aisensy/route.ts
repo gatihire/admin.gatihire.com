@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { aisensyService } from "@/lib/aisensy"
-import { scheduleBolnaCall } from "@/lib/scheduled-call"
+import { scheduleBolnaCall, prepareScheduleOffer, markScheduleOffer } from "@/lib/scheduled-call"
 import { logger } from "@/lib/logger"
 import { logCandidateActivity } from "@/lib/activity-logger"
 
@@ -232,7 +232,13 @@ async function handleInbound(raw: any) {
     baseUpdate.status = "interested"
     baseUpdate.interested_at = nowIso
     await supabaseAdmin.from("phone_screening_participants").update(baseUpdate).eq("id", participantId)
-    await aisensyService.sendScheduleOptions(participant.candidates?.phone as string, candidateName)
+    const offer = await prepareScheduleOffer(participantId)
+    if (!offer.ok) {
+      logger.warn("No slot picker sent — call would be refused", { participantId, reason: offer.reason })
+    } else if (participant.candidates?.phone) {
+      const sent = await aisensyService.sendScheduleOptions(participant.candidates.phone as string, candidateName)
+      if (sent?.success !== false) await markScheduleOffer(participantId)
+    }
     logCandidateActivity({
       jobId: participant.job_id || "",
       candidateId: participant.candidates?.id || "",

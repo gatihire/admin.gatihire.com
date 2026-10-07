@@ -2,7 +2,7 @@ import { supabaseAdmin } from '@/lib/supabase';
 import { logger } from '@/lib/logger';
 import { mergeSources, stampSources } from '@/lib/info-provenance';
 import { getWhatsAppService } from '@/lib/whatsapp';
-import { scheduleOrPlaceCall } from '@/lib/scheduled-call';
+import { scheduleOrPlaceCall, prepareScheduleOffer, markScheduleOffer } from '@/lib/scheduled-call';
 import { getPublicJobUrl } from '@/lib/call-orchestrator';
 import { appendWhatsappHistory, buttonLabel } from '@/lib/whatsapp-history';
 import {
@@ -705,13 +705,28 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
             .eq('id', participantId);
 
           const whatsapp = getWhatsAppService();
-          if (replyPhone) {
-            await whatsapp.sendScheduleOptions({
+          // Interest is not consent to be called. Only hand over a picker when
+          // the gate would actually place the call that follows it.
+          const offer = await prepareScheduleOffer(participantId);
+          if (!offer.ok) {
+            logger.warn("No slot picker sent — call would be refused", {
+              participantId,
+              reason: offer.reason,
+            });
+            await appendWhatsappHistory(participantId, {
+              at: new Date().toISOString(),
+              kind: "internal",
+              text: `No call slots offered: ${offer.reason}`,
+            });
+          }
+          if (offer.ok && replyPhone) {
+            const sent = await whatsapp.sendScheduleOptions({
               phoneNumber: replyPhone,
               candidateName: participant.candidate_name,
               jobTitle: participant.job_title,
             });
-          } else {
+            if (sent.success) await markScheduleOffer(participantId);
+          } else if (!replyPhone) {
             logger.error('Interested with no reachable phone', { participantId });
             await supabaseAdmin
               .from('phone_screening_participants')
@@ -877,12 +892,25 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
             })
             .eq('id', participantId);
 
-          if (participant.candidates?.phone) {
-            await getWhatsAppService().sendScheduleOptions({
+          const offer = await prepareScheduleOffer(participantId);
+          if (!offer.ok) {
+            logger.warn("No slot picker sent — call would be refused", {
+              participantId,
+              reason: offer.reason,
+            });
+            await appendWhatsappHistory(participantId, {
+              at: new Date().toISOString(),
+              kind: "internal",
+              text: `No call slots offered: ${offer.reason}`,
+            });
+          }
+          if (offer.ok && participant.candidates?.phone) {
+            const sent = await getWhatsAppService().sendScheduleOptions({
               phoneNumber: participant.candidates.phone,
               candidateName: participant.candidate_name,
               jobTitle: participant.job_title,
             });
+            if (sent.success) await markScheduleOffer(participantId);
             await appendWhatsappHistory(participantId, {
               at: new Date().toISOString(),
               kind: 'schedule_buttons',

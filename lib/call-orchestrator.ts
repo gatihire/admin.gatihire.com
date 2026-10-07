@@ -9,7 +9,7 @@ import { placeBolnaCall } from "@/lib/bolna"
 import { getWhatsAppService, talentOutreachTemplateName } from "@/lib/whatsapp"
 import { generateJDQuestions } from "@/lib/jd-questions"
 import { buildAlreadyCollectedUserData, buildResumeInfo } from "@/lib/prompt-user-data"
-import { scheduleOutreachFollowup, scheduleBolnaCall, outreachNudgeHours, outreachEscalateHours } from "@/lib/scheduled-call"
+import { scheduleOutreachFollowup, scheduleBolnaCall, outreachNudgeHours, outreachEscalateHours, prepareScheduleOffer, markScheduleOffer } from "@/lib/scheduled-call"
 import { type CandidateOrigin, type CandidateFlow, deriveCandidateFlow } from "@/lib/origin"
 import { type InfoSource, stampSources, mergeSources } from "@/lib/info-provenance"
 import { updateParticipant } from "@/lib/participant-update"
@@ -141,6 +141,21 @@ async function sendShortlistMessage(opts: {
   const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(
     candidate, job, client, origin, participantId, seededInfo
   )
+  // The template promises a picker the gate may refuse. Run the clearance first
+  // so we never tell a candidate to pick a time we will not honour — for portal
+  // applicants this is where the pre-screen actually happens, since their flow
+  // never sends the 7-field WhatsApp collection that runs it.
+  if (participantId) {
+    const offer = await prepareScheduleOffer(participantId)
+    if (!offer.ok) {
+      logger.warn("Shortlist slot picker withheld — call would be refused", {
+        participantId,
+        reason: offer.reason,
+      })
+      return { sent: false, error: offer.reason }
+    }
+  }
+
   const result = await whatsapp.sendShortlistSchedule({
     phoneNumber: candidate.phone as string,
     candidateName: candidate.name || "",
@@ -149,6 +164,7 @@ async function sendShortlistMessage(opts: {
   })
   if (!result.success) return { sent: false, error: result.error }
   if (!participantId) return { sent: true, messageId: result.messageId }
+  await markScheduleOffer(participantId)
 
   const now = new Date().toISOString()
   // direction/text are what make the conversation view readable; legacy rows

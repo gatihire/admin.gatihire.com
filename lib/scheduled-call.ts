@@ -10,6 +10,13 @@ import { Client } from "@upstash/qstash"
 import { supabaseAdmin } from "@/lib/supabase"
 import { placeBolnaCall, BOLNA_TERMINAL_STATUSES } from "@/lib/bolna"
 import { buildAlreadyCollectedUserData } from "@/lib/prompt-user-data"
+import { buildResumeInfo } from "@/lib/prompt-user-data"
+import {
+  buildCandidateInfoFromCollected,
+  buildJobRequirementsFromJob,
+  evaluatePreScreenWithAI,
+  type PreScreenResult,
+} from "@/lib/pre-screen"
 import { logger } from "@/lib/logger"
 
 // WhatsApp outreach → human-escalation cadence. No blind AI calls: a silent
@@ -442,6 +449,44 @@ export async function placeCallImmediately(
  * Kept here rather than at the call sites so a fourth caller cannot invent its
  * own policy by accident.
  */
+/**
+ * Statuses that mean a human is mid-decision. Booking over the top of that is
+ * how a flagged-for-review candidate ends up being called anyway.
+ */
+const HOLD_STATUSES = ["needs_review", "info_review_pending", "clarification_requested", "rejected"]
+
+/**
+ * The two doors, evaluated against the row we already have.
+ *
+ * Deliberately pure — no writes, no pre-screen evaluation — so the gate can ask
+ * it during call placement without side effects. Evaluating a pre-screen inside
+ * a gate is how a candidate becomes eligible in the same breath that decides
+ * whether they are eligible.
+ */
+function clearanceFromContext(
+  ctx: Record<string, any>,
+  status: string | null
+): { cleared: boolean; reason: string } {
+  if (ctx.approvalGranted === true) return { cleared: true, reason: "recruiter approved" }
+  if (status && HOLD_STATUSES.includes(status)) {
+    return { cleared: false, reason: `participant is on hold (${status})` }
+  }
+  const decision = ctx.preScreenResult?.decision
+  if (decision !== "proceed") {
+    return {
+      cleared: false,
+      reason: `pre-screen has not cleared this candidate (decision: ${decision ?? "none"})`,
+    }
+  }
+  return { cleared: true, reason: "pre-screen cleared" }
+}
+
+/**
+ * May we place an AI screening call for this participant?
+ *
+ * Kept here rather than at the call sites so a fourth caller cannot invent its
+ * own policy by accident.
+ */
 async function callEligibilityGate(
   participantId: string
 ): Promise<{ allowed: boolean; reason: string; status: string | null }> {
@@ -454,25 +499,8 @@ async function callEligibilityGate(
   if (!data) return { allowed: false, reason: "participant not found", status: null }
 
   const ctx = (data.screening_context || {}) as Record<string, any>
-
-  if (ctx.approvalGranted === true) {
-    return { allowed: true, reason: "recruiter approved", status: data.status }
-  }
-
-  // A hold means a person is mid-decision. Booking over the top of that is how
-  // a flagged-for-review candidate ends up being called anyway.
-  if (["needs_review", "info_review_pending", "clarification_requested", "rejected"].includes(data.status)) {
-    return { allowed: false, reason: `participant is on hold (${data.status})`, status: data.status }
-  }
-
-  const decision = ctx.preScreenResult?.decision
-  if (decision !== "proceed") {
-    return {
-      allowed: false,
-      reason: `pre-screen has not cleared this candidate (decision: ${decision ?? "none"})`,
-      status: data.status,
-    }
-  }
+  const clearance = clearanceFromContext(ctx, data.status)
+  if (!clearance.cleared) return { allowed: false, reason: clearance.reason, status: data.status }
 
   if (ctx.awaitingScheduleDecision !== true) {
     return {
@@ -482,7 +510,155 @@ async function callEligibilityGate(
     }
   }
 
-  return { allowed: true, reason: "pre-screen cleared and slot offered", status: data.status }
+  return { allowed: true, reason: clearance.reason, status: data.status }
+}
+
+export type ScheduleOfferResult =
+  | { ok: true; alreadyOffered: boolean }
+  | { ok: false; reason: string; decision?: string }
+
+const DEFAULT_PRE_SCREEN_CONFIG = {
+  salaryTolerancePercent: 40,
+  experienceMinPercent: 50,
+  experienceMaxPercent: 200,
+  maxNoticePeriodDays: 120,
+}
+
+/** The same minimum `hasEnoughToScreen` wants, read without importing the flow
+ *  module — `info-collector-v2` already imports this file, and importing it
+ *  back would close the loop. */
+function ctcPairAndNoticeOnFile(info: Record<string, any>, candidate: Record<string, any>): boolean {
+  const keys = ["current_ctc", "expected_ctc", "notice_period"]
+  return keys.every((k) => {
+    const v = info?.[k] ?? candidate?.[k]
+    if (v == null) return false
+    const t = String(v).trim().toLowerCase()
+    return !!t && !["void", "n/a", "na", "-"].includes(t)
+  })
+}
+
+/**
+ * Are we allowed to send a slot picker right now — and if the only missing
+ * evidence is a pre-screen that never ran, run it.
+ *
+ * This exists because every picker-send site was writing nothing at all: the
+ * gate requires `awaitingScheduleDecision`, only the three recruiter endpoints
+ * ever set it, so a candidate who picked a time was refused and the row sat at
+ * `call_scheduled` while Meta retried the webhook. Worse, a picker was sent on
+ * paths that had never been pre-screened, so the tap could never succeed no
+ * matter what we recorded.
+ *
+ * Callers send the picker only when this returns `ok`, then call
+ * `markScheduleOffer` once the send succeeds.
+ */
+export async function prepareScheduleOffer(participantId: string): Promise<ScheduleOfferResult> {
+  // Cast: the two-level embedded joins are beyond what supabase's generated
+  // types can parse, and the webhook reads the same shape as `any`.
+  const { data: row } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .select(
+      "id, status, screening_context, info_data, " +
+        "candidates:candidate_id (id, total_experience, location, current_ctc, expected_ctc, notice_period), " +
+        "jobs:job_id (id, salary_min, salary_max, experience_min_years, experience_max_years, city, location, title)"
+    )
+    .eq("id", participantId)
+    .maybeSingle()
+  const data = row as any
+
+  if (!data) return { ok: false, reason: "participant not found" }
+
+  const ctx = (data.screening_context || {}) as Record<string, any>
+  const alreadyOffered = ctx.awaitingScheduleDecision === true
+  const clearance = clearanceFromContext(ctx, data.status)
+  if (clearance.cleared) return { ok: true, alreadyOffered }
+
+  // On hold, or pre-screen ran and did not clear: nothing to offer.
+  if (data.status && HOLD_STATUSES.includes(data.status)) {
+    return { ok: false, reason: clearance.reason }
+  }
+  if (ctx.preScreenResult) {
+    return { ok: false, reason: clearance.reason, decision: ctx.preScreenResult.decision }
+  }
+
+  // No pre-screen has ever run. Evaluate it now if the data supports one.
+  const info = (data.info_data || {}) as Record<string, any>
+  const candidate = (data.candidates || {}) as Record<string, any>
+  if (!ctcPairAndNoticeOnFile(info, candidate)) {
+    return { ok: false, reason: "not enough on file to pre-screen" }
+  }
+
+  const preScreen: PreScreenResult = await evaluatePreScreenWithAI(
+    buildCandidateInfoFromCollected({ ...buildResumeInfo(candidate), ...info }),
+    buildJobRequirementsFromJob((data.jobs || {}) as any),
+    (ctx.preScreenConfig as any) || DEFAULT_PRE_SCREEN_CONFIG
+  )
+
+  const now = new Date().toISOString()
+  const { error } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .update({
+      screening_context: {
+        ...ctx,
+        preScreenResult: {
+          decision: preScreen.decision,
+          reasons: preScreen.reasons,
+          summary: preScreen.summary,
+          skippedChecks: preScreen.skippedChecks,
+          evaluatedAt: now,
+        },
+      },
+      updated_at: now,
+    })
+    .eq("id", participantId)
+  if (error) {
+    logger.warn("Could not persist pre-screen result before offering a slot", {
+      participantId,
+      error: error.message,
+    })
+    return { ok: false, reason: `pre-screen could not be saved (${error.message})` }
+  }
+
+  logger.info("Pre-screen evaluated at slot-offer time", {
+    participantId,
+    decision: preScreen.decision,
+  })
+
+  if (preScreen.decision !== "proceed") {
+    return { ok: false, reason: `pre-screen returned ${preScreen.decision}`, decision: preScreen.decision }
+  }
+  return { ok: true, alreadyOffered: false }
+}
+
+/**
+ * Record that a slot picker went out. The gate's second door reads this, so a
+ * picker sent without it is a promise the gate will not honour.
+ */
+export async function markScheduleOffer(participantId: string): Promise<void> {
+  const { data } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .select("screening_context")
+    .eq("id", participantId)
+    .maybeSingle()
+  if (!data) return
+
+  const ctx = (data.screening_context || {}) as Record<string, any>
+  const { error } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .update({
+      screening_context: {
+        ...ctx,
+        awaitingScheduleDecision: true,
+        scheduleOfferAt: new Date().toISOString(),
+      },
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", participantId)
+  if (error) {
+    logger.warn("Could not record slot offer — the gate will refuse the tap", {
+      participantId,
+      error: error.message,
+    })
+  }
 }
 
 export async function scheduleOrPlaceCall(
