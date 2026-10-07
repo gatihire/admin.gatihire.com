@@ -4,8 +4,9 @@ import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { logger } from "@/lib/logger"
 import { invalidateSessionCache } from "@/lib/utils"
 import { logCandidateActivity } from "@/lib/activity-logger"
-import { scheduleOrPlaceCall } from "@/lib/scheduled-call"
 import { sendSessionMessage } from "@/lib/info-collector-v2"
+import { getWhatsAppService } from "@/lib/whatsapp"
+import { recordOutboundText } from "@/lib/whatsapp-thread"
 
 export const runtime = "nodejs"
 
@@ -46,90 +47,81 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const companyName = (participant.jobs as any)?.client_name || ''
 
     if (decision === "proceed") {
-      // Move to call_scheduled and trigger AI call
+      // Approval offers the candidate a time. It never takes one for them.
+      //
+      // This branch used to stamp scheduled_call_at sixty seconds out, tell the
+      // candidate a call was already coming, and dial. They never picked a time,
+      // so the very first attempt produced:
+      //
+      //   19:23:11  ✅ Great news! Your profile has been reviewed and approved.
+      //             Our AI recruiter will call you shortly ... Expect the call
+      //             on <number>. Please keep your phone handy.
+      //   19:24:48  We missed you for the Store Incharge screening at Sharepal.
+      //             Please select a convenient time to reschedule ...
+      //
+      // "Select a convenient time" a minute after a call we chose ourselves. The
+      // only thing a screening still needs from the candidate is when.
+      const prevContext = (participant.screening_context || {}) as Record<string, any>
+      const offerSent = phoneNumber
+        ? await getWhatsAppService().sendScheduleOptions({
+            phoneNumber,
+            candidateName,
+            jobTitle: jobTitle || "the role",
+          })
+        : null
+
+      if (phoneNumber && !offerSent?.success) {
+        // Nothing is recorded when the send fails: an approval with no offer on
+        // file would look identical to one that succeeded, and nobody would
+        // retry the message that never left.
+        logger.error("Pre-screen approved but the slot picker could not be sent", {
+          participantId: id,
+          error: offerSent?.error,
+        })
+        return NextResponse.json(
+          { error: offerSent?.error || "Approved, but the slot picker could not be sent — check the thread before retrying.", callPlaced: false },
+          { status: 502 }
+        )
+      }
+
+      // Approval and the offer move to a different status than before: we are
+      // waiting on the candidate's answer, not on a call we scheduled.
       await supabaseAdmin
         .from("phone_screening_participants")
         .update({
-          status: "call_scheduled",
-          // Must set scheduled_call_at (not just scheduled_at) or the QStash
-          // trigger's guard sees no due time and skips the call.
-          scheduled_call_at: new Date(Date.now() + 60 * 1000).toISOString(),
-          next_retry_at: new Date(Date.now() + 60 * 1000).toISOString(),
+          status: "info_received",
+          // Deliberately not set: scheduled_call_at / next_retry_at. Both used
+          // to be written sixty seconds out here, which is what made the trigger
+          // dial regardless of whether anyone had chosen a time.
           screening_context: {
-            ...participant.screening_context,
+            ...prevContext,
             preScreenReview: {
               decision: "proceed",
               reviewed_by: ctx.authUser.id,
               reviewed_at: now,
               note: note || null,
-            }
+            },
+            approvalGranted: true,
+            approvedBy: ctx.authUser?.email ?? ctx.authUser?.id ?? null,
+            approvedAt: now,
+            awaitingScheduleDecision: true,
+            scheduleOfferAt: new Date().toISOString(),
+            scheduleOfferSource: "pre_screen_review",
+            interestNeedsApproval: false,
           },
           updated_at: now,
         })
         .eq("id", id)
 
-      // Notify candidate
-      if (phoneNumber) {
-        // Name the caller number: this is the message that tells the candidate a
-        // call is imminent, and carrier unknown-number screening makes them
-        // decline one they cannot identify. Session message inside the 24-hour
-        // window, so no approved template and no Meta re-approval is needed.
-        const { AI_CALLER_NUMBER } = await import('@/lib/whatsapp')
-        await sendSessionMessage(phoneNumber,
-          `✅ Great news! Your profile has been reviewed and approved. Our AI recruiter will call you shortly to conduct the screening for ${jobTitle} at ${companyName}.\n\n` +
-          `Expect the call on ${AI_CALLER_NUMBER}. Please keep your phone handy.`
-        )
+      if (offerSent?.renderedBody) {
+        await recordOutboundText(id, offerSent.renderedBody, {
+          kind: "schedule_buttons",
+          direction: "out",
+          status: "sent",
+          messageId: offerSent.messageId ?? null,
+        })
       }
 
-      // Record the human decision before placing the call. The eligibility gate
-      // in scheduleOrPlaceCall requires either this or a pre-screen pass, and it
-      // reads the flag rather than trusting that we got here through the review
-      // endpoint — that is the whole point of the gate.
-      const { data: forGate } = await supabaseAdmin
-        .from("phone_screening_participants")
-        .select("screening_context")
-        .eq("id", id)
-        .maybeSingle()
-      await supabaseAdmin
-        .from("phone_screening_participants")
-        .update({
-          screening_context: {
-            ...((forGate?.screening_context || {}) as Record<string, any>),
-            approvalGranted: true,
-            approvedBy: ctx.authUser?.email ?? ctx.authUser?.id ?? null,
-            approvedAt: new Date().toISOString(),
-          },
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", id)
-
-      // Place the call directly — the candidate was just told it is coming, so
-      // waiting on a queue message (and silently skipping if the publish fails)
-      // is what left approved candidates with no call at all. If the provider
-      // rejects the placement, scheduleOrPlaceCall books a real callback and we
-      // still tell HR the truth about it.
-      const placed = await scheduleOrPlaceCall(id, 0)
-      if (!placed.success && !placed.skipped) {
-        logger.error("Failed to place call after pre-screen approval", {
-          participantId: id,
-          error: placed.error,
-          callbackScheduled: !!placed.scheduled,
-        })
-        return NextResponse.json(
-          {
-            error: placed.error || "Failed to place call",
-            callPlaced: false,
-            retryScheduled: !!placed.scheduled,
-          },
-          { status: 502 }
-        )
-      }
-      if (placed.skipped) {
-        logger.info("Call already in flight after pre-screen approval", {
-          participantId: id,
-          reason: placed.error,
-        })
-      }
 
     } else if (decision === "filter_out") {
       // Move to pre_screen_filtered_out

@@ -889,13 +889,34 @@ async function sendReplyFallbackPrompt(participant: any) {
 
   // No options, no scheduling language. Either we are still waiting on details,
   // or we are looking at it. Both are honest; neither promises a call.
-  await sendAndRecord(
-    participant.id,
-    phoneNumber,
-    escalated
-      ? "Thanks for your patience — I'm passing this to my team so they can pick it up directly."
-      : "Thanks for that — could you share your current CTC, expected CTC, total experience, notice period and city? That'll help us move forward."
-  )
+  //
+  // The ask is conditional on actually needing it. It used to fire regardless,
+  // so a portal applicant whose details we already held was asked to send them
+  // again two minutes after we had told him we had them:
+  //
+  //   19:21:27  Thank you for sharing your details ... Our team is reviewing
+  //             your profile. We will get back to you shortly.
+  //   19:28:47  hi i want to talk to you guys
+  //   19:28:57  Thanks for that — could you share your current CTC, expected
+  //             CTC, total experience, notice period and city?
+  //
+  // Asking someone for something they already sent reads as though nobody read
+  // the first message. Either we hold a screenable set or we do not; only the
+  // second case earns the request.
+  const { hasEnoughToScreen } = await import('@/lib/info-collector-v2')
+
+  let reply: string
+  if (escalated) {
+    reply = "Thanks for your patience — I'm passing this to my team so they can pick it up directly."
+  } else if (hasEnoughToScreen(participant)) {
+    reply =
+      "Thanks for that — we have your details and our team is reviewing them now. " +
+      "We'll be in touch about next steps shortly."
+  } else {
+    reply = "Thanks for that — could you share your current CTC, expected CTC, total experience, notice period and city? That'll help us move forward."
+  }
+
+  await sendAndRecord(participant.id, phoneNumber, reply)
 }
 
 // Scheduling gate.

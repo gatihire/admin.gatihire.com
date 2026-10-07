@@ -298,6 +298,9 @@ function buildReviewCandidate(participant: any, application: Application): Revie
     interestNeedsApproval:
       participant?.screening_context?.interestNeedsApproval === true,
     interestFlaggedAt: participant?.screening_context?.interestFlaggedAt || null,
+    participantStatus: participant?.status || null,
+    scheduledCallAt: participant?.scheduled_call_at || null,
+    awaitingScheduleDecision: participant?.screening_context?.awaitingScheduleDecision === true,
     clarificationQuestion: participant?.clarification_question || null,
     clarificationAskedAt: participant?.clarification_asked_at || null,
     // Drives the "Replied" badge and un-replied-first queue ordering, so the

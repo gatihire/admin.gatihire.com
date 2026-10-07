@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { sendSessionMessage } from "@/lib/info-collector-v2/sender"
-import { scheduleBolnaCall } from "@/lib/scheduled-call"
+import { recordOutboundText } from "@/lib/whatsapp-thread"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { logCandidateActivity } from "@/lib/activity-logger"
 import { logger } from "@/lib/logger"
@@ -19,7 +19,8 @@ const VALID_DECISIONS = ["approved", "rejected", "clarify"] as const
  * on that, and nothing is sent to the candidate until they do.
  *
  * Decisions:
- *   approved  tell the candidate they're through and book the screening call
+ *   approved  tell the candidate they're through and ask when they'd like the
+ *             screening call — the candidate picks the time, never us
  *   rejected  tell the candidate the role isn't a fit — `note` is REQUIRED, it is
  *             what goes into the audit trail and what HR reads later
  *   clarify   ask the candidate a question and WAIT. No call is booked and the
@@ -202,10 +203,55 @@ export async function POST(request: NextRequest) {
         }
 
         if (decision === "approved") {
-          // Clear the hold the pre-screen set. Leaving awaitingReviewApproval in
-          // place would make the next inbound reply believe the candidate is
-          // still ungated and go quiet on them after HR already approved.
+          // Approval asks for the candidate's time instead of taking it.
+          //
+          // This used to send `info_received_confirm` and then dial 60 seconds
+          // later. Neither half was right.
+          //
+          // The template read candidates.current_ctc rather than the info_data
+          // we had just collected, so a candidate whose application form held
+          // their details was told:
+          //
+          //   19:23:11  We have received your details:
+          //             - Current CTC: Not provided
+          //             - Expected CTC: Not provided
+          //             - Notice Period: Not provided
+          //             Now let us schedule your screening call.
+          //
+          // And the dial meant they were called without ever being asked when —
+          // sixty seconds later the missed-call template fired back at them:
+          //
+          //   19:24:48  We missed you for the Store Incharge screening...
+          //
+          // The slot picker says the same news and asks the one question we
+          // still have no right to answer on someone else's behalf.
           const prevContext = (participant as any).screening_context || {}
+          const phone = candidate?.phone
+          const job: any = Array.isArray(participant.jobs) ? participant.jobs[0] : participant.jobs
+          const offerSent = phone
+            ? await whatsapp.sendScheduleOptions({
+                phoneNumber: phone,
+                candidateName: candidate?.name || "Candidate",
+                jobTitle: job?.title || "the role",
+              })
+            : null
+
+          if (phone && !offerSent?.success) {
+            // Nothing recorded: reporting success here would leave an approval
+            // with no offer on file and nobody would ever retry the send.
+            logger.error("Approved but the slot picker could not be sent", {
+              participantId,
+              candidateId: participant.candidate_id,
+              error: offerSent?.error,
+            })
+            results.push({
+              participantId,
+              success: false,
+              error: offerSent?.error || "Approved, but the slot picker could not be sent — check the thread before retrying.",
+            })
+            continue
+          }
+
           await supabaseAdmin
             .from("phone_screening_participants")
             .update({
@@ -216,6 +262,17 @@ export async function POST(request: NextRequest) {
                 ...prevContext,
                 awaitingReviewApproval: false,
                 approvedAt: now,
+                // approvalGranted and the offer are written together, never
+                // apart: the eligibility gate must not be able to see an offer
+                // without the human agreement that justifies it, nor an
+                // approval that was later contradicted by no offer.
+                approvalGranted: true,
+                approvalSource: "hr_review",
+                approvedBy: reviewerLabel,
+                awaitingScheduleDecision: true,
+                scheduleOfferAt: new Date().toISOString(),
+                scheduleOfferSource: "hr_review",
+                interestNeedsApproval: false,
               },
             })
             .eq("id", participantId)
@@ -229,46 +286,13 @@ export async function POST(request: NextRequest) {
             })
             .eq("id", participant.candidate_id)
 
-          // Send template 11 (info_received_confirm) with schedule buttons
-          await whatsapp.sendInfoReceivedConfirm({
-            phoneNumber: candidate?.phone || "",
-            candidateName: candidate?.name || "",
-            currentCtc: candidate?.current_ctc || "Not provided",
-            expectedCtc: candidate?.expected_ctc || "Not provided",
-            noticePeriod: candidate?.notice_period || "Not provided",
-          })
-
-          // Auto-schedule AI call (1 minute delay so candidate sees confirmation first)
-          const callDelaySec = 60
-          const scheduled = await scheduleBolnaCall(participantId, callDelaySec)
-          if (scheduled.scheduled) {
-            // scheduled_call_at is the column that actually exists on
-            // phone_screening_participants. This used to write scheduled_at,
-            // which the schema rejects — the update failed silently, leaving the
-            // QStash message pointing at a row its own guard would refuse.
-            const { error: bookErr } = await supabaseAdmin
-              .from("phone_screening_participants")
-              .update({
-                status: "call_scheduled",
-                scheduled_call_at: new Date(Date.now() + callDelaySec * 1000).toISOString(),
-                updated_at: new Date().toISOString(),
-              })
-              .eq("id", participantId)
-            if (bookErr) {
-              logger.error("Booked the callback but could not persist scheduled_call_at", {
-                participantId,
-                candidateId: participant.candidate_id,
-                error: bookErr.message,
-              })
-              results.push({ participantId, success: false, error: `Call booked but not recorded: ${bookErr.message}` })
-              continue
-            }
-          } else {
-            logger.error("Failed to auto-schedule call after HR approve", {
-              participantId, candidateId: participant.candidate_id, error: scheduled.error
+          if (offerSent?.renderedBody) {
+            await recordOutboundText(participantId, offerSent.renderedBody, {
+              kind: "schedule_buttons",
+              direction: "out",
+              status: "sent",
+              messageId: offerSent.messageId ?? null,
             })
-            results.push({ participantId, success: false, error: scheduled.error || "Could not schedule call" })
-            continue
           }
 
           await logCandidateActivity({
@@ -283,11 +307,14 @@ export async function POST(request: NextRequest) {
               // Kept so an override of the AI is visible later: HR saw the AI
               // recommend rejection and proceeded anyway.
               overrodeAiSuggestion: participant.screening_context?.aiSuggestsRejection === true,
+              // The candidate was offered a time, not dialled. Recorded so a
+              // later "why was this person never called" has an answer.
+              slotPickerSent: !!offerSent?.success,
             },
             actor: reviewerLabel,
           })
 
-          logger.info("HR approved candidate after prescreen review", {
+          logger.info("HR approved candidate and offered a call slot", {
             participantId, candidateId: participant.candidate_id, reviewer: reviewerLabel,
           })
           results.push({ participantId, success: true })

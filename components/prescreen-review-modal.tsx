@@ -39,6 +39,13 @@ export interface ReviewCandidate {
   // nothing further, so this is an open decision rather than a detail.
   interestNeedsApproval?: boolean
   interestFlaggedAt?: string | null
+  // Scheduling state. The footer renders exactly one message button, and which
+  // one it is depends on this rather than on the recruiter's guess: offer the
+  // slots when nothing is outstanding, remind them when something is, and show
+  // nothing once a call is actually booked.
+  participantStatus?: string | null
+  scheduledCallAt?: string | null
+  awaitingScheduleDecision?: boolean
   infoData?: Record<string, unknown> | null
   infoSources?: Record<string, unknown> | null
   resumeFallback?: Record<string, unknown> | null
@@ -255,7 +262,68 @@ export function PrescreenReviewModal({
     }
   }
 
+  /**
+   * Send the slot picker without deciding anything.
+   *
+   * Approval sends the same picker, so this exists for the case where the
+   * recruiter has already approved and the message failed, or where interest was
+   * flagged and they would rather offer slots than go through the confirm step.
+   */
+  const offerScheduleSlot = async () => {
+    if (nudging) return
+    setNudging(true)
+    try {
+      const res = await fetch(
+        `/api/phone-screening/participants/${candidate.participantId}/offer-schedule`,
+        { method: "POST" }
+      )
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data?.error || `Could not send (HTTP ${res.status})`)
+
+      toast({
+        title: "Call times sent",
+        description: `${candidate.name} can pick a slot. No call happens until they do.`,
+      })
+      onReviewed()
+    } catch (err: any) {
+      toast({ title: "Could not send the call times", description: err.message, variant: "destructive" })
+    } finally {
+      setNudging(false)
+    }
+  }
+
   const aiSaysReject = candidate.aiSuggestsRejection === true
+
+  // One message button, never a row of them.
+  //
+  // The footer used to sit "Open WhatsApp chat" and "Send call nudge" side by
+  // side: same size, same outline weight, different colours, different jobs —
+  // and neither said what it was for. Reading the thread is not a message the
+  // candidate receives, so it belongs with the header controls; what is left is
+  // the single thing a recruiter might legitimately want to send next.
+  //
+  // Which one depends on where the candidate actually is:
+  //   no picker outstanding -> offer times
+  //   picker outstanding    -> remind them to book
+  //   call booked           -> nothing, there is nothing left to ask
+  const callBooked =
+    ["call_scheduled", "calling", "call_in_progress", "awaiting_call"].includes(
+      candidate.participantStatus || ""
+    ) || !!candidate.scheduledCallAt
+
+  const messageAction = callBooked
+    ? null
+    : candidate.awaitingScheduleDecision
+      ? {
+          label: "Remind them to book a call",
+          description: "Sends one message asking them to pick a time.",
+          run: sendCallNudge,
+        }
+      : {
+          label: "Send call times",
+          description: "Asks the candidate when they would like the screening call.",
+          run: offerScheduleSlot,
+        }
 
   // Clarification state. `clarificationAnsweredAt` is set by the inbound webhook
   // when the candidate actually replies, so "waiting" and "replied" are
@@ -269,13 +337,13 @@ export function PrescreenReviewModal({
     approved: {
       label: "Note (optional)",
       placeholder: "e.g. Confirmed the CTC expectation is workable",
-      // Was "Confirm — send schedule link & book call". Two things were wrong
-      // with that. The schedule link is never sent on this path: approve() calls
-      // scheduleBolnaCall and books the screening call directly, so the button
-      // promised a link the candidate never received. And it described the
-      // outcome in terms the recruiter does not choose — they approve a person
-      // for a call, they do not pick a booking method.
-      cta: "Approve — book the screening call",
+      // Was "Approve — book the screening call", and before that "Confirm —
+      // send schedule link & book call". Approval does neither of those things:
+      // it sends the candidate the slot picker and waits. Naming it a booking
+      // told the recruiter their part was finished when the candidate had not
+      // been asked anything yet — which is how a call ended up being placed
+      // sixty seconds after someone clicked this, with no time ever chosen.
+      cta: "Approve — ask them when",
     },
     rejected: {
       label: "Reason for passing (required)",
@@ -318,6 +386,19 @@ export function PrescreenReviewModal({
                 <p className="text-sm text-gray-500 truncate">{candidate.name} — {candidate.jobTitle || "Role"}</p>
               </div>
               <div className="flex items-center gap-2">
+                {/* Reading the thread is not a message to the candidate, so it
+                    sits with the header controls rather than competing with the
+                    review decisions below. */}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={openThread}
+                  className="h-8 border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+                  title="Open WhatsApp chat"
+                >
+                  <MessageCircle className="h-4 w-4 mr-1.5" />
+                  Chat
+                </Button>
                 {totalCount != null && totalCount > 1 && (
                   <div className="flex items-center gap-1">
                     <Button variant="outline" size="sm" onClick={onPrev} disabled={currentIndex === 0} className="h-8 w-8 p-0">
@@ -465,33 +546,25 @@ export function PrescreenReviewModal({
             <div className="sticky bottom-0 border-t border-gray-100 bg-white px-6 py-4 space-y-3">
               {!decision ? (
                 <>
-                  {/* Read and reply without leaving the queue. The thread is the
-                      first thing a recruiter needs: the decision here depends on
-                      what the candidate actually said, not on the extracted
-                      fields alone. */}
-                  <div className="flex items-center gap-2">
+                  {/* The single message action. Chat is up in the header; the
+                      decisions are below. There is no third thing to choose
+                      from, because there was never more than one message worth
+                      sending at this point. */}
+                  {messageAction && (
                     <Button
-                      onClick={openThread}
-                      variant="outline"
-                      className="flex-1 h-10 border-emerald-200 text-emerald-700 hover:bg-emerald-50"
-                    >
-                      <MessageCircle className="h-4 w-4 mr-2" />
-                      Open WhatsApp chat
-                    </Button>
-                    <Button
-                      onClick={() => void sendCallNudge()}
+                      onClick={() => void messageAction.run()}
                       disabled={nudging}
                       variant="outline"
-                      className="flex-1 h-10 border-amber-200 text-amber-700 hover:bg-amber-50"
+                      className="w-full h-11 border-amber-200 text-amber-700 hover:bg-amber-50"
                     >
                       {nudging ? (
                         <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                       ) : (
                         <Bell className="h-4 w-4 mr-2" />
                       )}
-                      Send call nudge
+                      {messageAction.label}
                     </Button>
-                  </div>
+                  )}
 
                   <div className="flex items-center gap-3">
                     <Button
@@ -520,8 +593,8 @@ export function PrescreenReviewModal({
                     </Button>
                   </div>
                   <p className="text-[11px] text-gray-400 text-center">
-                    The candidate has already been told we&apos;re reviewing them. Nothing else is
-                    sent until you choose.
+                    Nothing is sent until you choose. Approving asks {candidate.name} when they&apos;d
+                    like to talk — the call only happens after they pick.
                   </p>
                 </>
               ) : (
@@ -544,6 +617,11 @@ export function PrescreenReviewModal({
                   {decision === "clarify" && (
                     <p className="text-[11px] text-sky-700">
                       Sends one WhatsApp message and waits. No call is booked until they reply and you decide again.
+                    </p>
+                  )}
+                  {decision === "approved" && (
+                    <p className="text-[11px] text-emerald-700">
+                      Sends {candidate.name} the call times and waits. Nothing is dialled until they pick one.
                     </p>
                   )}
                   {/* The first click swaps this panel in, but it looked like
