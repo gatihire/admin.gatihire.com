@@ -486,7 +486,7 @@ function JobCard({
   const totalScreening = screening.pending + screening.whatsapp_sent + screening.replied + screening.calling + screening.call_done + screening.rejected
 
   let primaryAction: { label: string; icon: any; color: string; stage: string; sub?: string } | null = null
-  if (hasReview) primaryAction = { label: `Review ${stats.aiReview} call${stats.aiReview > 1 ? "s" : ""}`, icon: Eye, color: "bg-amber-500 hover:bg-amber-600", stage: "ai_screen", sub: "call_done" }
+  if (hasReview) primaryAction = { label: `Review ${stats.aiReview} call${stats.aiReview > 1 ? "s" : ""}`, icon: Eye, color: "bg-amber-500 hover:bg-amber-600", stage: "ai_screen", sub: "completed" }
   else if (hasClientPending) primaryAction = { label: `Check ${client.pending} client decision${client.pending > 1 ? "s" : ""}`, icon: ExternalLink, color: "bg-purple-500 hover:bg-purple-600", stage: "shortlist" }
   else if (hasInterviewRescheduled) primaryAction = { label: `${stats.interview.rescheduled} candidate${stats.interview.rescheduled > 1 ? "s" : ""} suggested new time`, icon: Clock, color: "bg-orange-500 hover:bg-orange-600", stage: "pipeline", sub: "interview" }
   else if (hasInterviewPending) primaryAction = { label: `Send ${stats.interview.pending} interview invite${stats.interview.pending > 1 ? "s" : ""}`, icon: Send, color: "bg-cyan-500 hover:bg-cyan-600", stage: "pipeline", sub: "interview" }
@@ -646,7 +646,7 @@ function JobCard({
           emptyColor="bg-zinc-50 text-zinc-400 ring-zinc-200"
           highlight={hasReview}
           tooltip="AI screening calls are done — review the transcript, recording, and verdict for each candidate"
-          onClick={() => onOpenStage("ai_screen", "call_done")}
+          onClick={() => onOpenStage("ai_screen", "completed")}
         />
         <MetricBadge
           value={stats.shortlist}

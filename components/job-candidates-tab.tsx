@@ -200,12 +200,34 @@ function toDateTimeLocal(iso: string | null): string {
 // Bucket for the AI Screen stage. Every decision comes from real provider data
 // via getCallTruth — never from how long a row has been sitting in a status.
 function callSubSection(participant: any): string {
-  // An HR decision outranks the call state: an approved/rejected review is the
-  // terminal answer for that candidate.
   const review = participant?.review_status
-  if (review === "approved") return "done"
+  const truth = getCallTruth(participant)
+
+  // A rejection is HR's terminal answer and outranks whatever the call did.
   if (review === "rejected") return "failed"
-  return getCallTruth(participant).bucket
+
+  // Approval used to return "done" unconditionally, which claimed a screening
+  // had happened when it had not:
+  //
+  //   Call: Line busy
+  //   Number was busy · attempt 2 of 2
+  //   Screening complete — review call results and AI verdict / View Results
+  //
+  // Approving someone is a decision to call them, not evidence that a call ever
+  // connected — and the two sit side by side on the same card, so the recruiter
+  // reads a green "complete" next to a red "busy, 2 of 2" and cannot tell which
+  // one is true. The call state decides the bucket.
+  //
+  // The one thing approval does change is what "nothing has happened" means. An
+  // approved candidate with no call placed has just been asked when they would
+  // like to talk; rendering that as pending would show "Not yet contacted —
+  // ready to start screening / Start Screening" and invite someone to restart a
+  // screening that is already agreed.
+  if (review === "approved") {
+    return truth.bucket === "pending" ? "waiting" : truth.bucket
+  }
+
+  return truth.bucket
 }
 
 function interviewSubSection(entry: InterviewEntry | undefined): string {
@@ -386,6 +408,17 @@ function getActionForCard(application: Application, callStatus?: string, partici
     
     // WAITING
     if (callStatus === "waiting") {
+      // Approved and now waiting on them, not on us: the picker has been sent
+      // and nothing further happens until they choose a time.
+      if (participant?.review_status === "approved") {
+        return {
+          label: "Approved — waiting for the candidate to pick a call time",
+          cta: "Awaiting their time",
+          icon: Clock,
+          color: "bg-amber-50 border-amber-200 text-amber-800",
+          action: null,
+        }
+      }
       const sentAt = participant?.whatsapp_sent_at || participant?.info_request_sent_at
       if (sentAt) {
         const elapsed = formatElapsedSince(sentAt)

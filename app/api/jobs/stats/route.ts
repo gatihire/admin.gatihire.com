@@ -33,7 +33,10 @@ function screeningSubSection(p: any): string {
   const delivery = p?.whatsapp_delivery_status
   const reply = p?.whatsapp_response || p?.whatsapp_reply_text
 
-  if (review === "approved") return "call_done"
+  // Approval is NOT a completed call. It used to be the first check, so a
+  // candidate whose line was busy on attempt 2 of 2 landed in the "done" bucket
+  // and the dashboard offered "Review N calls" / "To Review" for transcripts
+  // that were never recorded. Only an actually-finished call counts.
   if (review === "rejected") return "rejected"
   if (status === "completed") return "call_done"
   if (["not_interested", "unreachable", "failed", "rejected"].includes(status)) return "rejected"
