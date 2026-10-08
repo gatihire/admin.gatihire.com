@@ -42,24 +42,81 @@ export interface ParsedVerdict {
 
 export function extractVerdictFromTranscript(transcript: string): ParsedVerdict | null {
   if (!transcript) return null
-  const match = transcript.match(/\{[\s\S]*\}/)
-  if (!match) return null
-  try {
-    const parsed = JSON.parse(match[0])
-    if (parsed && typeof parsed === "object") return parsed as ParsedVerdict
-  } catch {
-    // Fall through — try to find a JSON-looking substring.
+  // Bolna appends its own metadata to the transcript that is also a JSON object —
+  // `{"General":{"Call Summary":{"subjective":"…"}}}` — and the transcript can
+  // wrap the verdict in markdown fences. Both tripped the old regex-parse,
+  // which stored that blob as verdict_json and silently dropped score and
+  // recommendation, so 19/23 completed calls ended up with no worst verdict.
+  const clean = transcript.replace(/```(?:json)?/gi, "").replace(/```/g, "")
+
+  const attempts: string[] = []
+  const match = clean.match(/\{[\s\S]*\}/)
+  if (match) attempts.push(match[0])
+  const firstBrace = clean.indexOf("{")
+  const lastBrace = clean.lastIndexOf("}")
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    attempts.push(clean.slice(firstBrace, lastBrace + 1))
+  }
+
+  for (const text of attempts) {
+    if (!text) continue
     try {
-      const firstBrace = transcript.indexOf("{")
-      const lastBrace = transcript.lastIndexOf("}")
-      if (firstBrace >= 0 && lastBrace > firstBrace) {
-        return JSON.parse(transcript.slice(firstBrace, lastBrace + 1)) as ParsedVerdict
+      const parsed = JSON.parse(text)
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && looksLikeVerdict(parsed)) {
+        return parsed as ParsedVerdict
       }
     } catch {
-      return null
+      // Try the next candidate string.
     }
   }
   return null
+}
+
+/** Arbitrary JSON is not a verdict — Bolna's own `General/Call Summary` blob
+ *  is JSON too. Only accept objects that carry the verdict's vocabulary. */
+export function looksLikeVerdict(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false
+  const obj = value as Record<string, unknown>
+  return [
+    "score", "recommendation", "next_round_ready", "verdict_explanation",
+    "pluses", "minuses", "relocation_willing", "current_salary",
+    "expected_salary", "salary_manipulation_risk", "salary_notes",
+    "callback_requested", "callback_time", "callback_preference_text",
+    "key_answers", "summary",
+  ].some((k) => k in obj)
+}
+
+/** Normalize a verdict so a score and a recommendation always travel together,
+ *  and translate every alias ("pass", "review", "strong_fit", …) into the one
+ *  value the column's CHECK constraint accepts. */
+export function normalizeVerdict(pending: ParsedVerdict | Record<string, unknown>): ParsedVerdict {
+  const raw = pending as ParsedVerdict
+  const alias: Record<string, string> = {
+    pass: "advance", fail: "not_a_fit", review: "further_review",
+    strong_fit: "advance", good_fit: "further_review",
+    possible_fit: "further_review", not_fit: "not_a_fit",
+    advance: "advance", further_review: "further_review", not_a_fit: "not_a_fit",
+  }
+  const recommendation = raw.recommendation
+    ? alias[String(raw.recommendation).toLowerCase()]
+    : undefined
+  const score =
+    typeof raw.score === "number" ? Math.max(0, Math.min(10, Number(raw.score))) : undefined
+
+  // One present implies the other, per the scoring band in the prompt:
+  // advance = 8–10, further_review = 5–7, not_a_fit = 0–4.
+  const resolvedScore =
+    score ??
+    (recommendation === "advance" ? 8
+      : recommendation === "further_review" ? 6
+      : recommendation === "not_a_fit" ? 2
+      : raw.score)
+  const resolvedRecommendation =
+    recommendation ??
+    (score !== undefined ? (score >= 8 ? "advance" : score >= 5 ? "further_review" : "not_a_fit")
+      : raw.recommendation)
+
+  return { ...raw, score: resolvedScore, recommendation: resolvedRecommendation }
 }
 
 export function transcriptToSegments(
@@ -249,11 +306,17 @@ async function buildFallbackVerdictPatch(
     if (!fallback) return null
 
     await writeScreeningAnswers(participantId, fallback as any)
+    const ratingAlias: Record<string, string> = {
+      pass: "advance", fail: "not_a_fit", review: "further_review",
+    }
+    const rating = String(fallback.overall_verdict).toLowerCase()
+    const recommendation = ratingAlias[rating] ?? ("further_review")
+    const score = Math.max(0, Math.min(10, Math.round((fallback.confidence_score ?? 0) / 10)))
     return {
       verdict_json: fallback,
       ai_summary: fallback.comprehensive_summary,
-      ai_recommendation: fallback.overall_verdict,
-      ai_score: fallback.confidence_score,
+      ai_recommendation: recommendation,
+      ai_score: score,
       fallback_summary_used: true,
     }
   } catch (err: any) {
@@ -272,9 +335,14 @@ export async function handleCompletedExecution(
 
   await writeTranscriptSegments(participantId, transcript)
 
-  let effectiveVerdict = verdict
-  if (!effectiveVerdict && extracted) {
-    effectiveVerdict = extracted as ParsedVerdict
+  // Accept only verdict-shaped objects (Bolna appends a `{"General":{"Call
+  // Summary":…}}` metadata blob to transcripts — JSON, but not a verdict), and
+  // always normalize so score + recommendation are stored together.
+  let effectiveVerdict: ParsedVerdict | null = null
+  if (verdict) {
+    effectiveVerdict = normalizeVerdict(verdict)
+  } else if (extracted && looksLikeVerdict(extracted)) {
+    effectiveVerdict = normalizeVerdict(extracted)
   }
 
   const now = new Date().toISOString()
@@ -333,7 +401,10 @@ export async function handleCompletedExecution(
 
   if (effectiveVerdict) {
     patch.verdict_json = effectiveVerdict
-    patch.ai_summary = JSON.stringify(effectiveVerdict)
+    patch.ai_summary =
+      typeof effectiveVerdict.summary === "string" && effectiveVerdict.summary.trim()
+        ? effectiveVerdict.summary
+        : JSON.stringify(effectiveVerdict)
     if (typeof effectiveVerdict.score === "number") patch.ai_score = effectiveVerdict.score
     if (effectiveVerdict.recommendation) patch.ai_recommendation = effectiveVerdict.recommendation
 
@@ -515,7 +586,7 @@ async function enrichTranscriptAsync(
   const { data: participant } = await supabaseAdmin
     .from("phone_screening_participants")
     .select(`
-      candidate_id, job_id,
+      candidate_id, job_id, ai_score, ai_recommendation,
       candidates: candidate_id (id, name, current_role, current_company, total_experience, location, technical_skills, resume_text),
       jobs: job_id (id, title, client_name, city, location, experience_min_years, experience_max_years, salary_min, salary_max, salary_type, skills_must_have, skills_good_to_have, description)
     `)
@@ -531,12 +602,29 @@ async function enrichTranscriptAsync(
   const enriched = await enrichTranscript(transcript, candidate, job, bolnaVerdict)
   if (!enriched) return
 
+  // Derive a score/recommendation when this call never produced one (e.g. the
+  // Bolna verdict was rejected or never emitted). Never overwrite a real one.
+  const ratingAlias: Record<string, string> = {
+    strong_fit: "advance", good_fit: "further_review",
+    possible_fit: "further_review", not_fit: "not_a_fit",
+  }
+  const recommendation = ratingAlias[enriched.overall_verdict] ?? "further_review"
+  // Derive an internally consistent score from the verdict band (not the model's
+  // confidence, which is a separate measure): advance ~8, further_review ~6,
+  // not_a_fit ~2. Keeps "8/10 advance" style labels coherent on the card.
+  const derivedScore = { advance: 8, further_review: 6, not_a_fit: 2 }[recommendation]
+  const hasScore = typeof participant.ai_score === "number" || typeof participant.ai_recommendation === "string"
+
   // Store enriched summary
   await supabaseAdmin
     .from("phone_screening_participants")
     .update({
       enriched_summary: enriched,
       ai_summary: enriched.comprehensive_summary,
+      ...(hasScore ? {} : {
+        ai_score: derivedScore,
+        ai_recommendation: recommendation,
+      }),
       updated_at: new Date().toISOString(),
     })
     .eq("id", participantId)
@@ -544,6 +632,7 @@ async function enrichTranscriptAsync(
   logger.info(`Transcript enriched for participant ${participantId}`, {
     verdict: enriched.overall_verdict,
     confidence: enriched.confidence_score,
+    derivedScore: !hasScore ? derivedScore : undefined,
   })
 }
 
@@ -867,11 +956,15 @@ export async function handleFailedExecution(
     // Best-effort partial verdict + answers from whatever the transcript captured.
     const partialVerdict = extractVerdictFromTranscript(execution.transcript)
     if (partialVerdict) {
-      patch.verdict_json = partialVerdict
-      patch.ai_summary = JSON.stringify(partialVerdict)
-      if (typeof partialVerdict.score === "number") patch.ai_score = partialVerdict.score
-      if (partialVerdict.recommendation) patch.ai_recommendation = partialVerdict.recommendation
-      await writeScreeningAnswers(participant.id, partialVerdict)
+      const normalized = normalizeVerdict(partialVerdict)
+      patch.verdict_json = normalized
+      patch.ai_summary =
+        typeof normalized.summary === "string" && normalized.summary.trim()
+          ? normalized.summary
+          : JSON.stringify(normalized)
+      if (typeof normalized.score === "number") patch.ai_score = normalized.score
+      if (normalized.recommendation) patch.ai_recommendation = normalized.recommendation
+      await writeScreeningAnswers(participant.id, normalized)
     } else {
       // The model ended without emitting its JSON — a dropped line, a busy tone,
       // a candidate who hung up first. The conversation still happened, so it

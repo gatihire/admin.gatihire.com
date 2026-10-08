@@ -224,12 +224,20 @@ export async function storeFallbackSummary(
   summary: FallbackSummary
 ): Promise<void> {
   const now = new Date().toISOString()
+  // The column has a CHECK constraint: ai_recommendation IN
+  // ('advance','further_review','not_a_fit') — translate the internal wording.
+  const ratingAlias: Record<string, string> = {
+    pass: "advance", fail: "not_a_fit", review: "further_review",
+  }
+  const recommendation =
+    ratingAlias[String(summary.overall_verdict).toLowerCase()] ?? "further_review"
+  const score = Math.max(0, Math.min(10, Math.round((summary.confidence_score ?? 0) / 10)))
   const { error } = await supabaseAdmin
     .from("phone_screening_participants")
     .update({
       ai_summary: summary.comprehensive_summary,
-      ai_recommendation: summary.overall_verdict,
-      ai_score: Math.round(summary.confidence_score / 10) * 10,
+      ai_recommendation: recommendation,
+      ai_score: score,
       verdict_json: summary,
       enriched_summary: summary,
       fallback_summary_used: true,

@@ -1560,6 +1560,10 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
   const callTruth = useMemo(() => getCallTruth(participant), [participant])
   const aiScore = aiInfo?.score
   const hasMatchScore = application.match_score !== null && application.match_score !== undefined
+  // A completed call must always lead somewhere: even if its score isn't stored
+  // yet, the pill stays visible so "View Results" is reachable in every stage.
+  const callCompleted =
+    participant?.bolna_status === "completed" || participant?.status === "completed" || callStatus === "done"
 
   const saveNotes = async () => {
     setNotesSaving(true)
@@ -1880,8 +1884,8 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                 </Tooltip>
               )}
 
-              {/* AI Analysis button — shows match score or AI screening score */}
-              {(aiScore != null || application.match_score != null) && (
+              {/* AI Analysis button — shows match score, AI screening score, or a results entry point */}
+              {(aiScore != null || hasMatchScore || callCompleted) && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <button
@@ -1890,18 +1894,24 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                           ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100" :
                         (aiScore ?? 0) >= 4 || (application.match_score ?? 0) >= 0.4
                           ? "border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100" :
-                        "border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
+                        "border-zinc-200 bg-zinc-50 text-zinc-600 hover:bg-zinc-100"
                       }`}
                       onClick={() => onViewResults?.(application.candidate_id)}
                     >
                       <Sparkles className="h-3.5 w-3.5" />
-                      {aiScore != null ? `${aiScore}/10` : `${Math.round((application.match_score || 0) * 100)}%`}
+                      {aiScore != null ? `${aiScore}/10` :
+                       callCompleted ? "View Results" :
+                       `${Math.round((application.match_score || 0) * 100)}%`}
                       {aiInfo?.recommendation && (
                         <span className="capitalize ml-0.5">{aiInfo.recommendation.replace(/_/g, " ")}</span>
                       )}
                     </button>
                   </TooltipTrigger>
-                  <TooltipContent>{aiScore != null ? "View AI screening analysis" : "View match analysis"}</TooltipContent>
+                  <TooltipContent>
+                    {aiScore != null ? "View AI screening analysis" :
+                     callCompleted ? "View call results and AI verdict" :
+                     "View match analysis"}
+                  </TooltipContent>
                 </Tooltip>
               )}
 

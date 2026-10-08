@@ -3,6 +3,7 @@ import { supabaseAdmin } from "@/lib/supabase"
 import { logger } from "@/lib/logger"
 import { evaluateCallQuality } from "@/lib/ai-learning"
 import { scheduleBolnaCall } from "@/lib/scheduled-call"
+import { looksLikeVerdict, normalizeVerdict } from "@/lib/bolna-execution"
 
 export const runtime = "nodejs"
 
@@ -44,13 +45,20 @@ export async function POST(request: NextRequest) {
 
     if (structuredOutput) {
       const parsed = typeof structuredOutput === "string" ? JSON.parse(structuredOutput) : structuredOutput
+      // Reject/harmonize anything that isn't a verdict shape (Bolna appends a
+      // `{"General":{"Call Summary":…}}` metadata blob that is JSON but no score).
+      const verdict = looksLikeVerdict(parsed) ? normalizeVerdict(parsed as Record<string, unknown>) : null
 
       await supabaseAdmin
         .from("phone_screening_participants")
         .update({
-          ai_score: parsed.score,
+          ...(verdict
+            ? {
+                ai_score: verdict.score,
+                ai_recommendation: verdict.recommendation,
+              }
+            : {}),
           ai_summary: typeof structuredOutput === "string" ? structuredOutput : JSON.stringify(structuredOutput),
-          ai_recommendation: parsed.recommendation || "further_review",
           transcript_json: transcript ? (Array.isArray(transcript) ? JSON.stringify(transcript) : transcript) : null,
           callback_preference: parsed.callback_preference || null,
           status: "completed",
