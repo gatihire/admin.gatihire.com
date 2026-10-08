@@ -413,6 +413,19 @@ export function PhoneScreeningResultsSheet({
   // Prefer enriched summary over basic verdict
   const pluses: string[] = (enriched?.strengths as string[]) || (verd?.pluses as string[]) || ((parsedSummary?.pluses as string[]) || [])
   const minuses: string[] = (enriched?.concerns as string[]) || (verd?.minuses as string[]) || ((parsedSummary?.minuses as string[]) || [])
+  // Bolna sometimes only leaves its own metadata in ai_summary/verdict_json
+  // ({"General":{"Call Summary":{"subjective":"…"}}}). That's JSON with no
+  // verdict fields, so the logic above would render a blank box — dig out the
+  // prose Bolna actually produced instead of showing nothing.
+  const pokeSubjective = (o: Record<string, unknown> | null | undefined): string => {
+    if (!o) return ""
+    const general = (o as { General?: { "Call Summary"?: { subjective?: unknown } } }).General
+    const viaCallSummary = general?.["Call Summary"]?.subjective
+    if (typeof viaCallSummary === "string") return viaCallSummary
+    const direct = (o as { subjective?: unknown }).subjective
+    return typeof direct === "string" ? direct : ""
+  }
+
   const verdictExplanation =
     (enriched?.comprehensive_summary as string)
     || (verd?.verdict_explanation as string)
@@ -420,6 +433,8 @@ export function PhoneScreeningResultsSheet({
     // A prose (non-JSON) ai_summary is the whole summary; showing it beats
     // showing nothing at all.
     || (parsedSummary?.__text as string)
+    || pokeSubjective(parsedSummary)
+    || pokeSubjective(verd)
     || ""
   const fitAssessment = (enriched?.fit_assessment as string) || ""
   const salaryAnalysis = (enriched?.salary_analysis as { current?: string; expected?: string; risk?: string; notes?: string }) || null

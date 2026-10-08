@@ -173,10 +173,23 @@ JSON:`
   try { return JSON.parse(m[0]) } catch { return null }
 }
 
+// Bolna sometimes only stores its own metadata wrapper in ai_summary:
+// {"General":{"Call Summary":{"subjective":"…"}}}. No score, and the results
+// sheet has no summary to render. When present, the subjective field is the
+// prose Bolna wrote for the call — surface it as the real ai_summary.
+function blobSubjective(raw) {
+  if (typeof raw !== "string" || !raw.trim().startsWith("{")) return null
+  try {
+    const j = JSON.parse(raw)
+    const s = j?.General?.["Call Summary"]?.subjective
+    return typeof s === "string" ? s : null
+  } catch { return null }
+}
+
 async function main() {
   const url = `/rest/v1/phone_screening_participants?select=${q(
     "id,candidate_id,status,ai_score,ai_recommendation,ai_summary,transcript_raw,verdict_json,bolna_status,jobs:job_id(id,title,client_name,city,location,experience_min_years,experience_max_years,salary_min,salary_max,salary_type)"
-  )}&status=eq.completed&or=${q("(ai_score.is.null,ai_recommendation.is.null)")}&limit=1000`
+  )}&status=eq.completed&limit=1000`
 
   const resp = await R(url)
   if (!resp.ok) { console.error("Fetch participants failed:", resp.status, await resp.text()); return }
@@ -191,34 +204,46 @@ async function main() {
     candidatesById = new Map((await candRes.json()).map((c) => [c.id, c]))
   }
 
-  let ok = 0, viaGemini = 0, viaStored = 0, failed = 0
+  let ok = 0, viaGemini = 0, viaStored = 0, failed = 0, skipped = 0
   for (const row of rows) {
     const pid = row.id
 
+    const needScore = row.ai_score == null || row.ai_recommendation == null
+    const staleBlob = blobSubjective(row.ai_summary)
+    if (!needScore && !staleBlob) { skipped++; continue }
+
     let norm = null
-    if (looksLikeVerdict(row.verdict_json)) { norm = normalize(row.verdict_json); viaStored++ }
-    if (!norm) {
-      const extracted = extractVerdict(row.transcript_raw)
-      if (extracted) { norm = normalize(extracted); viaStored++ }
-    }
-    if (!norm) {
-      const enriched = await enrich(row.transcript_raw, candidatesById.get(row.candidate_id), row.jobs)
-      if (enriched) {
-        const ratingAlias = { strong_fit: "advance", good_fit: "further_review", possible_fit: "further_review", not_fit: "not_a_fit" }
-        const recommendation = ratingAlias[enriched.overall_verdict] ?? "further_review"
-        const score = { advance: 8, further_review: 6, not_a_fit: 2 }[recommendation]
-        norm = { score, recommendation, summary: enriched.comprehensive_summary }
-        viaGemini++
+    if (needScore) {
+      if (looksLikeVerdict(row.verdict_json)) { norm = normalize(row.verdict_json); viaStored++ }
+      if (!norm) {
+        const extracted = extractVerdict(row.transcript_raw)
+        if (extracted) { norm = normalize(extracted); viaStored++ }
+      }
+      if (!norm) {
+        const enriched = await enrich(row.transcript_raw, candidatesById.get(row.candidate_id), row.jobs)
+        if (enriched) {
+          const ratingAlias = { strong_fit: "advance", good_fit: "further_review", possible_fit: "further_review", not_fit: "not_a_fit" }
+          const recommendation = ratingAlias[enriched.overall_verdict] ?? "further_review"
+          const score = { advance: 8, further_review: 6, not_a_fit: 2 }[recommendation]
+          norm = { score, recommendation, summary: enriched.comprehensive_summary }
+          viaGemini++
+        }
       }
     }
 
-    if (!norm) {
+    const patch = {}
+    if (needScore && norm) {
+      patch.ai_score = norm.score
+      patch.ai_recommendation = norm.recommendation
+    }
+    if (staleBlob) patch.ai_summary = staleBlob
+
+    if (!Object.keys(patch).length) {
       failed++
-      console.log(`  ✗ ${pid.slice(0, 8)} — could not derive a verdict`)
+      console.log(`  ✗ ${pid.slice(0, 8)} — could not derive a score`)
       continue
     }
 
-    const patch = { ai_score: norm.score, ai_recommendation: norm.recommendation }
     const up = await R(`/rest/v1/phone_screening_participants?id=eq.${pid}`, {
       method: "PATCH",
       headers: { Prefer: "return=minimal", "Content-Type": "application/json" },
@@ -230,10 +255,13 @@ async function main() {
       continue
     }
     ok++
-    console.log(`  ✓ ${pid.slice(0, 8)} → ${norm.score}/10 ${norm.recommendation}`)
+    const detail = []
+    if (patch.ai_score != null) detail.push(`${patch.ai_score}/10 ${patch.ai_recommendation}`)
+    if (patch.ai_summary) detail.push("summary recovered from Bolna blob")
+    console.log(`  ✓ ${pid.slice(0, 8)} → ${detail.join(" · ")}`)
   }
 
-  console.log("\nDone:", { patched: ok, fromGemini: viaGemini, fromStoredOrTranscript: viaStored, failed, total: rows.length })
+  console.log("\nDone:", { patched: ok, fromGemini: viaGemini, fromStoredOrTranscript: viaStored, skipped, failed, total: rows.length })
 }
 
 main().catch((e) => { console.error(e); process.exit(1) })
