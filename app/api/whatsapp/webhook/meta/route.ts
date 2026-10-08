@@ -19,7 +19,7 @@ import { getWhatsAppService, getOwnWhatsAppNumbers } from "@/lib/whatsapp"
 import { scheduleOrPlaceCall, prepareScheduleOffer, markScheduleOffer } from "@/lib/scheduled-call"
 import { classifyIntent } from "@/lib/ai-intent-classifier"
 import { toE164 } from "@/lib/phone"
-import { appendThreadEntry, recordInboundText, recordOutboundText } from "@/lib/whatsapp-thread"
+import { appendThreadEntry, describeTemplate, recordInboundText, recordOutboundText } from "@/lib/whatsapp-thread"
 
 // The coalescing window plus intent classification plus pre-screen evaluation
 // can add up past the platform's default function budget. Raising it here rather
@@ -149,20 +149,37 @@ async function processMessageEvent(value: any) {
 //
 // `renderedBody` is the text Meta actually accepted, parameters substituted, so
 // what the thread shows is what was sent rather than our paraphrase of it.
+//
+// A failed send still gets an entry: the candidate received nothing, and the
+// recruiter needs to see that the template did not leave the building. What it
+// must NOT get is a hand-written sentence standing in for a message nobody read.
 async function recordTemplateSend(participantId: string, result: any, extra: Record<string, any> = {}) {
-  if (!result?.success) return
-  const body = result.renderedBody
-  if (!body) {
-    logger.warn("Template send succeeded but carried no rendered body; thread entry skipped", {
-      participantId,
-      kind: extra.kind,
-    })
+  const template: string | undefined = result?.templateName ?? extra.template
+  const base: Record<string, any> = {
+    kind: extra.kind || "outbound_template",
+    messageId: result?.messageId ?? null,
+    ...extra,
+    ...(template ? { template } : {}),
+  }
+
+  if (result?.success) {
+    const body = result.renderedBody
+    if (!body) {
+      logger.warn("Template send succeeded but carried no rendered body; thread entry skipped", {
+        participantId,
+        kind: extra.kind,
+        template,
+      })
+      return
+    }
+    await recordOutboundText(participantId, body, { ...base, status: "sent" })
     return
   }
-  await recordOutboundText(participantId, body, {
-    kind: extra.kind || "outbound_template",
-    messageId: result.messageId ?? null,
-    ...extra,
+
+  await recordOutboundText(participantId, describeTemplate(template), {
+    ...base,
+    status: "failed",
+    error: result?.error ?? null,
   })
 }
 
@@ -1583,12 +1600,11 @@ async function finalizeCollectedInfo(
         ],
       })
       // Interactive buttons carry their own body, not a template, so the thread
-      // needs it passed explicitly.
+      // needs it passed explicitly. Only one entry is written on success — the
+      // earlier version recorded the same proceedBody twice (once via
+      // recordOutboundText, once via appendToHistory below) so every "call now"
+      // came back to the recruiter as two identical bubbles.
       if (sendResult.success) {
-        await recordOutboundText(participant.id, proceedBody, {
-          kind: "schedule_buttons",
-          messageId: sendResult.messageId ?? null,
-        })
         // The gate's second door reads this. Sending the picker without writing
         // it means the candidate picks a time and is refused.
         await markScheduleOffer(participant.id)
@@ -1692,18 +1708,7 @@ async function finalizeCollectedInfo(
           jobTitle: participant.jobs?.title || "this role",
           companyName: participant.jobs?.client_name || "",
         })
-            await recordTemplateSend(participant.id, ack, { kind: "info_review_pending" })
-
-        await appendToHistory(participant.id, {
-          at: new Date().toISOString(),
-          kind: "info_review_pending",
-          direction: "out",
-          template: "info_review_pending",
-          text: `Thanks ${participant.candidates?.name || ""} — we've received your details and our team is reviewing your profile. We'll be in touch shortly.`,
-          status: ack.success ? "sent" : "failed",
-          messageId: ack.messageId ?? null,
-          error: ack.success ? null : ack.error ?? null,
-        })
+        await recordTemplateSend(participant.id, ack, { kind: "info_review_pending" })
 
         if (!ack.success) {
           logger.error("Could not acknowledge needs_review to the candidate", {
@@ -1787,18 +1792,7 @@ async function finalizeCollectedInfo(
           jobTitle: participant.jobs?.title || "this role",
           companyName: participant.jobs?.client_name || "",
         })
-            await recordTemplateSend(participant.id, ack, { kind: "info_review_pending" })
-
-        await appendToHistory(participant.id, {
-          at: new Date().toISOString(),
-          kind: "info_review_pending",
-          direction: "out",
-          template: "info_review_pending",
-          text: `Thanks ${participant.candidates?.name || ""} — we've received your details and our team is reviewing your profile. We'll be in touch shortly.`,
-          status: ack.success ? "sent" : "failed",
-          messageId: ack.messageId ?? null,
-          error: ack.success ? null : ack.error ?? null,
-        })
+        await recordTemplateSend(participant.id, ack, { kind: "info_review_pending" })
 
         if (!ack.success) {
           logger.error("Could not acknowledge AI-suggested-rejection to the candidate", {

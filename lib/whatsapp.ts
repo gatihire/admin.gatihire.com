@@ -48,6 +48,14 @@ interface SendMessageResult {
    * without their name in it, for a template that greets them by name.
    */
   renderedBody?: string | null
+  /**
+   * The template name that was actually sent.
+   *
+   * Send sites record this on the thread so the recruiter's view names the same
+   * template the candidate received. Without it they defaulted to a hardcoded
+   * name while the send resolved a different one through its env override.
+   */
+  templateName?: string
 }
 
 /**
@@ -60,6 +68,19 @@ interface SendMessageResult {
 function templateParam(value: string | undefined | null, fallback: string): string {
   const s = String(value ?? "").trim()
   return s || fallback
+}
+
+/**
+ * The parameters as they will appear in the body, in order.
+ *
+ * Both providers need this: Meta renders the body itself from the same list, and
+ * the thread needs it locally because the Graph send response carries only a
+ * message id.
+ */
+function bodyParamsOf(message: TemplateMessage): Array<string | null> {
+  return ((message.components ?? []) as any[]).flatMap((c) =>
+    (c?.parameters ?? []).map((p: any) => p?.text ?? null)
+  )
 }
 
 /**
@@ -318,11 +339,9 @@ export class WhatsAppService {
         const renderedBody = await renderTemplateBody(
           message.templateName,
           message.languageCode || "en_US",
-          ((message.components ?? []) as any[]).flatMap((c) =>
-            (c?.parameters ?? []).map((p: any) => p?.text ?? null)
-          )
+          bodyParamsOf(message)
         )
-        return { success: true, messageId, renderedBody }
+        return { success: true, messageId, renderedBody, templateName: message.templateName }
       }
 
       // (#132001) "Template name does not exist in the translation" — the
@@ -354,17 +373,26 @@ export class WhatsAppService {
         if (retryResponse.ok && retryResult.messages && retryResult.messages[0]) {
           const messageId = retryResult.messages[0].id
           logger.info(`WhatsApp message sent via Meta (alternate language)`, { messageId, destination })
-          return { success: true, messageId }
+          // Same render as the primary path. This branch used to return without
+          // a body, so every send that needed the language fallback landed on
+          // the candidate with nothing for the thread to show.
+          const renderedBody = await renderTemplateBody(
+            message.templateName,
+            altLanguage,
+            bodyParamsOf(message)
+          )
+          return { success: true, messageId, renderedBody, templateName: message.templateName }
         }
         return {
           success: false,
           error: retryResult.error?.message || "Unknown error",
+          templateName: message.templateName,
         }
       }
 
       const error = result.error?.message || "Unknown error"
       logger.error("Failed to send WhatsApp via Meta", { destination, error, response: result })
-      return { success: false, error, errorCode: result.error?.code }
+      return { success: false, error, errorCode: result.error?.code, templateName: message.templateName }
     } catch (error: any) {
       logger.error("Error sending WhatsApp via Meta", { destination, error: error.message })
       return { success: false, error: error.message }
@@ -393,10 +421,19 @@ export class WhatsAppService {
         { campaignName: message.templateName }
       )
 
-      return result
+      // Aisensy returns a message id and nothing else, so the body is rendered
+      // from the registry here exactly as the Meta path does. Without this the
+      // fallback provider produced successful sends the thread could not show,
+      // and a recruiter saw a label where the candidate saw their own name.
+      const renderedBody = await renderTemplateBody(
+        message.templateName,
+        message.languageCode || "en_US",
+        bodyParamsOf(message)
+      )
+      return { ...result, renderedBody, templateName: message.templateName }
     } catch (error: any) {
       logger.error("Error sending WhatsApp via Aisensy fallback", { error: error.message })
-      return { success: false, error: error.message }
+      return { success: false, error: error.message, templateName: message.templateName }
     }
   }
 

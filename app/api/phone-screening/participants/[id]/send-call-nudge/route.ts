@@ -4,6 +4,7 @@ import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { logger } from "@/lib/logger"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { appendWhatsappHistory } from "@/lib/whatsapp-history"
+import { describeTemplate } from "@/lib/whatsapp-thread-shared"
 import { logCandidateActivity } from "@/lib/activity-logger"
 
 export const runtime = "nodejs"
@@ -95,12 +96,18 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // Recorded either way. A nudge a recruiter believes they sent but which never
     // left the building is worse than no nudge at all, because it stops them
     // looking for a reply.
+    //
+    // `template` comes from what was actually sent rather than the env fallback,
+    // and the body is the rendered registry text — "Reminder sent to X to continue"
+    // described an action instead of showing the message the candidate now has.
+    const template = sent.templateName || process.env.WHATSAPP_TEMPLATE_CALL_NUDGE || "call_nudge"
     await appendWhatsappHistory(participant.id, {
       at: new Date().toISOString(),
       kind: "hr_call_nudge",
       direction: "out",
-      template: process.env.WHATSAPP_TEMPLATE_CALL_NUDGE || "call_nudge",
-      text: `Reminder sent to ${candidate.name || "the candidate"} to continue.`,
+      template,
+      text: sent.renderedBody
+        ?? (sent.success ? describeTemplate(template) : `Reminder to ${candidate.name || "the candidate"} to continue.`),
       status: sent.success ? "sent" : "failed",
       messageId: sent.messageId ?? null,
       error: sent.success ? null : sent.error ?? null,

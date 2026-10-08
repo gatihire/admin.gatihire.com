@@ -401,15 +401,20 @@ const jobLink = getPublicJobUrl(job.id)
   if (resolvedParticipantId) {
     await appendThreadEntry(resolvedParticipantId, {
       messageId: outreachResult.messageId || null,
-      template: outreachTemplate,
+      template: outreachResult.templateName || outreachTemplate,
       direction: "out",
-      text: [
+      // The rendered registry body first: it is what the candidate read, name and
+      // salary included. The parameter list below is only a fallback for a send
+      // that produced no body, where the values are still true and the wording
+      // is at least derived from the same parameters rather than invented.
+      text: outreachResult.renderedBody || [
         `${candidate.name || "there"} — ${job.title || "an open role"} at ${outreachCompany}`,
         `Location: ${outreachLocation}`,
         `Salary: ${outreachSalary}`,
       ].join("\n"),
       sentAt: now,
-      status: "sent",
+      status: outreachResult.success ? "sent" : "failed",
+      ...(outreachResult.success ? {} : { error: outreachResult.error ?? null }),
     })
   }
 

@@ -7,6 +7,7 @@ import { enrichTranscript } from "@/lib/transcript-enrichment"
 import { logCandidateActivity } from "@/lib/activity-logger"
 import { toE164 } from "@/lib/phone"
 import { appendWhatsappHistory } from "@/lib/whatsapp-history"
+import { describeTemplate } from "@/lib/whatsapp-thread-shared"
 import {
   getBolnaExecution,
   findLatestExecutionByPhone,
@@ -479,12 +480,18 @@ async function sendPostCallWhatsApp(participantId: string): Promise<void> {
   // nothing afterwards and no log said why — the flow looked healthy end to end.
   // Recorded in the thread so a failed post-call send is visible to a recruiter
   // instead of being indistinguishable from "we decided not to text them".
+  // The body is the rendered registry text, not our own one-liner. The template
+  // name comes from what was actually sent, because the send resolves it through
+  // an env override that a hardcoded "call_completed" would contradict.
+  const postCallTemplate =
+    result.templateName || process.env.WHATSAPP_TEMPLATE_CALL_COMPLETED || "call_completed"
   await appendWhatsappHistory(participantId, {
     at: new Date().toISOString(),
     kind: "post_call_message",
     direction: "out",
-    template: "call_completed",
-    text: "Thanks for completing the screening call.",
+    template: postCallTemplate,
+    text: result.renderedBody
+      ?? (result.success ? describeTemplate(postCallTemplate) : "Post-call message was not sent."),
     status: result.success ? "sent" : "failed",
     messageId: result.messageId ?? null,
     error: result.success ? null : result.error ?? null,

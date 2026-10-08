@@ -726,6 +726,19 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
               jobTitle: participant.job_title,
             });
             if (sent.success) await markScheduleOffer(participantId);
+            // This send had no thread entry at all: the candidate got the picker
+            // and the recruiter's thread showed nothing between the interest tap
+            // and whatever came next, so the offer looked like it never happened.
+            await appendWhatsappHistory(participantId, {
+              at: new Date().toISOString(),
+              kind: 'schedule_buttons',
+              direction: 'out',
+              template: sent.templateName ?? undefined,
+              text: sent.renderedBody ?? `Thanks ${participant.candidate_name || ''} — we already have your details from your application. Pick a slot for your screening call.`.trim(),
+              status: sent.success ? 'sent' : 'failed',
+              messageId: sent.messageId ?? null,
+              error: sent.success ? null : sent.error ?? null,
+            });
           } else if (!replyPhone) {
             logger.error('Interested with no reachable phone', { participantId });
             await supabaseAdmin
@@ -787,9 +800,13 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
 
         await appendWhatsappHistory(participantId, {
           at: new Date().toISOString(),
-          kind: 'schedule_buttons',
+          kind: 'collect_info_form',
           direction: 'out',
-          text: `Thanks for your interest in ${participant.job_title || 'the role'} — please share a few details so we can screen you.`,
+          template: form.templateName ?? undefined,
+          // The registry body with the parameters filled in. The sentence this
+          // replaces was our own summary of the form; the candidate saw the
+          // template's words with their own name in them.
+          text: form.renderedBody ?? `Thanks for your interest in ${participant.job_title || 'the role'} — please share a few details so we can screen you.`,
           status: 'sent',
           messageId: form.messageId ?? null,
         });
@@ -915,8 +932,14 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
               at: new Date().toISOString(),
               kind: 'schedule_buttons',
               direction: 'out',
-              text: `Thanks ${participant.candidate_name || ''} — we already have your details from your application. Pick a slot for your screening call.`.trim(),
-              status: 'sent',
+              template: sent.templateName ?? undefined,
+              // The registry body, parameters filled in. This paraphrase said
+              // "pick a slot" in our words; the candidate received the template's
+              // own sentence naming the job and the caller number.
+              text: sent.renderedBody ?? `Thanks ${participant.candidate_name || ''} — we already have your details from your application. Pick a slot for your screening call.`.trim(),
+              status: sent.success ? 'sent' : 'failed',
+              messageId: sent.messageId ?? null,
+              error: sent.success ? null : sent.error ?? null,
             });
           }
           break;

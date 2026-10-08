@@ -116,6 +116,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       if (offerSent?.renderedBody) {
         await recordOutboundText(id, offerSent.renderedBody, {
           kind: "schedule_buttons",
+          template: offerSent.templateName,
           direction: "out",
           status: "sent",
           messageId: offerSent.messageId ?? null,
