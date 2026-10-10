@@ -4,7 +4,7 @@ import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { deriveOrigin, deriveCandidateFlow, type CandidateOrigin } from "@/lib/origin"
 import { orchestrateScreening, systemDecidesMode, getPublicJobUrl, formatSalaryRange, jobLocation } from "@/lib/call-orchestrator"
 import { getWhatsAppService, talentOutreachTemplateName } from "@/lib/whatsapp"
-import { placeCallImmediately } from "@/lib/scheduled-call"
+import { placeCallImmediately, prepareScheduleOffer, markScheduleOffer } from "@/lib/scheduled-call"
 import { logger } from "@/lib/logger"
 import { sendSessionMessage, hasEnoughToScreen } from "@/lib/info-collector-v2"
 import { logCandidateActivityBatch } from "@/lib/activity-logger"
@@ -127,7 +127,19 @@ async function renudgeExistingParticipant(opts: {
       status = "whatsapp_sent"
       outboundLink = getPublicJobUrl(job.id)
     } else if (portalShortlist) {
-      // Flow A portal: shortlist + schedule (info already in apply form)
+      // Flow A portal: shortlist + schedule (info already in apply form).
+      // Same gate as sendShortlistMessage: never re-send a picker whose taps
+      // the eligibility gate would refuse. The first trigger stored the
+      // pre-screen result and offer marker, then a later buggy write clobbered
+      // them — running this again re-arms the gate so a fresh tap places a call.
+      const offer = await prepareScheduleOffer(participantId)
+      if (!offer.ok) {
+        logger.warn("Re-nudge shortlist picker withheld — call would be refused", {
+          participantId,
+          reason: offer.reason,
+        })
+        return { ok: false, kind: "nudge", error: offer.reason }
+      }
       template = "shortlist_call_schedule"
       msgResult = await whatsapp.sendShortlistSchedule({
         phoneNumber: candidate.phone as string,
@@ -239,6 +251,9 @@ async function renudgeExistingParticipant(opts: {
       if (!alreadyCollected) update.info_confirmed = false
     } else if (portalShortlist) {
       // Flow A portal: keep the previously seeded info; just re-send the invite.
+      // Re-arm the tap gate now that the picker actually went out, so the
+      // candidate's reply places a call instead of being refused.
+      await markScheduleOffer(participantId)
       update.screening_mode = "collect_info_first"
       update.info_step = "confirmed"
       update.screening_context = {
@@ -432,10 +447,10 @@ export async function POST(request: NextRequest) {
     console.log("[TRIGGER] existingParticipants:", existingParticipants?.map(p => ({ candidate_id: p.candidate_id, status: p.status })))
 
     const dedupedCandidateIds = new Set<string>()
-    const dedupUpdates: Array<{ candidateId: string; participantId: string }> = []
+    const dedupUpdates: Array<{ candidateId: string; participantId: string; screening_context: any }> = []
     for (const ep of existingParticipants || []) {
       dedupedCandidateIds.add(ep.candidate_id)
-      dedupUpdates.push({ candidateId: ep.candidate_id, participantId: ep.id })
+      dedupUpdates.push({ candidateId: ep.candidate_id, participantId: ep.id, screening_context: ep.screening_context })
     }
 
     // Log dedup updates (showcase they were refreshed)
@@ -445,12 +460,14 @@ export async function POST(request: NextRequest) {
         dedupedCount: dedupUpdates.length,
         candidateIds: dedupUpdates.map(d => d.candidateId),
       })
-      // Update their screening_context with fresh job data
+      // Update their screening_context with fresh job data — merged over any
+      // pre-screen result / offer markers so a slot already sent keeps working.
       for (const du of dedupUpdates) {
         await supabaseAdmin
           .from("phone_screening_participants")
           .update({
             screening_context: {
+              ...((du as any).screening_context || {}),
               jobTitle: job.title,
               clientName: job.client_name || client?.name || "",
               origin: fallbackOrigin,

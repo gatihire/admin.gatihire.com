@@ -179,9 +179,13 @@ async function sendShortlistMessage(opts: {
   }]
   // Preserve any provenance already recorded (e.g. an earlier WhatsApp answer the
   // candidate gave before this nudge) and add "application" for the seeded keys.
+  // `screening_context` is read here too: prepareScheduleOffer and markScheduleOffer
+  // wrote preScreenResult.decision and awaitingScheduleDecision into it just a few
+  // lines above, and the write below must merge — not replace — or every slot tap
+  // is refused by the eligibility gate ("pre-screen has not cleared this candidate").
   const { data: existing } = await supabaseAdmin
     .from("phone_screening_participants")
-    .select("info_sources")
+    .select("info_sources, screening_context")
     .eq("id", participantId)
     .maybeSingle()
 
@@ -206,7 +210,10 @@ async function sendShortlistMessage(opts: {
     call_payload_json: userData,
     generated_questions: generatedQuestions.join("\n"),
     gemini_prompt_used: geminiPromptUsed,
-    screening_context: screeningContextFor(job, client, origin),
+    screening_context: {
+      ...((existing as any)?.screening_context || {}),
+      ...screeningContextFor(job, client, origin),
+    },
     updated_at: now,
   })
 
