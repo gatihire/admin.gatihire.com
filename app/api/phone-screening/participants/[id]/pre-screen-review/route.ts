@@ -7,6 +7,7 @@ import { logCandidateActivity } from "@/lib/activity-logger"
 import { sendSessionMessage } from "@/lib/info-collector-v2"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { recordOutboundText } from "@/lib/whatsapp-thread"
+import { appendWhatsappHistory } from "@/lib/whatsapp-history"
 
 export const runtime = "nodejs"
 
@@ -122,6 +123,14 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           messageId: offerSent.messageId ?? null,
         })
       }
+
+      // Visible in the thread so the approval → picker handoff reads in chat.
+      await appendWhatsappHistory(id, {
+        at: now,
+        kind: "hr_approval",
+        direction: "internal",
+        text: `Approved — call time options sent; waiting on their pick.`,
+      })
 
 
     } else if (decision === "filter_out") {

@@ -22,7 +22,7 @@ import { supabase } from "@/lib/supabase"
 const LIVE_POLL_INTERVAL_MS = 45_000
 
 import type { ThreadEntry } from "@/lib/whatsapp-thread-shared"
-import { describeTemplate, entryTime } from "@/lib/whatsapp-thread-shared"
+import { describeTemplate, entryTime, friendlyCallFailure } from "@/lib/whatsapp-thread-shared"
 
 /**
  * WhatsApp-style conversation view for a candidate's screening thread.
@@ -258,14 +258,33 @@ function Bubble({ item }: { item: Rendered }) {
     const tone =
       item.kind === "call_booked"
         ? "text-blue-700 bg-blue-50 border-blue-200"
-        : item.kind === "call_booking_failed" || item.status === "failed"
-          ? "text-red-700 bg-red-50 border-red-200"
-          : "text-zinc-600 bg-zinc-50 border-zinc-200"
-    const Icon = item.kind === "call_booked" ? PhoneCall : item.kind === "button_tap" ? MousePointerClick : item.status === "failed" ? XCircle : item.kind === "pre_screen_review" ? Clock : MessageCircle
+        : item.kind === "call_completed"
+          ? "text-emerald-700 bg-emerald-50 border-emerald-200"
+          : item.kind === "call_booking_failed" ||
+              item.kind === "call_failed" ||
+              item.kind === "call_missed" ||
+              item.status === "failed"
+            ? "text-red-700 bg-red-50 border-red-200"
+            : "text-zinc-600 bg-zinc-50 border-zinc-200"
+    const Icon =
+      item.kind === "call_booked" || item.kind === "call_completed"
+        ? PhoneCall
+        : item.kind === "button_tap"
+          ? MousePointerClick
+          : item.status === "failed" || item.kind === "call_failed" || item.kind === "call_missed"
+            ? XCircle
+            : item.kind === "pre_screen_review"
+              ? Clock
+              : MessageCircle
     const label =
       item.kind === "call_booked" && item.scheduledFor
         ? `Call booked for ${new Date(item.scheduledFor).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`
-        : item.text
+        : // The raw booking error is provider jargon ("pre-screen has not cleared
+          // this candidate (decision: none)"). Surface the plain-language version
+          // so the thread reads like a conversation, not a stack trace.
+          item.kind === "call_booking_failed"
+          ? friendlyCallFailure(item.error ?? item.text) || item.text || "Call couldn't be booked"
+          : item.text
 
     return (
       <div className="flex justify-center py-0.5">

@@ -78,3 +78,42 @@ export function describeTemplate(template?: string): string {
   if (!template) return "Message sent"
   return TEMPLATE_LABELS[template] || `Message sent (${template})`
 }
+
+/**
+ * Translate a stored, technical call-failure reason into plain language a
+ * recruiter can act on. Returns null when the reason isn't one we recognise, so
+ * the caller can fall back to the raw text.
+ */
+export function friendlyCallFailure(raw?: string | null): string | null {
+  if (!raw) return null
+  const r = raw.toLowerCase()
+  if (
+    r.includes("pre-screen has not cleared") ||
+    r.includes("pre-screen not cleared") ||
+    r.includes("decision: none")
+  )
+    return "Couldn't book the call — the profile wasn't approved for a call yet. Approve it in Review, then send the time options again."
+  if (r.includes("no slot was offered"))
+    return "A time was never offered, so there was nothing to book — send the time options again."
+  if (r.includes("attempt limit") || r.includes("max attempts") || r.includes("max_attempts"))
+    return "Too many failed attempts — the profile is flagged for a human to handle."
+  if (r.includes("no longer waiting"))
+    return "The candidate already moved on from this step — nothing was booked."
+  if (r.includes("callback not due") || r.includes("retry not due") || r.includes("not due yet"))
+    return "The booked time hasn't arrived yet — the call is still on schedule."
+  if (r.includes("already calling") || r.includes("already in flight"))
+    return "A call is already dialling for this candidate — not dialling twice."
+  if (r.includes("already booked"))
+    return "A call is already booked for this candidate — not double-booking."
+  if (r.includes("with the provider"))
+    return "The call is already being dialled — waiting for its outcome."
+  if (r.includes("no phone number"))
+    return "No phone number on file — add one before booking a call."
+  if (r.includes("qstash") || r.includes("could not be scheduled") || r.includes("schedule failed"))
+    return "The time was marked, but the dial was never scheduled — retry placing the call."
+  if (r.includes("not configured"))
+    return "Call booking isn't set up (the dial service isn't configured) — tell the developer."
+  if (r.includes("provider_rejected") || r.includes("failed to place call"))
+    return "The phone line rejected the call — check the number and retry."
+  return null
+}

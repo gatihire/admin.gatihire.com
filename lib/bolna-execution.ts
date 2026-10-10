@@ -453,6 +453,20 @@ export async function handleCompletedExecution(
     .update(patch)
     .eq("id", participantId)
 
+  // Close the loop in the thread: "Call Now" was tapped, the call happened, and
+  // here is what came of it — without this the chat ends on a booking that never
+  // resolves.
+  await appendWhatsappHistory(participantId, {
+    at: now,
+    kind: "call_completed",
+    direction: "internal",
+    text:
+      effectiveVerdict?.score != null
+        ? `Call completed — screening score ${Math.round(effectiveVerdict.score)}/100 is ready to review.`
+        : "Call completed — transcript and summary recorded.",
+    status: "completed",
+  })
+
   // If the candidate requested a callback, override the status to call_scheduled
   // and schedule the re-dial via QStash.
   if (effectiveVerdict?.callback_requested || effectiveVerdict?.callback_preference_text) {
@@ -993,6 +1007,27 @@ export async function handleFailedExecution(
     },
   })
 
+  // Explain the failure inside the thread itself, in plain language. Without
+  // this, a recruiter reads only the WhatsApp exchange and has to dig into
+  // provider metadata to learn the call never connected.
+  const unanswered = execution.status === "no-answer" || execution.status === "busy"
+  await appendWhatsappHistory(participant.id, {
+    at: now,
+    kind: unanswered ? "call_missed" : "call_failed",
+    direction: "internal",
+    text: isPartialCall
+      ? "Call got cut off mid-conversation — whatever was captured is flagged for human review."
+      : maxRetriesReached
+        ? "Couldn't reach the candidate after several attempts — the profile is marked unreachable."
+        : unanswered
+          ? "The candidate didn't pick up — we'll retry shortly."
+          : execution.status === "error" || execution.status === "failed"
+            ? "The call failed to connect — we'll try again later."
+            : `The call ended early (${execution.status}).`,
+    status: "failed",
+    error: execution.error_message || execution.status || undefined,
+  })
+
   // If max retries reached, don't send any more WhatsApp messages
   if (maxRetriesReached) {
     logger.info("Max call retries reached, marking as unreachable", {
@@ -1014,13 +1049,19 @@ export async function handleFailedExecution(
       companyName: job?.client_name || "",
     })
     if (nudge.success) {
-      // Append to WhatsApp history instead of overwriting
-      const history = participant.whatsapp_history || []
-      history.push({
-        messageId: nudge.messageId || null,
+      // Append to WhatsApp history instead of overwriting. This used to push
+      // onto `participant.whatsapp_history`, a copy taken before the attempt —
+      // which silently erased any thread entry recorded after that snapshot
+      // (e.g. the call-outcome note above).
+      await appendWhatsappHistory(participant.id, {
+        at: now,
+        kind: "outbound_template",
+        direction: "out",
         template: "missed_call_reschedule",
+        text: nudge.renderedBody || null,
         sentAt: now,
         status: "sent",
+        messageId: nudge.messageId || null,
       })
       await supabaseAdmin
         .from("phone_screening_participants")
@@ -1030,7 +1071,6 @@ export async function handleFailedExecution(
           whatsapp_sent_at: now,
           whatsapp_delivery_status: "sent",
           whatsapp_outbound_template: "missed_call_reschedule",
-          whatsapp_history: history,
           updated_at: now,
         })
         .eq("id", participant.id)

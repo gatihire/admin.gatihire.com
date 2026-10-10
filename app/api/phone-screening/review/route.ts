@@ -3,6 +3,7 @@ import { supabaseAdmin } from "@/lib/supabase"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { sendSessionMessage } from "@/lib/info-collector-v2/sender"
 import { recordOutboundText } from "@/lib/whatsapp-thread"
+import { appendWhatsappHistory } from "@/lib/whatsapp-history"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { logCandidateActivity } from "@/lib/activity-logger"
 import { logger } from "@/lib/logger"
@@ -294,6 +295,15 @@ export async function POST(request: NextRequest) {
               messageId: offerSent.messageId ?? null,
             })
           }
+
+          // Show the approval inside the thread so the handoff is legible in
+          // the chat itself: approved → picker sent → candidate picks a time.
+          await appendWhatsappHistory(participantId, {
+            at: now,
+            kind: "hr_approval",
+            direction: "internal",
+            text: `Approved by ${reviewerLabel} — call time options sent; waiting on their pick.`,
+          })
 
           await logCandidateActivity({
             jobId: participant.job_id || "",
