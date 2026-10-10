@@ -4,7 +4,6 @@ import { useEffect, useCallback, useState } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import {
   AlertTriangle,
-  Bell,
   CheckCircle2,
   Clock,
   DollarSign,
@@ -168,7 +167,6 @@ export function PrescreenReviewModal({
   useEffect(() => {
     setShowThread(false)
   }, [candidate?.participantId])
-  const [nudging, setNudging] = useState(false)
   // The parent's copy of the thread is a snapshot taken when the queue was built,
   // so it does not contain anything sent from inside this modal. The thread is
   // re-read from the participant row on open and after each send, which is what
@@ -221,10 +219,10 @@ export function PrescreenReviewModal({
       if (failed?.error) throw new Error(failed.error)
 
       toast({
-        title: d === "approved" ? "Approved for call" : d === "rejected" ? "Candidate passed" : "Question sent",
+        title: d === "approved" ? "Approved — call times sent" : d === "rejected" ? "Candidate passed" : "Question sent",
         description:
           d === "approved"
-            ? "Screening call booked. The candidate gets a confirmation."
+            ? "The candidate can now pick a slot. The call only happens after they do."
             : d === "rejected"
               ? "Candidate notified. Your reason is on the record."
               : "Waiting for their reply — no call booked yet",
@@ -240,101 +238,7 @@ export function PrescreenReviewModal({
     }
   }
 
-  /**
-   * Send the call nudge without deciding anything.
-   *
-   * The three review actions are all terminal or semi-terminal — approving books a
-   * call, passing ends it, and asking a question commits to waiting on a reply. A
-   * recruiter who wants to simply prompt someone again had no way to do it from
-   * here, so the only option was to close the modal and go hunting. This is
-   * deliberately non-committal: it prompts, it does not approve, and the row stays
-   * in the review queue.
-   */
-  const sendCallNudge = async () => {
-    if (nudging) return
-    setNudging(true)
-    try {
-      const res = await fetch(
-        `/api/phone-screening/participants/${candidate.participantId}/send-call-nudge`,
-        { method: "POST" }
-      )
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(data?.error || `Could not send (HTTP ${res.status})`)
-
-      toast({
-        title: "Nudge sent",
-        description: `We reminded ${candidate.name} to respond. No decision was recorded.`,
-      })
-      onReviewed()
-    } catch (err: any) {
-      toast({ title: "Could not send the nudge", description: err.message, variant: "destructive" })
-    } finally {
-      setNudging(false)
-    }
-  }
-
-  /**
-   * Send the slot picker without deciding anything.
-   *
-   * Approval sends the same picker, so this exists for the case where the
-   * recruiter has already approved and the message failed, or where interest was
-   * flagged and they would rather offer slots than go through the confirm step.
-   */
-  const offerScheduleSlot = async () => {
-    if (nudging) return
-    setNudging(true)
-    try {
-      const res = await fetch(
-        `/api/phone-screening/participants/${candidate.participantId}/offer-schedule`,
-        { method: "POST" }
-      )
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(data?.error || `Could not send (HTTP ${res.status})`)
-
-      toast({
-        title: "Call times sent",
-        description: `${candidate.name} can pick a slot. No call happens until they do.`,
-      })
-      onReviewed()
-    } catch (err: any) {
-      toast({ title: "Could not send the call times", description: err.message, variant: "destructive" })
-    } finally {
-      setNudging(false)
-    }
-  }
-
   const aiSaysReject = candidate.aiSuggestsRejection === true
-
-  // One message button, never a row of them.
-  //
-  // The footer used to sit "Open WhatsApp chat" and "Send call nudge" side by
-  // side: same size, same outline weight, different colours, different jobs —
-  // and neither said what it was for. Reading the thread is not a message the
-  // candidate receives, so it belongs with the header controls; what is left is
-  // the single thing a recruiter might legitimately want to send next.
-  //
-  // Which one depends on where the candidate actually is:
-  //   no picker outstanding -> offer times
-  //   picker outstanding    -> remind them to book
-  //   call booked           -> nothing, there is nothing left to ask
-  const callBooked =
-    ["call_scheduled", "calling", "call_in_progress", "awaiting_call"].includes(
-      candidate.participantStatus || ""
-    ) || !!candidate.scheduledCallAt
-
-  const messageAction = callBooked
-    ? null
-    : candidate.awaitingScheduleDecision
-      ? {
-          label: "Remind them to book a call",
-          description: "Sends one message asking them to pick a time.",
-          run: sendCallNudge,
-        }
-      : {
-          label: "Send call times",
-          description: "Asks the candidate when they would like the screening call.",
-          run: offerScheduleSlot,
-        }
 
   // Clarification state. `clarificationAnsweredAt` is set by the inbound webhook
   // when the candidate actually replies, so "waiting" and "replied" are
@@ -558,26 +462,11 @@ export function PrescreenReviewModal({
             <div className="sticky bottom-0 border-t border-gray-100 bg-white px-6 py-4 space-y-3">
               {!decision ? (
                 <>
-                  {/* The single message action. Chat is up in the header; the
-                      decisions are below. There is no third thing to choose
-                      from, because there was never more than one message worth
-                      sending at this point. */}
-                  {messageAction && (
-                    <Button
-                      onClick={() => void messageAction.run()}
-                      disabled={nudging}
-                      variant="outline"
-                      className="w-full h-11 border-amber-200 text-amber-700 hover:bg-amber-50"
-                    >
-                      {nudging ? (
-                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                      ) : (
-                        <Bell className="h-4 w-4 mr-2" />
-                      )}
-                      {messageAction.label}
-                    </Button>
-                  )}
-
+                  {/* One action, not two. Approval already sends the candidate
+                      the call-time picker, so a separate "Send call times"
+                      button next to it did the same thing twice and left HR
+                      guessing which one was real. The decisions are the only
+                      thing to choose from here. */}
                   <div className="flex items-center gap-3">
                     <Button
                       onClick={() => setDecision("approved")}
@@ -585,7 +474,7 @@ export function PrescreenReviewModal({
                       className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white h-11"
                     >
                       <CheckCircle2 className="h-4 w-4 mr-2" />
-                      Approve for call
+                      Approve &amp; send call times
                     </Button>
                     <Button
                       onClick={() => setDecision("clarify")}
