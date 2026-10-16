@@ -963,6 +963,15 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
             mustHaveSkills: Array.isArray(job.skills_must_have) ? job.skills_must_have.join(", ") : job.skills_must_have || "",
             experienceRange: `${job.experience_min_years ?? 0}-${job.experience_max_years ?? "any"}`,
             location: jobLocation(job),
+            // HR chose "Call Now": that is the eligibility gate's first door, and
+            // it has to be written down. Without it, the missed-call nudge we send
+            // after this call offers [Call Now] buttons that the gate then refuses
+            // ("pre-screen has not cleared this candidate") — the candidate taps a
+            // button we invited them to tap and the webhook errors out.
+            approvalGranted: true,
+            approvalSource: "recruiter_call_now",
+            approvedBy: createdBy,
+            approvedAt: new Date().toISOString(),
           },
           updated_at: new Date().toISOString(),
         })
@@ -988,6 +997,13 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
             mustHaveSkills: Array.isArray(job.skills_must_have) ? job.skills_must_have.join(", ") : job.skills_must_have || "",
             experienceRange: `${job.experience_min_years ?? 0}-${job.experience_max_years ?? "any"}`,
             location: jobLocation(job),
+            // Same door as the success branch: the provider failing does not
+            // retract HR's decision to screen this candidate, and a later
+            // reschedule tap must not be refused for lack of that evidence.
+            approvalGranted: true,
+            approvalSource: "recruiter_call_now",
+            approvedBy: createdBy,
+            approvedAt: new Date().toISOString(),
           },
           updated_at: new Date().toISOString(),
         })

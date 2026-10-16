@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
-import { placeCallImmediately, MAX_TOTAL_CALL_ATTEMPTS } from "@/lib/scheduled-call"
+import { placeCallImmediately, MAX_TOTAL_CALL_ATTEMPTS, markRecruiterApproval } from "@/lib/scheduled-call"
 import { supabaseAdmin } from "@/lib/supabase"
 import { logger } from "@/lib/logger"
 
@@ -56,6 +56,16 @@ export async function POST(request: NextRequest) {
       .select("bolna_execution_id, bolna_status, call_attempts, last_attempt_at")
       .eq("id", participantId)
       .maybeSingle()
+
+    // Record the human decision where the eligibility gate can see it. An HR
+    // "Call Now" IS the gate's first door, and without this the missed-call nudge
+    // we send afterwards offers [Call Now] buttons the gate then refuses — the
+    // candidate taps a button we invited them to tap and nothing happens.
+    await markRecruiterApproval(
+      participantId,
+      "recruiter_call_now",
+      ctx.authUser?.email ?? ctx.authUser?.id ?? null
+    )
 
     return NextResponse.json({
       success: true,

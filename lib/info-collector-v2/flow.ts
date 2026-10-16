@@ -542,8 +542,24 @@ if (nextStep === null) {
   }
 }
 
-async function markScheduledAndFire(participantId: string, scheduledAt: Date): Promise<{ success: boolean; error?: string }> {
+async function markScheduledAndFire(
+  participantId: string,
+  scheduledAt: Date
+): Promise<{ success: boolean; error?: string; blocked?: boolean }> {
   const scheduledAtISO = scheduledAt.toISOString();
+
+  // The gate can refuse this tap outright. Remember where the row was, because
+  // the write below books a slot BEFORE the gate answers — leaving that booking
+  // behind would show HR "Call booked" (later "Call missed — not placed") for a
+  // call that was never going to happen.
+  const { data: priorRow } = await supabaseAdmin
+    .from('phone_screening_participants')
+    .select('status, scheduled_call_at')
+    .eq('id', participantId)
+    .maybeSingle();
+  const priorStatus = (priorRow as any)?.status ?? null;
+  const priorScheduledAt = (priorRow as any)?.scheduled_call_at ?? null;
+
   const { error: updateError } = await supabaseAdmin
     .from('phone_screening_participants')
     .update({
@@ -573,6 +589,29 @@ async function markScheduledAndFire(participantId: string, scheduledAt: Date): P
     return { success: true };
   }
   
+  // The gate refused a deliberate decision? No — it refused a tap that we cannot
+  // honour. That is a policy answer, not a transient failure: retrying the same
+  // tap can never succeed, so returning a 5xx only made Meta redeliver the button
+  // and re-log the same refusal. Undo the provisional booking and report `blocked`
+  // so the caller can tell the candidate the truth instead of throwing.
+  if (placed.reason === 'eligibility_blocked') {
+    await supabaseAdmin
+      .from('phone_screening_participants')
+      .update({
+        status: priorStatus || 'info_requested',
+        scheduled_call_at: priorScheduledAt,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', participantId);
+    await appendWhatsappHistory(participantId, {
+      at: new Date().toISOString(),
+      kind: 'call_booking_failed',
+      scheduledFor: scheduledAtISO,
+      error: placed.error || 'Call could not be placed',
+    });
+    return { success: false, blocked: true, error: placed.error || 'Call could not be placed' };
+  }
+
   // scheduleOrPlaceCall reports scheduled:false when nothing is actually queued,
   // so we must not confirm a call that cannot happen.
   if (!placed.scheduled) {
@@ -598,6 +637,60 @@ async function markScheduledAndFire(participantId: string, scheduledAt: Date): P
 function assertScheduled(result: { success: boolean; error?: string }): void {
   if (!result.success) {
     throw new Error(result.error || 'Call could not be scheduled');
+  }
+}
+
+/**
+ * Book a slot from a tapped button, and never dead-end the candidate.
+ *
+ * Transient failures (QStash down, a booking write that did not land) still throw
+ * so the webhook answers 5xx and Meta redelivers the tap.
+ *
+ * A CLOSED GATE is different: it is a policy answer, and replaying the tap can
+ * only ever produce the same answer. Throwing there made Meta redeliver the button
+ * and logged the same refusal over and over, while the candidate — who tapped a
+ * [Call Now] button WE sent them — saw nothing at all. So the tap is acknowledged,
+ * it is surfaced to a human, and the candidate is told the truth.
+ */
+async function bookSlotOrExplain(opts: {
+  participantId: string
+  scheduledAt: Date
+  replyPhone?: string
+  candidateName?: string
+}): Promise<void> {
+  const result = await markScheduledAndFire(opts.participantId, opts.scheduledAt)
+  if (result.success) return
+
+  if (!result.blocked) {
+    assertScheduled(result)
+    return
+  }
+
+  logger.warn('Slot tap could not be honoured — eligibility gate is closed', {
+    participantId: opts.participantId,
+    reason: result.error,
+  })
+
+  // Put the refusal in front of a recruiter: the candidate was invited to tap
+  // this by a message we sent, so someone has to decide what actually happens.
+  await supabaseAdmin
+    .from('phone_screening_participants')
+    .update({ needs_manual_followup: true, updated_at: new Date().toISOString() })
+    .eq('id', opts.participantId)
+
+  const phone = opts.replyPhone
+  if (phone) {
+    const sent = await sendSessionMessage(
+      phone,
+      `Thanks${opts.candidateName ? ` ${opts.candidateName}` : ''} — we've got your request. ` +
+        `A recruiter will confirm your screening call time here shortly.`
+    )
+    if (!sent.success) {
+      logger.warn('Could not tell the candidate their slot needs confirmation', {
+        participantId: opts.participantId,
+        error: sent.error,
+      })
+    }
   }
 }
 
@@ -854,23 +947,48 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
       // the recruiter saw "read" and no call. Throwing lets the webhook return
       // 5xx so Meta redelivers and the booking is retried.
       case 'call_now':
-        await assertScheduled(await markScheduledAndFire(participant.id, new Date()));
+        await bookSlotOrExplain({
+          participantId: participant.id,
+          scheduledAt: new Date(),
+          replyPhone,
+          candidateName: participant.candidate_name,
+        });
         break;
-        
+
       case 'in_10_min':
-        await assertScheduled(await markScheduledAndFire(participant.id, new Date(Date.now() + 10 * 60 * 1000)));
+        await bookSlotOrExplain({
+          participantId: participant.id,
+          scheduledAt: new Date(Date.now() + 10 * 60 * 1000),
+          replyPhone,
+          candidateName: participant.candidate_name,
+        });
         break;
-        
+
       case 'in_20_min':
-        await assertScheduled(await markScheduledAndFire(participant.id, new Date(Date.now() + 20 * 60 * 1000)));
+        await bookSlotOrExplain({
+          participantId: participant.id,
+          scheduledAt: new Date(Date.now() + 20 * 60 * 1000),
+          replyPhone,
+          candidateName: participant.candidate_name,
+        });
         break;
-        
+
       case 'in_30_min':
-        await assertScheduled(await markScheduledAndFire(participant.id, new Date(Date.now() + 30 * 60 * 1000)));
+        await bookSlotOrExplain({
+          participantId: participant.id,
+          scheduledAt: new Date(Date.now() + 30 * 60 * 1000),
+          replyPhone,
+          candidateName: participant.candidate_name,
+        });
         break;
 
       case 'in_1_hour':
-        await assertScheduled(await markScheduledAndFire(participant.id, new Date(Date.now() + 60 * 60 * 1000)));
+        await bookSlotOrExplain({
+          participantId: participant.id,
+          scheduledAt: new Date(Date.now() + 60 * 60 * 1000),
+          replyPhone,
+          candidateName: participant.candidate_name,
+        });
         break;
         
       case 'today_evening': {
@@ -878,7 +996,12 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
         const evening = new Date(now);
         evening.setUTCHours(12, 30, 0, 0);
         if (evening <= now) evening.setDate(evening.getDate() + 1);
-        await assertScheduled(await markScheduledAndFire(participant.id, evening));
+        await bookSlotOrExplain({
+          participantId: participant.id,
+          scheduledAt: evening,
+          replyPhone,
+          candidateName: participant.candidate_name,
+        });
         break;
       }
         
@@ -886,7 +1009,12 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
         const tomorrow = new Date();
         tomorrow.setDate(tomorrow.getDate() + 1);
         tomorrow.setUTCHours(3, 30, 0, 0);
-        await assertScheduled(await markScheduledAndFire(participant.id, tomorrow));
+        await bookSlotOrExplain({
+          participantId: participant.id,
+          scheduledAt: tomorrow,
+          replyPhone,
+          candidateName: participant.candidate_name,
+        });
         break;
       }
         

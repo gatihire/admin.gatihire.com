@@ -566,18 +566,32 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
   const fetchParticipants = useCallback(async () => {
     try {
       const res = await fetch(`/api/phone-screening/participants?jobId=${jobId}`)
-      if (res.ok) {
-        const data = await res.json()
-        const map: Record<string, any> = {}
-        for (const p of Array.isArray(data) ? data : []) {
-          if (p?.candidate_id && !map[p.candidate_id]) {
-            map[p.candidate_id] = p
-          }
-        }
-        setParticipantsLocal(map)
+      if (!res.ok) {
+        // This used to be swallowed. The cost was visible in production: the
+        // endpoint 500'd on a bad column in its select, so the pipeline quietly
+        // kept stale data with no call status and "View Results" had no
+        // participant to open — and nothing anywhere said why.
+        const detail = await res.text().catch(() => "")
+        console.error("[fetchParticipants] participants API failed", res.status, detail)
+        toast({
+          title: "Screening data failed to load",
+          description: `The participants service returned ${res.status}. Call status and results may be stale.`,
+          variant: "destructive",
+        })
+        return
       }
-    } catch { /* noop */ }
-  }, [jobId])
+      const data = await res.json()
+      const map: Record<string, any> = {}
+      for (const p of Array.isArray(data) ? data : []) {
+        if (p?.candidate_id && !map[p.candidate_id]) {
+          map[p.candidate_id] = p
+        }
+      }
+      setParticipantsLocal(map)
+    } catch (err) {
+      console.error("[fetchParticipants] request failed", err)
+    }
+  }, [jobId, toast])
 
   // Manual refresh. The pipeline payload is served from a 30s session cache, so
   // a plain refetch would hand back the same rows the recruiter is looking at;
@@ -1380,7 +1394,18 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
                     }}
                     onViewResults={(candidateId) => {
                       const pid = participantIdByCandidate[candidateId]
-                      if (pid) setResultParticipantId(pid)
+                      if (pid) {
+                        setResultParticipantId(pid)
+                        return
+                      }
+                      // The button used to do nothing at all when the screening
+                      // row wasn't loaded, which reads as a broken page rather
+                      // than "there is nothing to show yet".
+                      toast({
+                        title: "No screening record for this candidate yet",
+                        description: "The call hasn't produced a result row. Refresh, or start a screening first.",
+                        variant: "destructive",
+                      })
                     }}
                     onReviewInfo={() => {
                       const participant = participantDataByCandidate[app.candidate_id]

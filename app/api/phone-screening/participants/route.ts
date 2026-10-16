@@ -21,8 +21,13 @@ export async function GET(request: NextRequest) {
     .select(`
       *,
       candidates: candidate_id (id, name, email, phone, current_role, current_company, total_experience, location, technical_skills),
-      jobs:job_id (id, title, client_name, city, location, salary_min, salary_max, salary_type, experience_min_years, experience_max_years, skills)
+      jobs:job_id (id, title, client_name, city, location, salary_min, salary_max, salary_type, experience_min_years, experience_max_years, skills_must_have)
     `)
+  // NOTE: `jobs` has no `skills` column (it has skills_must_have / skills_good_to_have).
+  // Naming a column that does not exist makes PostgREST reject the WHOLE request with
+  // a 400 ("column jobs_1.skills does not exist"), which this route surfaced as a 500 —
+  // so every participant list call failed, and the job page silently fell back to no
+  // screening data at all (no call status, and "View Results" had no participant to open).
 
   if (campaignId) {
     query = query.eq("campaign_id", campaignId)

@@ -192,6 +192,9 @@ export interface PlaceCallResult {
     | "no_phone"
     | "provider_rejected"
     | "no_longer_waiting"
+    /** The eligibility gate refused. Permanent for this tap: retrying the same
+     *  request can never succeed, so callers must not treat it as transient. */
+    | "eligibility_blocked"
 }
 
 interface ParticipantRow {
@@ -630,6 +633,62 @@ export async function prepareScheduleOffer(participantId: string): Promise<Sched
 }
 
 /**
+ * Record that a human explicitly authorised dialling this candidate — the gate's
+ * first door.
+ *
+ * Every manual placement path (pipeline "Call Now", the retry action, an HR
+ * "call_now" screening run) dials the provider directly and used to leave no trace
+ * in `screening_context`. That trace is exactly what the gate reads. So when the
+ * call was missed and our own missed-call nudge offered [Call Now] buttons, the
+ * candidate tapped one and the gate refused it — "pre-screen has not cleared this
+ * candidate (decision: none)" — because the human decision that started the thread
+ * had never been recorded. The candidate was invited to do something the system
+ * then refused, and the webhook 5xx'd so Meta retried the tap repeatedly.
+ *
+ * Approval is authoritative (it overrides a hold status and the pre-screen), so it
+ * is written here in one place rather than re-implemented at each call site.
+ */
+export async function markRecruiterApproval(
+  participantId: string,
+  source: string,
+  approvedBy?: string | null
+): Promise<void> {
+  const { data } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .select("screening_context")
+    .eq("id", participantId)
+    .maybeSingle()
+
+  const ctx = ((data as any)?.screening_context || {}) as Record<string, any>
+  const now = new Date().toISOString()
+  const { error } = await supabaseAdmin
+    .from("phone_screening_participants")
+    // Merge, never replace: the context also carries the pre-screen result and
+    // the outstanding-offer marker, and overwriting it is the exact bug that made
+    // previously-cleared candidates untappable.
+    .update({
+      screening_context: {
+        ...ctx,
+        approvalGranted: true,
+        approvalSource: source,
+        approvedBy: approvedBy ?? null,
+        approvedAt: now,
+        interestNeedsApproval: false,
+      },
+      updated_at: now,
+    })
+    .eq("id", participantId)
+
+  if (error) {
+    logger.warn("Could not record recruiter call approval", {
+      participantId,
+      source,
+      error: error.message,
+    })
+  }
+}
+
+/**
  * Record that a slot picker went out. The gate's second door reads this, so a
  * picker sent without it is a promise the gate will not honour.
  */
@@ -692,7 +751,7 @@ export async function scheduleOrPlaceCall(
       reason: gate.reason,
       status: gate.status,
     })
-    return { success: false, skipped: false, scheduled: false, error: gate.reason }
+    return { success: false, skipped: false, scheduled: false, reason: "eligibility_blocked", error: gate.reason }
   }
 
   if (delay <= DIRECT_PLACE_WINDOW_SECONDS) {
