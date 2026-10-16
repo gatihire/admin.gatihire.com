@@ -13,6 +13,7 @@ import { ArrowLeft, ExternalLink, Link2, MapPin, Building2, Clock, Send, Share2,
 import { formatDistanceToNow } from "date-fns"
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet"
 import { cachedFetchJson, getBoardJobApplyUrl, invalidateSessionCache, normalizeExternalUrl } from "@/lib/utils"
+import { JobAssignmentCard } from "@/components/job-assignment-card"
 
 const CandidateProfileSidebarDynamic = dynamic(() => import("./candidate-profile-sidebar").then(m => m.CandidateProfileSidebar), { ssr: false })
 const CandidatesTab = dynamic(() => import("./job-candidates-tab").then(m => m.CandidatesTab), { ssr: false })
@@ -34,6 +35,12 @@ interface Job {
   employment_type?: string | null
   is_external_link?: boolean | null
   source?: string | null
+  // Assignment (added by /api/jobs/[id])
+  owner?: { auth_user_id: string; name: string | null; email: string | null } | null
+  owner_name?: string | null
+  assignees?: Array<{ auth_user_id: string; name: string | null; email: string | null; role: string }>
+  viewer?: { auth_user_id: string; email: string | null } | null
+  permissions?: { can_assign?: boolean; can_claim?: boolean }
 }
 
 type Client = {
@@ -120,6 +127,29 @@ export function JobDetails({ job, onBack, initialTab, initialStage, initialCallS
   const [client, setClient] = useState<Client | null>(null)
   const [clientOpen, setClientOpen] = useState(false)
   const [shareOpen, setShareOpen] = useState(false)
+
+  // Assignment is refreshed independently of the `job` prop so "Reassign"/"Claim"
+  // reflect the new owner immediately without a full reload.
+  const [assignment, setAssignment] = useState<{ owner: any; assignees: any[] }>(() => ({
+    owner: job.owner ?? null,
+    assignees: job.assignees ?? [],
+  }))
+  useEffect(() => {
+    setAssignment({ owner: job.owner ?? null, assignees: job.assignees ?? [] })
+  }, [job])
+  const refreshAssignment = useCallback(async () => {
+    try {
+      const fresh = await cachedFetchJson<any>(
+        `internal:job:${job.id}`,
+        `/api/jobs/${job.id}`,
+        undefined,
+        { ttlMs: 10 * 60_000, force: true },
+      )
+      setAssignment({ owner: fresh?.owner ?? null, assignees: fresh?.assignees ?? [] })
+    } catch {
+      // Non-fatal: the next mount will pick up the new assignment.
+    }
+  }, [job.id])
   const [uploadOpen, setUploadOpen] = useState(false)
   const [clientDecisions, setClientDecisions] = useState<Record<string, string | null>>({})
   const [sourcingView, setSourcingView] = useState<"db_matches" | "juicebox">("db_matches")
@@ -357,6 +387,18 @@ export function JobDetails({ job, onBack, initialTab, initialStage, initialCallS
           </div>
         </div>
       </div>
+
+      {/* Assignment */}
+      <JobAssignmentCard
+        jobId={job.id}
+        jobTitle={job.title}
+        owner={assignment.owner}
+        assignees={assignment.assignees}
+        canAssign={!!job.permissions?.can_assign}
+        canClaim={!!job.permissions?.can_claim}
+        viewerId={job.viewer?.auth_user_id ?? null}
+        onChanged={refreshAssignment}
+      />
 
       {/* Tab bar */}
       <div className="flex flex-wrap items-center gap-1 p-1 bg-white rounded-2xl border border-zinc-200 shadow-sm overflow-x-auto no-scrollbar">

@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Input } from "@/components/ui/input"
@@ -98,6 +98,18 @@ type TeamResponse = {
   }>
 }
 
+type ActionsResponse = {
+  range: { from: string; to: string }
+  metrics: Array<{ key: string; label: string; hint?: string }>
+  rows: Array<{
+    user: { id: string; email: string | null; name: string | null; last_active_at: string | null }
+    counts: Record<string, number>
+    total: number
+  }>
+  totals: { counts: Record<string, number>; total: number; users: number }
+  scanned: number
+}
+
 type EventsResponse = {
   events: Array<{
     id: string
@@ -151,6 +163,17 @@ function isoDateOnly(d: Date) {
 function fmt(n: number) {
   return new Intl.NumberFormat().format(n)
 }
+
+// Columns shown inline on the Actions-taken leaderboard; the full set is shown
+// when a row is expanded.
+const PRIMARY_ACTION_KEYS = [
+  "screenings_reviewed",
+  "shortlisted",
+  "shortlists_shared",
+  "interviews_scheduled",
+  "calls_logged",
+  "hired",
+]
 
 function fmtPct(v: number) {
   return `${(v * 100).toFixed(1)}%`
@@ -245,9 +268,13 @@ export function SuperAdminAnalytics() {
   const [error, setError] = useState("")
 
   const qs = useMemo(() => {
+    // The API filters with `created_at < to`, and a date-only "To" parses to
+    // midnight — so without this the selected end day is silently dropped (a
+    // "Today" range would be empty). Push `to` to the start of the next day.
+    const toInclusive = new Date(new Date(toDate).getTime() + 24 * 60 * 60 * 1000)
     return new URLSearchParams({
       from: new Date(fromDate).toISOString(),
-      to: new Date(toDate).toISOString(),
+      to: toInclusive.toISOString(),
     }).toString()
   }, [fromDate, toDate])
 
@@ -280,6 +307,8 @@ export function SuperAdminAnalytics() {
   const [candidates, setCandidates] = useState<CandidatesResponse | null>(null)
   const [outreach, setOutreach] = useState<OutreachResponse | null>(null)
   const [team, setTeam] = useState<TeamResponse | null>(null)
+  const [actions, setActions] = useState<ActionsResponse | null>(null)
+  const [expandedActionUser, setExpandedActionUser] = useState<string | null>(null)
   const [events, setEvents] = useState<EventsResponse | null>(null)
   const [eventsExplorer, setEventsExplorer] = useState<EventsResponse | null>(null)
   const [eventNameFilter, setEventNameFilter] = useState("")
@@ -353,13 +382,22 @@ export function SuperAdminAnalytics() {
         return
       }
       if (tab === "team") {
-        const json = await cachedFetchJson<TeamResponse>(
-          `internal:super-admin:analytics:team:${qs}`,
-          `/api/super-admin/analytics/team?${qs}`,
-          undefined,
-          { ttlMs: 60_000, force: Boolean(opts?.force) },
-        )
-        setTeam(json)
+        const [teamJson, actionsJson] = await Promise.all([
+          cachedFetchJson<TeamResponse>(
+            `internal:super-admin:analytics:team:${qs}`,
+            `/api/super-admin/analytics/team?${qs}`,
+            undefined,
+            { ttlMs: 60_000, force: Boolean(opts?.force) },
+          ),
+          cachedFetchJson<ActionsResponse>(
+            `internal:super-admin:analytics:actions:${qs}`,
+            `/api/super-admin/analytics/actions?${qs}`,
+            undefined,
+            { ttlMs: 60_000, force: Boolean(opts?.force) },
+          ),
+        ])
+        setTeam(teamJson)
+        setActions(actionsJson)
         return
       }
       if (tab === "events") {
@@ -515,6 +553,34 @@ export function SuperAdminAnalytics() {
             Refresh
           </Button>
         </div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-zinc-500">Quick range:</span>
+        {[
+          { label: "Today", days: 0 },
+          { label: "7 days", days: 6 },
+          { label: "30 days", days: 29 },
+        ].map((p) => {
+          const from = isoDateOnly(new Date(Date.now() - p.days * 24 * 60 * 60 * 1000))
+          const active = fromDate === from && toDate === isoDateOnly(new Date())
+          return (
+            <Button
+              key={p.label}
+              variant={active ? "default" : "outline"}
+              size="sm"
+              className="h-7 px-3 text-xs"
+              onClick={() => {
+                setFromDate(from)
+                setToDate(isoDateOnly(new Date()))
+                setMonthValue("")
+                setFyValue("")
+              }}
+            >
+              {p.label}
+            </Button>
+          )
+        })}
       </div>
 
       {error ? <div className="text-sm text-red-600">{error}</div> : null}
@@ -961,6 +1027,78 @@ export function SuperAdminAnalytics() {
                     ))}
                   </TableBody>
                 </Table>
+              </ChartCard>
+
+              <ChartCard
+                title="Actions taken"
+                right={
+                  actions ? (
+                    <span className="text-xs text-zinc-500">
+                      {fmt(actions.totals.total)} actions · {fmt(actions.totals.users)} people
+                    </span>
+                  ) : null
+                }
+              >
+                {!actions ? (
+                  <div className="text-sm text-zinc-600">No action data.</div>
+                ) : actions.rows.length === 0 ? (
+                  <div className="text-sm text-zinc-600">
+                    No attributed actions in this window. Only actions taken through the app (stage changes, screening
+                    reviews, shortlist shares, interviews, queue actions) are counted — automated screening does not
+                    count as a person.
+                  </div>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>User</TableHead>
+                        {PRIMARY_ACTION_KEYS.map((k) => (
+                          <TableHead key={k} className="text-right">
+                            {actions.metrics.find((m) => m.key === k)?.label || k}
+                          </TableHead>
+                        ))}
+                        <TableHead className="text-right">Total</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {actions.rows.map((r) => (
+                        <Fragment key={r.user.id}>
+                          <TableRow
+                            className="cursor-pointer"
+                            onClick={() => setExpandedActionUser((x) => (x === r.user.id ? null : r.user.id))}
+                          >
+                            <TableCell className="font-medium">
+                              {r.user.name ? `${r.user.name} (${r.user.email})` : r.user.email || r.user.id}
+                            </TableCell>
+                            {PRIMARY_ACTION_KEYS.map((k) => (
+                              <TableCell key={k} className="text-right">
+                                {fmt(r.counts[k] || 0)}
+                              </TableCell>
+                            ))}
+                            <TableCell className="text-right font-semibold">{fmt(r.total)}</TableCell>
+                          </TableRow>
+                          {expandedActionUser === r.user.id && (
+                            <TableRow>
+                              <TableCell
+                                colSpan={PRIMARY_ACTION_KEYS.length + 2}
+                                className="bg-zinc-50 dark:bg-zinc-900/40"
+                              >
+                                <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-2 py-1">
+                                  {actions.metrics.map((m) => (
+                                    <div key={m.key} className="text-xs">
+                                      <span className="text-zinc-500">{m.label}:</span>{" "}
+                                      <span className="font-semibold">{fmt(r.counts[m.key] || 0)}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          )}
+                        </Fragment>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
               </ChartCard>
             </>
           )}

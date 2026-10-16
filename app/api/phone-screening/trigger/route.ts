@@ -564,7 +564,8 @@ export async function POST(request: NextRequest) {
         applicationId: appByCandidate.get(c.id)?.id || null,
         eventType: "ai_screen_started" as const,
         eventData: { call_mode: callMode || "call_now" },
-        actor: ctx.authUser.id,
+        actor: ctx.authUser.email || ctx.authUser.id,
+        actorAuthUserId: ctx.authUser.id,
       }))
     )
 

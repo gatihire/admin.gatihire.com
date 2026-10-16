@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { sendRejectionEmail } from "@/lib/mailer"
 import { logCandidateActivity } from "@/lib/activity-logger"
+import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 
 export async function PUT(request: NextRequest, props: { params: Promise<{ id: string }> }) {
   try {
@@ -9,6 +10,15 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
     const { id } = params
     const body = await request.json()
     const { status, notes, origin } = body
+
+    // Stage changes are an internal recruiting action. This endpoint used to run
+    // unauthenticated, which let anyone rewrite an application and fire a
+    // rejection email — lock it to signed-in staff with the manage permission.
+    const ctx = await getInternalAuthContext(request)
+    if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    if (!hasPermission(ctx, "applications.manage")) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+    }
 
     // Fetch current application to check if status is changing to rejected
     const { data: currentApp, error: fetchError } = await supabaseAdmin
@@ -62,6 +72,7 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
         eventType: "stage_changed",
         eventData: { from: currentApp.status, to: status },
         actor: "hr",
+        actorAuthUserId: ctx.authUser.id,
       })
     }
 

@@ -192,6 +192,7 @@ export async function POST(request: NextRequest) {
             eventType: "screening_reviewed",
             eventData: { decision: "clarify", question: trimmedNote, reviewer: reviewerLabel },
             actor: reviewerLabel,
+            actorAuthUserId: reviewerId,
           })
 
           logger.info("HR asked candidate for clarification", {
@@ -322,6 +323,7 @@ export async function POST(request: NextRequest) {
               slotPickerSent: !!offerSent?.success,
             },
             actor: reviewerLabel,
+            actorAuthUserId: reviewerId,
           })
 
           logger.info("HR approved candidate and offered a call slot", {
@@ -383,6 +385,7 @@ export async function POST(request: NextRequest) {
             overrodeAiSuggestion: participant.screening_context?.aiSuggestsRejection === true,
           },
           actor: reviewerLabel,
+          actorAuthUserId: reviewerId,
         })
 
         logger.info("HR rejected candidate after prescreen review", {

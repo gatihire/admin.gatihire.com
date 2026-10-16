@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
+import { attachAssignments } from "@/lib/jobs/assignments"
 import { bumpJobsSearchRevision } from "@/lib/jobsCacheRevision"
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -18,7 +19,16 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       return NextResponse.json({ error: "Job not found" }, { status: 404 })
     }
 
-    return NextResponse.json(data)
+    const [enriched] = await attachAssignments([data as any])
+
+    return NextResponse.json({
+      ...enriched,
+      viewer: { auth_user_id: ctx.authUser.id, email: ctx.authUser.email },
+      permissions: {
+        can_assign: hasPermission(ctx, "jobs.assign"),
+        can_claim: hasPermission(ctx, "jobs.claim"),
+      },
+    })
   } catch (error) {
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 })
   }

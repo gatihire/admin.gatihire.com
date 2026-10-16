@@ -123,6 +123,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         previousStatus: participant.status,
       },
       actor: ctx.authUser.id,
+      actorAuthUserId: ctx.authUser.id,
     })
 
     return NextResponse.json({ success: true, messageId: sent.messageId ?? null })

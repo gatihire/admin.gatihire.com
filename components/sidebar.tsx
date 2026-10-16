@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { Users, Search, FileText, Settings, ChevronLeft, ChevronRight, Moon, Sun, BarChart, Briefcase, Building2, Shield, CreditCard } from "lucide-react";
+import { Users, Search, FileText, Settings, ChevronLeft, ChevronRight, Moon, Sun, BarChart, Briefcase, Building2, Shield, CreditCard, Inbox } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 
@@ -14,6 +14,7 @@ interface SidebarProps {
 }
 
 const navItems = [
+  { href: "/today", name: "Today", icon: Inbox, anyOf: ["dispatch.view", "applications.view"] },
   { href: "/upload", name: "Upload", icon: FileText, anyOf: ["candidates.edit"] },
   { href: "/jobs", name: "Jobs", icon: Briefcase, anyOf: ["jobs.view", "jobs.post", "jobs.edit"] },
   { href: "/candidates", name: "Candidates", icon: Users, anyOf: ["candidates.view", "candidates.edit"] },

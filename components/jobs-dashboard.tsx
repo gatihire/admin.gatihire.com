@@ -4,8 +4,10 @@ import { useMemo, useState, useEffect, useCallback } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
-import { Plus, Clock, MoreHorizontal, ChevronRight, CheckCircle2, XCircle, AlertTriangle, PhoneCall, MessageCircle, Send, Eye, ExternalLink, Copy } from "lucide-react"
+import { Plus, Clock, MoreHorizontal, ChevronRight, CheckCircle2, XCircle, AlertTriangle, PhoneCall, MessageCircle, Send, Eye, ExternalLink, Copy, UserCircle2 } from "lucide-react"
 import { CreateJobDialog } from "./create-job-dialog"
+import { AssignOwnerDialog } from "./job-assignment-card"
+import { useInternalPermissions } from "@/hooks/use-internal-permissions"
 import { formatDistanceToNow, differenceInDays } from "date-fns"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -53,6 +55,10 @@ interface Job {
   auto_matchmaking_enabled?: boolean | null
   messaging_preferences?: string | null
   urgency_tag?: string | null
+  // Assignment (added by /api/jobs)
+  owner?: { auth_user_id: string; name: string | null; email: string | null } | null
+  owner_name?: string | null
+  assignees?: Array<{ auth_user_id: string; name: string | null; email: string | null; role: string }>
 }
 
 type ScreeningCounts = {
@@ -98,6 +104,11 @@ export function JobsDashboard() {
   const [clientDecisions, setClientDecisions] = useState<Record<string, { approved: number; rejected: number; pending: number }>>({})
   const [screeningStats, setScreeningStats] = useState<Record<string, ScreeningCounts>>({})
   const [interviewStats, setInterviewStats] = useState<Record<string, InterviewCounts>>({})
+  const [ownerFilter, setOwnerFilter] = useState<string>(() => searchParams.get("owner") || "all")
+  const [assignJob, setAssignJob] = useState<Job | null>(null)
+
+  const { can } = useInternalPermissions()
+  const canAssign = can("jobs.assign")
 
   const jobsCacheKey = "internal:jobs:/api/jobs"
   const jobCountsCacheKey = "internal:jobs:counts"
@@ -123,10 +134,11 @@ export function JobsDashboard() {
     if (clientFilter !== "all") params.set("clientId", clientFilter)
     if (sourceFilter !== "all") params.set("source", sourceFilter)
     if (sortFilter !== "attention") params.set("sort", sortFilter)
+    if (ownerFilter !== "all") params.set("owner", ownerFilter)
     if (page > 1) params.set("page", String(page))
     const qs = params.toString()
     router.replace(`/jobs${qs ? `?${qs}` : ""}`, { scroll: false })
-  }, [router, searchQuery, statusFilter, clientFilter, sourceFilter, sortFilter, page])
+  }, [router, searchQuery, statusFilter, clientFilter, sourceFilter, sortFilter, ownerFilter, page])
 
   useEffect(() => { updateUrl() }, [updateUrl])
   useEffect(() => { fetchClients() }, [])
@@ -166,7 +178,7 @@ export function JobsDashboard() {
   const fetchJobs = async (opts?: { force?: boolean; page?: number }) => {
     const force = Boolean(opts?.force)
     const targetPage = Math.max(1, Number(opts?.page ?? page) || 1)
-    const url = `/api/jobs?paginate=true&page=${targetPage}&perPage=${perPage}&status=${encodeURIComponent(statusFilter)}&source=${encodeURIComponent(sourceFilter)}&clientId=${encodeURIComponent(clientFilter)}&search=${encodeURIComponent(searchQuery)}`
+    const url = `/api/jobs?paginate=true&page=${targetPage}&perPage=${perPage}&status=${encodeURIComponent(statusFilter)}&source=${encodeURIComponent(sourceFilter)}&clientId=${encodeURIComponent(clientFilter)}&owner=${encodeURIComponent(ownerFilter)}&search=${encodeURIComponent(searchQuery)}`
     const cacheKey = `${jobsCacheKey}:${url}`
     const cachedPage = !force ? peekSessionCache<{ items: Job[]; total: number }>(cacheKey) : null
     const cachedCounts = !force ? peekSessionCache<JobStatsPayload>(jobCountsCacheKey) : null
@@ -247,7 +259,7 @@ export function JobsDashboard() {
   useEffect(() => {
     const t = setTimeout(() => { fetchJobs({ force: false }) }, 250)
     return () => clearTimeout(t)
-  }, [page, statusFilter, clientFilter, sourceFilter, searchQuery])
+  }, [page, statusFilter, clientFilter, sourceFilter, searchQuery, ownerFilter])
 
   return (
     <div className="space-y-6">
@@ -359,6 +371,30 @@ export function JobsDashboard() {
             </div>
           </div>
 
+          {canAssign && (
+            <div className="flex flex-wrap items-center gap-2 border-t border-zinc-100 pt-3 dark:border-zinc-800">
+              <span className="text-xs font-medium text-zinc-500">Owner</span>
+              {[
+                { value: "all", label: "All jobs" },
+                { value: "unassigned", label: "Unassigned" },
+                { value: "me", label: "Mine" },
+              ].map((o) => (
+                <button
+                  key={o.value}
+                  type="button"
+                  onClick={() => { setOwnerFilter(o.value); setPage(1) }}
+                  className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                    ownerFilter === o.value
+                      ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-300"
+                      : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300"
+                  }`}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          )}
+
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
             <div className="text-sm text-gray-600">
               Page <span className="font-medium">{page}</span> of <span className="font-medium">{totalPages}</span> • Showing{" "}
@@ -416,6 +452,8 @@ export function JobsDashboard() {
                 onOpenStage={(stage, sub) => router.push(`/jobs/${job.id}?tab=pipeline&stage=${stage}${sub ? `&callsub=${sub}` : ""}`)}
                 onOpenPipeline={() => router.push(`/jobs/${job.id}?tab=pipeline`)}
                 onOpenSourcing={() => router.push(`/jobs/${job.id}?tab=sourcing`)}
+                onAssign={() => setAssignJob(job)}
+                canAssign={canAssign}
                 onEdit={() => { setEditingJob(job); setEditOpen(true) }}
                 onCopyLink={() => { navigator.clipboard.writeText(getBoardJobApplyUrl(job.id)) }}
                 onToggleStatus={async () => {
@@ -437,6 +475,21 @@ export function JobsDashboard() {
           })}
           {jobs.length === 0 && <div className="px-4 py-12 text-center text-muted-foreground rounded-2xl border border-zinc-200 bg-white">No jobs found.</div>}
         </div>
+      )}
+
+      {assignJob && (
+        <AssignOwnerDialog
+          jobId={assignJob.id}
+          jobTitle={assignJob.title}
+          open={!!assignJob}
+          onOpenChange={(open) => { if (!open) setAssignJob(null) }}
+          currentOwnerAuthUserId={assignJob.owner?.auth_user_id ?? null}
+          currentCollaboratorIds={(assignJob.assignees ?? []).map((a) => a.auth_user_id)}
+          onSaved={() => {
+            invalidateSessionCache("internal:jobs:", { prefix: true })
+            fetchJobs({ force: true })
+          }}
+        />
       )}
     </div>
   )
@@ -465,10 +518,12 @@ interface JobCardProps {
   onCopyLink: () => void
   onToggleStatus: () => void
   onDelete: () => void
+  onAssign?: () => void
+  canAssign?: boolean
 }
 
 function JobCard({
-  job, clientName, clientLogo, stats, onOpen, onOpenStage, onOpenPipeline, onOpenSourcing, onEdit, onCopyLink, onToggleStatus, onDelete,
+  job, clientName, clientLogo, stats, onOpen, onOpenStage, onOpenPipeline, onOpenSourcing, onEdit, onCopyLink, onToggleStatus, onDelete, onAssign, canAssign,
 }: JobCardProps) {
   const { screening, client } = stats
   const lastActivity = job.last_activity_at ? new Date(job.last_activity_at) : new Date(job.created_at)
@@ -535,6 +590,15 @@ function JobCard({
             {clientName && <span className="font-medium">{clientName}</span>}
             {(job.industry || job.department_category) && <span>· {job.industry || job.department_category}</span>}
             {job.location && <span>· {job.location}</span>}
+            {job.owner_name ? (
+              <span className="inline-flex items-center gap-1 font-medium text-zinc-600 dark:text-zinc-300">
+                <UserCircle2 className="h-3 w-3" />{job.owner_name}
+              </span>
+            ) : canAssign ? (
+              <span className="inline-flex items-center gap-1 font-medium text-amber-600">
+                <UserCircle2 className="h-3 w-3" />Unassigned
+              </span>
+            ) : null}
           </div>
           <div className="flex items-center gap-2 mt-1">
             <span className="inline-flex items-center gap-1 text-[10px] text-zinc-400 font-medium">
@@ -596,6 +660,9 @@ function JobCard({
               <DropdownMenuItem onClick={onOpenPipeline}>Pipeline</DropdownMenuItem>
               <DropdownMenuItem onClick={onOpenSourcing}>DB Matches</DropdownMenuItem>
               <DropdownMenuItem onClick={onEdit}>Edit Job</DropdownMenuItem>
+              {canAssign && onAssign && (
+                <DropdownMenuItem onClick={onAssign}>{job.owner_name ? "Reassign owner…" : "Assign owner…"}</DropdownMenuItem>
+              )}
               <DropdownMenuItem onClick={onCopyLink}>Copy apply link</DropdownMenuItem>
               <DropdownMenuItem onClick={onToggleStatus}>{job.status === "open" ? "Close job" : "Reopen job"}</DropdownMenuItem>
               <DropdownMenuItem className="text-red-600 focus:text-red-600" onClick={onDelete}>Delete</DropdownMenuItem>

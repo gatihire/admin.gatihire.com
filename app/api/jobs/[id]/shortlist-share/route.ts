@@ -4,6 +4,7 @@ import crypto from "crypto"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { sendClientShortlistEmail } from "@/lib/mailer"
 import { logger } from "@/lib/logger"
+import { logCandidateActivity } from "@/lib/activity-logger"
 
 export const runtime = "nodejs"
 
@@ -264,6 +265,20 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       await supabaseAdmin.from("shortlist_shares").delete().eq("id", share.id)
       logger.error("Failed to insert shortlist share candidates", rowsError)
       return NextResponse.json({ error: rowsError.message }, { status: 500 })
+    }
+
+    // Attribution: record that this user shared each candidate with the client,
+    // so "shortlists shared" is a per-user metric, not an anonymous event.
+    for (const row of rows) {
+      void logCandidateActivity({
+        jobId: id,
+        candidateId: row.candidate_id,
+        applicationId: row.application_id,
+        eventType: "shortlist_shared",
+        eventData: { share_id: share.id, token, candidate_count: rows.length },
+        actor: ctx.authUser.email || ctx.authUser.id,
+        actorAuthUserId: ctx.authUser.id,
+      })
     }
 
     const url = `${origin}/shortlist/${token}`

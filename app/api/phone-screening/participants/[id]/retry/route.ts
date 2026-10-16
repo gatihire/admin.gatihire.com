@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { logger } from "@/lib/logger"
-import { placeCallImmediately, MAX_TOTAL_CALL_ATTEMPTS } from "@/lib/scheduled-call"
+import { placeCallImmediately, MAX_TOTAL_CALL_ATTEMPTS, markRecruiterApproval } from "@/lib/scheduled-call"
 import { logCandidateActivity } from "@/lib/activity-logger"
 
 export const runtime = "nodejs"
@@ -157,6 +157,15 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
     const now = new Date().toISOString()
 
+    // A human pressed "Retry" and gave a reason: that is the eligibility gate's
+    // first door. Recording it keeps any later [Call Now] tap in this thread —
+    // including the ones in the missed-call nudge — honourable by the gate.
+    await markRecruiterApproval(
+      participant.id,
+      "recruiter_retry",
+      ctx.authUser?.email ?? ctx.authUser?.id ?? null
+    )
+
     // Read back the persisted placement rather than trusting a local value: the
     // execution id is the only verifiable reference for what was actually dialled.
     const { data: fresh } = await supabaseAdmin
@@ -202,6 +211,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         costCents: participant.call_cost_cents ?? null,
       },
       actor: ctx.authUser.id,
+      actorAuthUserId: ctx.authUser.id,
     })
 
     return NextResponse.json({

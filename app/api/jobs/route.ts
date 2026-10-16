@@ -3,6 +3,7 @@ import { supabaseAdmin } from "@/lib/supabase"
 import { parseSearchRequirement, intelligentCandidateSearch } from "@/lib/intelligent-search"
 import { SupabaseCandidateService } from "@/lib/supabase-candidates"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
+import { attachAssignments } from "@/lib/jobs/assignments"
 import { bumpJobsSearchRevision } from "@/lib/jobsCacheRevision"
 
 export async function GET(request: NextRequest) {
@@ -22,6 +23,7 @@ export async function GET(request: NextRequest) {
     const status = searchParams.get("status")
     const source = searchParams.get("source")
     const clientId = searchParams.get("clientId")
+    const owner = (searchParams.get("owner") || "").trim()
     const q = (searchParams.get("search") || "").trim()
 
     let query = supabaseAdmin.from("jobs").select("*", { count: paginate ? "exact" : undefined as any })
@@ -36,6 +38,13 @@ export async function GET(request: NextRequest) {
     }
     if (clientId && clientId !== "all") {
       query = query.eq("client_id", clientId)
+    }
+    // Ownership filter. `unassigned` powers the Unassigned pool; `me` narrows to
+    // the caller; anything else is treated as an auth user id.
+    if (owner === "unassigned") {
+      query = query.is("owner_auth_user_id", null)
+    } else if (owner && owner !== "all") {
+      query = query.eq("owner_auth_user_id", owner === "me" ? ctx.authUser.id : owner)
     }
     if (q) {
       const term = `%${q.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`
@@ -52,7 +61,7 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({ error: error.message }, { status: 500 })
       }
 
-      return NextResponse.json({ items: data || [], page, perPage, total: count ?? 0 })
+      return NextResponse.json({ items: await attachAssignments(data || []), page, perPage, total: count ?? 0 })
     }
 
     const { data, error } = await query
@@ -62,7 +71,7 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 })
     }
 
-    return NextResponse.json(data)
+    return NextResponse.json(await attachAssignments(data || []))
   } catch (error) {
     console.error("Internal error:", error)
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 })

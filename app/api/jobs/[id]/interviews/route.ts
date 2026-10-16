@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
+import { logCandidateActivity } from "@/lib/activity-logger"
 
 export const runtime = "nodejs"
 
@@ -121,7 +122,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
   const { data: app } = await supabaseAdmin
     .from("applications")
-    .select("id")
+    .select("id, candidate_id")
     .eq("id", applicationId)
     .eq("job_id", jobId)
     .maybeSingle()
@@ -167,6 +168,20 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
     if (error) return NextResponse.json({ error: error.message }, { status: 500 })
     saved = data
+  }
+
+  // Attribution for the super-admin "who did what" metrics: interviews were the
+  // one pipeline action with no activity trail at all.
+  if (saved && app?.candidate_id) {
+    logCandidateActivity({
+      jobId,
+      candidateId: String(app.candidate_id),
+      applicationId,
+      eventType: patch.scheduled_at !== undefined ? "interview_scheduled" : "interview_status_changed",
+      eventData: { status: saved.status, scheduled_at: saved.scheduled_at, round_id: roundId },
+      actor: ctx.authUser.email || ctx.authUser.id,
+      actorAuthUserId: ctx.authUser.id,
+    })
   }
 
   if (saved?.status === "move_next") {

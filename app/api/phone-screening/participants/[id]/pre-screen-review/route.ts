@@ -171,6 +171,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         pre_screen_result: participant.screening_context?.preScreenResult,
       },
       actor: ctx.authUser.id,
+      actorAuthUserId: ctx.authUser.id,
     })
 
     invalidateSessionCache("internal:phone-screening:", { prefix: true })

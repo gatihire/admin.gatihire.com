@@ -7,6 +7,8 @@ export default async function DashboardPage() {
 
   const hasAny = (list: string[]) => list.some((k) => keys.has(k))
 
+  // Today is the new working home for anyone who runs a queue.
+  if (isSuperAdmin || hasAny(["dispatch.view"])) redirect("/today")
   if (hasAny(["candidates.edit"])) redirect("/upload")
   if (hasAny(["candidates.view", "candidates.edit"])) redirect("/candidates")
   if (isSuperAdmin || hasAny(["jobs.view", "jobs.edit", "jobs.post"])) redirect("/jobs")

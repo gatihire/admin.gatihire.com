@@ -127,8 +127,9 @@ async function reconcileSingle(params: {
     candidateId: result.participant.candidates?.id || "",
     participantId: result.participant.id,
     eventType: "screening_reviewed",
-    eventData: { status, executionId: result.execution.id, actor },
+    eventData: { status, executionId: result.execution.id },
     actor,
+    actorAuthUserId: actor,
   })
 
   return NextResponse.json({

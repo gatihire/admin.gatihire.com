@@ -23,6 +23,12 @@ export type EventType =
   | "interview_status_changed"
   | "shortlist_shared"
   | "client_decision"
+  // Today dispatch queue
+  | "queue_snoozed"
+  | "queue_unsnoozed"
+  | "manual_call_logged"
+  | "job_reassigned"
+  | "job_claimed"
 
 interface LogActivityInput {
   jobId: string
@@ -32,6 +38,12 @@ interface LogActivityInput {
   eventType: EventType
   eventData?: Record<string, unknown>
   actor?: string
+  /**
+   * The internal user who performed the action. This is the join key Super Admin
+   * metrics use to answer "who did what" — `actor` is a display string and is not
+   * reliable for attribution. Pass `ctx.authUser.id` from API routes.
+   */
+  actorAuthUserId?: string | null
 }
 
 /**
@@ -47,6 +59,7 @@ export async function logCandidateActivity(input: LogActivityInput): Promise<voi
       event_type: input.eventType,
       event_data: input.eventData || {},
       actor: input.actor || "system",
+      actor_auth_user_id: input.actorAuthUserId || null,
     })
     if (error) {
       logger.warn("Failed to log candidate activity", {
@@ -76,6 +89,7 @@ export async function logCandidateActivityBatch(
       event_type: input.eventType,
       event_data: input.eventData || {},
       actor: input.actor || "system",
+      actor_auth_user_id: input.actorAuthUserId || null,
     }))
     const { error } = await supabaseAdmin.from("candidate_activity").insert(rows)
     if (error) {

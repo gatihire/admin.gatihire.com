@@ -87,6 +87,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         eventType: "stage_changed",
         eventData: { from: participant.status, to: targetStatus },
         actor: ctx.authUser.id,
+        actorAuthUserId: ctx.authUser.id,
       })
     }
 
@@ -104,6 +105,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         recommendation: participant.ai_recommendation,
       },
       actor: ctx.authUser.id,
+      actorAuthUserId: ctx.authUser.id,
     })
 
     invalidateSessionCache("internal:applications:", { prefix: true })
