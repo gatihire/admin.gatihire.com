@@ -23,7 +23,8 @@ export const HOUR_MS = 60 * 60 * 1000
 export type WorkItemKind =
   | "human" // AI needs a person to take over (manual follow-up / dead end)
   | "ghosted" // we messaged/called and got no reply — the candidate has gone quiet
-  | "reply" // candidate replied, nobody has answered
+  | "reply" // candidate replied, nobody has answered yet
+  | "declined" // candidate told us they are not interested — a human should see it
   | "hold" // AI flagged a likely rejection — a human must decide, not the AI
   | "call" // screening finished, a human must review the call
   | "resched" // an interview time no longer works
@@ -275,6 +276,19 @@ const KIND_CONFIG: Record<WorkItemKind, KindConfig> = {
       { id: "snooze", label: "Snooze", variant: "default" },
     ],
   },
+  declined: {
+    label: "Declined",
+    slaHours: 8,
+    basePriority: 80,
+    cta: "Open conversation",
+    selectable: true,
+    actions: [
+      { id: "reply", label: "Open conversation", variant: "primary" },
+      { id: "call", label: "Call manually", variant: "default" },
+      { id: "log_call", label: "Log a call", variant: "default" },
+      { id: "snooze", label: "Snooze", variant: "default" },
+    ],
+  },
   overdue: {
     label: "Client overdue",
     slaHours: 24,
@@ -356,9 +370,9 @@ const OFFER_CONFIRM_AFTER_HOURS = 48
  * is the details ask that never came back. A candidate who has ghosted us sits
  * in one of these with no `whatsapp_reply_text`.
  */
-const GHOSTED_STATUSES = ["whatsapp_sent", "whatsapp_delivered", "whatsapp_read", "info_requested"]
+export const GHOSTED_STATUSES = ["whatsapp_sent", "whatsapp_delivered", "whatsapp_read", "info_requested"]
 /** A send younger than this is normal waiting, not ghosting. */
-const GHOSTED_AFTER_HOURS = 12
+export const GHOSTED_AFTER_HOURS = 12
 
 function hoursBetween(from: string, now: Date): number {
   const t = new Date(from).getTime()
@@ -444,6 +458,13 @@ function pillsFor(kind: WorkItemKind, p?: DispatchParticipant | null, extra?: { 
       if (rec) pills.push({ label: rec, tone: rec === "Reject" ? "hot" : "default" })
       break
     }
+    case "declined": {
+      pills.push({ label: "Not interested", tone: "hot" })
+      const nudges = Number(p?.outreach_nudge_count)
+      if (Number.isFinite(nudges) && nudges > 0) pills.push({ label: nudges > 1 ? `Nudged ${nudges}×` : "Nudged", tone: "default" })
+      if (attempts > 0) pills.push({ label: `Calls ${attempts}`, tone: "default" })
+      break
+    }
     case "call": {
       if (Number.isFinite(score) && score > 0) pills.push({ label: `AI ${score}/10`, tone: "info" })
       const rec = recommendationLabel(p)
@@ -490,9 +511,35 @@ export function candidateReplyText(p?: DispatchParticipant | null): string | nul
   return null
 }
 
-function wantsHuman(p?: DispatchParticipant | null): boolean {
+export function wantsHuman(p?: DispatchParticipant | null): boolean {
   const intent = String(p?.whatsapp_response || "").toLowerCase()
   return HUMAN_INTENTS.includes(intent)
+}
+
+/** The candidate has told us they are not interested. */
+export function hasDeclined(p?: DispatchParticipant | null): boolean {
+  const status = String(p?.status || "").toLowerCase()
+  const intent = String(p?.whatsapp_response || "").toLowerCase()
+  return status === "not_interested" || intent === "not_interested"
+}
+
+/**
+ * Did the candidate send us something that is still unanswered?
+ *
+ * `whatsapp_reply_text` is never cleared, so the raw presence of a reply says
+ * nothing about whether a human already dealt with it — a candidate who replied
+ * and was answered a week ago still carries their text. Comparing the last
+ * inbound (`whatsapp_reply_at`) against the last outbound (`whatsapp_sent_at`,
+ * stamped by every send path including manual ones) is what makes "Replied"
+ * mean "waiting on you" instead of "once replied, ever".
+ */
+export function hasUnansweredReply(p?: DispatchParticipant | null): boolean {
+  if (!p || !candidateReplyText(p)) return false
+  const inbound = p.whatsapp_reply_at ? Date.parse(p.whatsapp_reply_at) : NaN
+  const outbound = p.whatsapp_sent_at ? Date.parse(p.whatsapp_sent_at) : NaN
+  if (!Number.isFinite(inbound)) return true // text with no timestamp: assume waiting
+  if (!Number.isFinite(outbound)) return true // we never sent: nothing answered it
+  return inbound > outbound
 }
 
 /**
@@ -502,19 +549,28 @@ function wantsHuman(p?: DispatchParticipant | null): boolean {
 function deriveKind(input: WorkItemInput, now: Date): { kind: WorkItemKind; truth: CallTruth | null } | null {
   const { application: app, participant: p } = input
   const status = String(app.status || "")
+  const truth = getCallTruth(p ?? null)
+  const live = truth.bucket === "calling" || truth.bucket === "engaged"
+
+  // Conversation signals outrank the pipeline stage.
+  //
+  // Whether the AI screen is still running or the candidate is already sitting
+  // with a client, a person who told us they are out, or who typed something
+  // nobody has answered, is waiting on a human right now. Both signals clear
+  // themselves — `declined` is a terminal status, and a reply stops counting the
+  // moment we send one back — so this cannot manufacture rows that never go away.
+  // A live call still wins: whoever is on the line is already being handled.
+  if (!live) {
+    if (hasDeclined(p)) return { kind: "declined", truth }
+    if (hasUnansweredReply(p)) return { kind: "reply", truth }
+  }
 
   if (status === "ai_screen") {
-    const truth = getCallTruth(p ?? null)
+    const declined = hasDeclined(p)
 
-    // A candidate who replied on WhatsApp is waiting for an answer — but only
-    // when the AI is not already mid-call. A live call outranks a stale reply.
-    const live = truth.bucket === "calling" || truth.bucket === "engaged"
-    const declined = String(p?.status || "") === "not_interested"
-
-    if (!live && !declined) {
-      if (wantsHuman(p)) return { kind: "human", truth }
-      if (candidateReplyText(p)) return { kind: "reply", truth }
-    }
+    // An explicit button intent ("Call me now") only exists while the screening
+    // is live, so it stays scoped here.
+    if (!live && !declined && wantsHuman(p)) return { kind: "human", truth }
 
     const flagged =
       !declined &&
@@ -529,7 +585,8 @@ function deriveKind(input: WorkItemInput, now: Date): { kind: WorkItemKind; trut
 
     // We messaged them and heard nothing back — the candidate has gone quiet.
     // Fresh sends are normal waiting (the machine is still on it); only a send
-    // that has gone cold becomes work a human must chase.
+    // that has gone cold becomes work a human must chase. An answered reply is
+    // not "no reply", so a thread we have spoken to is excluded.
     if (!declined && GHOSTED_STATUSES.includes(String(p?.status || "")) && !candidateReplyText(p)) {
       const nudges = Number(p?.outreach_nudge_count)
       const lastContact = firstIso([p?.whatsapp_sent_at, p?.updated_at, app.updated_at, app.applied_at])
@@ -600,6 +657,8 @@ function waitingSinceFor(input: WorkItemInput, kind: WorkItemKind): string {
     case "reply":
     case "human":
       return firstIso([p?.updated_at, app.updated_at, app.applied_at])
+    case "declined":
+      return firstIso([p?.updated_at, app.updated_at, app.applied_at])
     case "call":
     case "hold":
       return firstIso([p?.updated_at, app.updated_at, app.applied_at])
@@ -632,6 +691,11 @@ function titlesFor(
       }
     case "reply":
       return { title: `Replied about ${jobTitle}`, detail: "The candidate responded on WhatsApp and is waiting for you." }
+    case "declined":
+      return {
+        title: `Declined ${jobTitle}`,
+        detail: "The candidate said they are not interested — review it, or close the application.",
+      }
     case "human":
       return {
         title: `Needs you on ${jobTitle}`,
@@ -799,6 +863,7 @@ export const WORK_ITEM_KINDS: WorkItemKind[] = [
   "human",
   "ghosted",
   "reply",
+  "declined",
   "hold",
   "call",
   "resched",

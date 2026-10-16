@@ -1,7 +1,7 @@
 "use client";
 
 import Image from "next/image";
-import { Users, Search, FileText, Settings, ChevronLeft, ChevronRight, Moon, Sun, BarChart, Briefcase, Building2, Shield, CreditCard, Inbox } from "lucide-react";
+import { Users, Search, FileText, Settings, ChevronLeft, ChevronRight, Moon, Sun, BarChart, Briefcase, Building2, Shield, CreditCard, Inbox, MessageCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 
@@ -15,6 +15,7 @@ interface SidebarProps {
 
 const navItems = [
   { href: "/today", name: "Today", icon: Inbox, anyOf: ["dispatch.view", "applications.view"] },
+  { href: "/whatsapp", name: "WhatsApp", icon: MessageCircle, anyOf: ["applications.view"], badgeKey: "whatsapp" },
   { href: "/upload", name: "Upload", icon: FileText, anyOf: ["candidates.edit"] },
   { href: "/jobs", name: "Jobs", icon: Briefcase, anyOf: ["jobs.view", "jobs.post", "jobs.edit"] },
   { href: "/candidates", name: "Candidates", icon: Users, anyOf: ["candidates.view", "candidates.edit"] },
@@ -32,6 +33,7 @@ const navItems = [
 export default function Sidebar({ isHrUser = false, permissionKeys = [], isSuperAdmin = false, collapsed, setCollapsed }: SidebarProps) {
   const [isDark, setIsDark] = useState(false);
   const [pendingCredits, setPendingCredits] = useState(0);
+  const [whatsappUnread, setWhatsappUnread] = useState(0);
   const router = useRouter();
   const pathname = usePathname() || "";
 
@@ -67,6 +69,23 @@ export default function Sidebar({ isHrUser = false, permissionKeys = [], isSuper
     return () => { cancelled = true }
   }, [])
 
+  // WhatsApp unread count for the badge — threads still waiting on us. Counts
+  // only, so the response is a few bytes rather than every conversation.
+  useEffect(() => {
+    let cancelled = false
+    const fetchUnread = async () => {
+      try {
+        const res = await fetch("/api/whatsapp/inbox?countsOnly=1", { credentials: "include" })
+        if (res.ok) {
+          const data = await res.json()
+          if (!cancelled) setWhatsappUnread(Number(data?.counts?.unread) || 0)
+        }
+      } catch {}
+    }
+    fetchUnread()
+    return () => { cancelled = true }
+  }, [])
+
   const toggleDark = () => {
     setIsDark((prev) => {
       const next = !prev;
@@ -90,6 +109,7 @@ export default function Sidebar({ isHrUser = false, permissionKeys = [], isSuper
 
   const badges: Record<string, number> = {
     creditRequests: pendingCredits,
+    whatsapp: whatsappUnread,
   }
 
   return (

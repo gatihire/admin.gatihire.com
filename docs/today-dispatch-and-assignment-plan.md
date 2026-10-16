@@ -346,6 +346,14 @@ UI: Super Admin → Analytics → **Team** tab gets the action columns + a per-u
 **Phase 4 — the rest of the design's chips** ⏳
 11. Client/billing items (`agr`, `renew`, `inv`, `guar`, `cred`, `join`) — needs client ownership + agreements data, which don't exist yet. Also deferred: the design's route card and week card.
 
+**Phase 5 — WhatsApp replies at every stage + inbox** ✅
+12. **Reply detection was stage-blind.** The `reply` / `human` / `ghosted` checks lived *inside* the `ai_screen` branch, so a candidate who replied while at `shortlist` / `interview` / `offer` surfaced nowhere in Today. `declined` (`not_interested`) produced no row at all. Both now evaluate at the top of `deriveKind`, for every active stage.
+13. **"Replied" now means *unanswered*.** `whatsapp_reply_text` is never cleared, so its mere presence said nothing about whether a human had already answered — a replied-and-answered candidate stayed "Replied" until the stage moved. `hasUnansweredReply()` compares the last inbound (`whatsapp_reply_at`) against the last outbound (`whatsapp_sent_at`), so the row clears the moment we reply.
+14. **Manual sends now stamp `whatsapp_sent_at`.** Only automated senders set it; manual messages and call nudges left no trace of having replied. `appendWhatsappHistory` now stamps it on any `direction: "out"` entry, covering every manual path in one place.
+15. **New `declined` work-item kind** ("Candidate declined") — surfaces a `not_interested` reply with Open conversation / Call / Log a call / Snooze, across stages.
+16. **New `/whatsapp` inbox** — one row per *thread* (a `phone_screening_participant`), not per application, because a candidate can be talking to us on a thread with no live application. Chips: Needs a human / Needs reply / Declined / No reply / All, computed from the same pure helpers the engine uses (`lib/dispatch/conversations.ts`) so the two surfaces can never disagree. Reuses `WhatsAppConversationModal` (live thread + Supabase Realtime), supports nudge / call now / open job, and adds a sidebar unread badge via `GET /api/whatsapp/inbox?countsOnly=1`.
+    - No new schema: "unread" is derived (still waiting on us) and self-clears, avoiding a migration that can't be applied from here.
+
 ---
 
 ## 11. Open questions / decisions needed

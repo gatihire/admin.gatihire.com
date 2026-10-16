@@ -53,11 +53,18 @@ export async function appendWhatsappHistory(
     : []
   history.push(entry)
 
+  // An outbound entry means we just spoke to the candidate. Stamping
+  // `whatsapp_sent_at` here — in one place — is what lets the queue tell an
+  // *answered* reply from an unanswered one; without it a manual message or a
+  // call nudge left no trace that we had replied, so "Replied" never cleared.
+  const isOutbound = entry.direction === 'out'
+
   const { error: updateError } = await supabaseAdmin
     .from('phone_screening_participants')
     .update({
       whatsapp_history: history.slice(-MAX_ENTRIES),
       updated_at: new Date().toISOString(),
+      ...(isOutbound ? { whatsapp_sent_at: entry.at || new Date().toISOString() } : {}),
     })
     .eq('id', participantId)
 

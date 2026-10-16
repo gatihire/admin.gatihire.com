@@ -37,6 +37,7 @@ import {
   PhoneCall,
   RefreshCw,
   Send,
+  UserMinus,
   Users,
   UserX,
 } from "lucide-react"
@@ -86,6 +87,7 @@ const KIND_STYLE: Record<WorkItemKind, string> = {
   human: "bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/40 dark:text-rose-300 dark:border-rose-900",
   ghosted: "bg-slate-100 text-slate-700 border-slate-300 dark:bg-slate-900/50 dark:text-slate-300 dark:border-slate-700",
   reply: "bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-950/40 dark:text-sky-300 dark:border-sky-900",
+  declined: "bg-red-50 text-red-700 border-red-200 dark:bg-red-950/40 dark:text-red-300 dark:border-red-900",
   resched: "bg-orange-50 text-orange-700 border-orange-200 dark:bg-orange-950/40 dark:text-orange-300 dark:border-orange-900",
   overdue: "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900",
   call: "bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-950/40 dark:text-indigo-300 dark:border-indigo-900",
@@ -99,6 +101,7 @@ const KIND_ICON: Record<WorkItemKind, React.ComponentType<{ className?: string }
   human: PhoneCall,
   ghosted: UserX,
   reply: MessageCircle,
+  declined: UserMinus,
   hold: Flag,
   call: Eye,
   resched: CalendarClock,
