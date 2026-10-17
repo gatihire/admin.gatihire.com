@@ -193,7 +193,7 @@ export async function GET(request: NextRequest) {
       ? fetchInChunks({
           table: "work_item_states",
           select:
-            "application_id, snoozed_until, snooze_reason, last_manual_call_at, last_manual_call_outcome, last_manual_call_note, assigned_auth_user_id",
+            "application_id, snoozed_until, snooze_reason, last_manual_call_at, last_manual_call_outcome, last_manual_call_note, assigned_auth_user_id, done_at",
           column: "application_id",
           ids: appIds,
         })

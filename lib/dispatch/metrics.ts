@@ -94,6 +94,8 @@ export function classifyActivity(row: ActionActivityRow): ActionMetricKey | null
     case "ai_screen_started":
       return "outreach_started"
     case "queue_snoozed":
+    case "queue_done":
+    case "queue_undone":
       return "queue_actions"
     case "notes_updated":
       return "notes_updated"

@@ -14,7 +14,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   const { applicationId } = await params
   const body = await request.json().catch(() => null)
   const action = String(body?.action || "") as WorkItemAction
-  if (!["snooze", "unsnooze", "log_call"].includes(action)) {
+  if (!["snooze", "unsnooze", "log_call", "done", "undone"].includes(action)) {
     return NextResponse.json({ error: "Unknown action" }, { status: 400 })
   }
 

@@ -14,6 +14,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { useToast } from "@/hooks/use-toast"
+import { ToastAction } from "@/components/ui/toast"
 import { supabase } from "@/lib/supabase"
 import { WhatsAppConversationModal } from "@/components/whatsapp-conversation-modal"
 import {
@@ -22,7 +23,7 @@ import {
   type ConversationCategory,
   type ConversationThread,
 } from "@/lib/dispatch/conversations"
-import { Loader2, MessageCircle, MoreHorizontal, PhoneCall, RefreshCw, Search, Inbox, ExternalLink } from "lucide-react"
+import { CheckCircle2, Loader2, MessageCircle, MoreHorizontal, PhoneCall, RefreshCw, Search, Inbox, ExternalLink } from "lucide-react"
 
 interface InboxResponse {
   generatedAt: string
@@ -248,6 +249,47 @@ export function WhatsAppInboxView() {
       await refreshOnScreen()
     })
 
+  /**
+   * Mark handled: hide the thread from the inbox without losing anything. It
+   * comes back on its own the moment the candidate replies.
+   */
+  const markDone = (t: ConversationThread) =>
+    withPending(`done:${t.participantId}`, async () => {
+      const res = await fetch(`/api/whatsapp/inbox/${t.participantId}`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "done" }),
+      })
+      const j = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(j?.error || `Could not mark done (${res.status})`)
+      toast({
+        title: "Marked done",
+        description: `${t.candidateName} is out of the inbox — it comes back if they reply.`,
+        action: (
+          <ToastAction altText="Undo" onClick={() => void undoDone(t.participantId)}>
+            Undo
+          </ToastAction>
+        ),
+      })
+      await refreshOnScreen()
+    })
+
+  const undoDone = (participantId: string) =>
+    withPending(`undo:${participantId}`, async () => {
+      const res = await fetch(`/api/whatsapp/inbox/${participantId}`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "undone" }),
+      })
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}))
+        throw new Error(j?.error || `Could not undo (${res.status})`)
+      }
+      await refreshOnScreen()
+    })
+
   const categoryChips: Array<{ key: "all" | ConversationCategory; label: string; count: number }> = useMemo(
     () => [
       { key: "all", label: "All", count: counts.total || 0 },
@@ -343,7 +385,10 @@ export function WhatsAppInboxView() {
         ) : (
           <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
             {items.map((t) => {
-              const busy = pending.has(`nudge:${t.participantId}`) || pending.has(`call:${t.participantId}`)
+              const busy =
+                pending.has(`nudge:${t.participantId}`) ||
+                pending.has(`call:${t.participantId}`) ||
+                pending.has(`done:${t.participantId}`)
               return (
                 <div
                   key={t.participantId}
@@ -380,6 +425,20 @@ export function WhatsAppInboxView() {
 
                   <div className="flex shrink-0 items-center gap-2">
                     <span className="hidden text-[11px] text-zinc-400 sm:block">{relative(t.lastActivityAt)}</span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => markDone(t)}
+                      disabled={busy}
+                      title="Mark handled — hides it from the inbox until they reply"
+                    >
+                      {pending.has(`done:${t.participantId}`) ? (
+                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" />
+                      )}
+                      Done
+                    </Button>
                     <Button size="sm" onClick={() => setConvoItem(t)} disabled={busy}>
                       {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
                       Open

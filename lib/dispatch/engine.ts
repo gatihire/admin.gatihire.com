@@ -121,6 +121,13 @@ export interface DispatchWorkState {
   last_manual_call_outcome?: string | null
   last_manual_call_note?: string | null
   assigned_auth_user_id?: string | null
+  /**
+   * When an operator marked this row done. The row is hidden while the mark is
+   * newer than the row's `waitingSince`; a later activity moves `waitingSince`
+   * forward, so the row comes back on its own. This is "archive until it
+   * changes", not "delete".
+   */
+  done_at?: string | null
 }
 
 export interface WorkItemInput {
@@ -146,6 +153,7 @@ export type WorkItemActionId =
   | "nudge" // nudge the candidate on WhatsApp
   | "log_call" // log a manual call
   | "snooze" // hide for a while
+  | "done" // mark handled — hide until the item changes
   | "drop" // reject the application
 
 export interface WorkItemAction {
@@ -209,6 +217,9 @@ export interface WorkItem {
   callLabel: string | null
   snoozed: boolean
   snoozedUntil: string | null
+  /** Marked handled by an operator — hidden until the item changes again. */
+  done: boolean
+  doneAt: string | null
   /** Set only on the merged "client overdue" row: how many candidates it covers. */
   groupCount?: number
   groupApplicationIds?: string[]
@@ -736,6 +747,11 @@ function deriveOne(input: WorkItemInput, now: Date): WorkItem | null {
   const { title, detail } = titlesFor(input, kind, truth)
   const snoozedUntil = input.state?.snoozed_until || null
   const snoozed = !!snoozedUntil && new Date(snoozedUntil).getTime() > now.getTime()
+  const doneAt = input.state?.done_at || null
+  // "Done" hides the row until the item changes again: any later activity moves
+  // `waitingSince` past the mark, so the row returns on its own. Without that,
+  // a row completed today would stay buried even after the candidate replies.
+  const done = !!doneAt && new Date(doneAt).getTime() >= new Date(waitingSince).getTime()
   const p = input.participant
 
   return {
@@ -761,7 +777,9 @@ function deriveOne(input: WorkItemInput, now: Date): WorkItem | null {
     quote: quoteFrom(p),
     cta: cfg.cta,
     primaryAction: cfg.actions[0].id,
-    actions: cfg.actions,
+    // Every kind gets the same "Done" escape hatch — the operator has handled
+    // it, so take it off the board until something changes.
+    actions: [...cfg.actions, { id: "done", label: "Done", variant: "default" }],
     participantId: p?.id ? String(p.id) : null,
     shareId: input.shortlist?.id ? String(input.shortlist.id) : null,
     interviewId: input.interview?.id ? String(input.interview.id) : null,
@@ -778,6 +796,8 @@ function deriveOne(input: WorkItemInput, now: Date): WorkItem | null {
     callLabel: truth?.label ?? null,
     snoozed,
     snoozedUntil,
+    done,
+    doneAt,
   }
 }
 
@@ -785,16 +805,20 @@ export interface DeriveOptions {
   now?: Date
   /** Include items the operator has snoozed. Default false. */
   includeSnoozed?: boolean
+  /** Include items the operator has marked done. Default false. */
+  includeDone?: boolean
 }
 
 export function deriveWorkItems(inputs: WorkItemInput[], opts: DeriveOptions = {}): WorkItem[] {
   const now = opts.now ?? new Date()
   const includeSnoozed = opts.includeSnoozed ?? false
+  const includeDone = opts.includeDone ?? false
   const items: WorkItem[] = []
   for (const input of inputs) {
     const item = deriveOne(input, now)
     if (!item) continue
     if (!includeSnoozed && item.snoozed) continue
+    if (!includeDone && item.done) continue
     items.push(item)
   }
   return sortWorkItems(items)

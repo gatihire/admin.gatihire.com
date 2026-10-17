@@ -7,7 +7,7 @@ export const runtime = "nodejs"
 const MAX_BULK = 100
 
 /**
- * Bulk snooze / unsnooze / manual-call, used by the Today queue's selection bar.
+ * Bulk snooze / unsnooze / manual-call / done, used by the Today queue's selection bar.
  */
 export async function POST(request: NextRequest) {
   const ctx = await getInternalAuthContext(request)
@@ -18,7 +18,7 @@ export async function POST(request: NextRequest) {
 
   const body = await request.json().catch(() => null)
   const action = String(body?.action || "") as WorkItemAction
-  if (!["snooze", "unsnooze", "log_call"].includes(action)) {
+  if (!["snooze", "unsnooze", "log_call", "done", "undone"].includes(action)) {
     return NextResponse.json({ error: "Unknown action" }, { status: 400 })
   }
 

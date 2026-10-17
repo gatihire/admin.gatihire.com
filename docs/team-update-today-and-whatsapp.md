@@ -20,11 +20,13 @@ without any training.
 >
 > **2. Press the blue button on the row.** It's already the next step — *Take over*, *Nudge on WhatsApp*, *Open conversation*, *Send to the client*, *Schedule interview*… Just follow it.
 >
-> **3. Not now?** Open the **⋯** menu on the row → *Snooze*. It'll come back later. Nothing gets lost.
+> **3. Handled it? Hit *Done*.** The row leaves your list and comes back by itself only if something new happens (they reply, a decision lands) — so clearing it never loses the follow-up. Change your mind → hit **Undo** in the little pop-up.
 >
-> **4. Same job, lots of people?** Tick several rows → *Nudge on WhatsApp* / *Snooze 1 day* — one click for all of them.
+> **4. Not now?** Open the **⋯** menu on the row → *Snooze*. It'll come back later. Nothing gets lost. (*Snooze* = "later"; ***Done*** = "I've dealt with it".)
 >
-> **5. Done = gone.** When you act, the row clears itself. When the list is empty, you're caught up. 🎉
+> **5. Same job, lots of people?** Tick several rows → **Mark done** / *Nudge on WhatsApp* / *Snooze 1 day* — one click for all of them.
+>
+> **6. Done = gone.** When you act, the row clears itself. When the list is empty, you're caught up. 🎉
 >
 > **Admins only:** use the switch at the top right to see **My accounts** (just yours) or the whole **Team**.
 
@@ -40,9 +42,11 @@ without any training.
 >
 > **3. Click *Open* on a row** to read the whole conversation, then hit **Nudge** to send a quick WhatsApp follow-up, or **Call now**.
 >
-> **4. That's it — answering clears the thread.** Nothing to "mark as read".
+> **4. Answering clears the thread automatically** — nothing to "mark as read".
 >
-> **5. Can't find someone?** Use the **search** box (name, job or client).
+> **5. Already sorted it?** Hit **Done** on the row. It leaves the inbox, and comes back by itself if they reply. (Changed your mind → **Undo**.)
+>
+> **6. Can't find someone?** Use the **search** box (name, job or client).
 >
 > **Also new:** the **Today** page now shows **Replied / Declined / No reply** at *every* stage — so a reply that comes in after shortlisting no longer gets missed.
 
@@ -60,11 +64,13 @@ admin. It replaces scanning each pipeline column looking for the next thing.
 2. Read the header — *"N items need you across M open jobs."*
 3. Use the **chips** to focus. Start with **Needs a human** and **Replied** —
    those are people actively waiting on us.
-4. On each row, hit the **primary button** (the next step), or open **⋯** for
-   *log a call*, *snooze*, etc.
-5. Tick several rows to act in bulk: **Nudge on WhatsApp**, **Snooze 1 day**, or
-   (admins) **Drop**.
-6. Tick **Show snoozed** if you want to see things you've parked.
+4. On each row, hit the **primary button** (the next step), the **Done** button
+   when you've handled it, or open **⋯** for *log a call*, *snooze*, etc.
+5. **Done** takes the row off your list without touching the pipeline — it
+   returns on its own if anything changes, and a toast lets you **Undo**.
+6. Tick several rows to act in bulk: **Mark done**, **Nudge on WhatsApp**,
+   **Snooze 1 day**, or (admins) **Drop**.
+7. Tick **Show snoozed** if you want to see things you've parked.
 
 **What's on the page**
 
@@ -99,8 +105,10 @@ application. Same conversation viewer as the board, live via Realtime.
    handed it over).
 3. Per row: **Open** to read the thread, then **Nudge** or **Call now**.
    Answering a *Needs reply* thread clears it automatically.
-4. **Search** by candidate, role or client across all threads.
-5. **Load more** at the bottom to page through older threads.
+4. **Done** on a row marks the thread handled: it leaves the inbox and returns
+   by itself if they reply. A toast lets you **Undo**.
+5. **Search** by candidate, role or client across all threads.
+6. **Load more** at the bottom to page through older threads.
 
 **Note:** *unread* means *still waiting on us* — it clears itself when we reply,
 so there's nothing to mark as read.
@@ -126,3 +134,10 @@ function), so the inbox pages, filters and searches server-side, the sidebar
 count is one fast query, and the badge is cached for a minute. No visible change,
 just far less work per page view. Migration:
 `supabase/migrations/20261016_whatsapp_inbox.sql` (applied).
+
+**"Done" clears work without losing it.** Marking a Today row or a WhatsApp
+thread done hides it until something changes — a new reply or a decision brings
+it straight back — so you can clear what you've handled without fearing you'll
+miss the follow-up. Migrations:
+`supabase/migrations/20261017_work_item_done.sql` and
+`supabase/migrations/20261017_whatsapp_thread_done.sql`.

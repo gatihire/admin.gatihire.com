@@ -21,6 +21,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Textarea } from "@/components/ui/textarea"
+import { ToastAction } from "@/components/ui/toast"
 import {
   AlarmClock,
   Building2,
@@ -404,6 +405,44 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
       await load({ quiet: true })
     })
 
+  // ── done / undo ─────────────────────────────────────────────────────────
+  // "Done" takes a row off the board without touching the pipeline. It returns
+  // by itself the moment the item changes again (a reply, a new decision), so it
+  // is safe to clear the things you have handled — and undoable for the ones you
+  // clicked by mistake.
+  const markDone = (rows: WorkItem[]) =>
+    withPending(rows.length === 1 ? `done:${rows[0].key}` : "bulk:done", async () => {
+      const ids = rows.map((r) => r.applicationId)
+      if (ids.length === 1) {
+        await api(`/api/dispatch/work-items/${ids[0]}`, { method: "PATCH", body: JSON.stringify({ action: "done" }) })
+      } else {
+        await api(`/api/dispatch/work-items`, { method: "POST", body: JSON.stringify({ action: "done", applicationIds: ids }) })
+      }
+      toast({
+        title: ids.length === 1 ? "Marked done" : `${ids.length} marked done`,
+        description:
+          ids.length === 1
+            ? `${rows[0].candidateName} is off your board — it comes back if anything changes.`
+            : "They are off your board — they come back if anything changes.",
+        action: (
+          <ToastAction altText="Undo" onClick={() => void undoDone(ids)}>
+            Undo
+          </ToastAction>
+        ),
+      })
+      await load({ quiet: true })
+    })
+
+  const undoDone = (ids: string[]) =>
+    withPending(ids.length === 1 ? `undo:${ids[0]}` : "bulk:undo", async () => {
+      if (ids.length === 1) {
+        await api(`/api/dispatch/work-items/${ids[0]}`, { method: "PATCH", body: JSON.stringify({ action: "undone" }) })
+      } else {
+        await api(`/api/dispatch/work-items`, { method: "POST", body: JSON.stringify({ action: "undone", applicationIds: ids }) })
+      }
+      await load({ quiet: true })
+    })
+
   // ── bulk actions ────────────────────────────────────────────────────────
   const selectedItems = useMemo(() => items.filter((i) => selected.has(i.applicationId)), [items, selected])
 
@@ -540,6 +579,14 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                 >
                   Snooze 1 day
                 </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={pending.has("bulk:done")}
+                  onClick={() => markDone(selectedItems)}
+                >
+                  <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" /> Mark done
+                </Button>
                 {canManage && (
                   <Button
                     variant="outline"
@@ -582,7 +629,10 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
               filtered.map((item) => {
                 const Icon = KIND_ICON[item.kind]
                 const grouped = (item.groupCount ?? 0) > 1
-                const busy = pending.has(`call:${item.key}`) || pending.has(`remind:${item.key}`)
+                const busy =
+                  pending.has(`call:${item.key}`) ||
+                  pending.has(`remind:${item.key}`) ||
+                  pending.has(`done:${item.key}`)
                 const secondary = item.actions
                   .filter((a) => a.id !== "log_call" && a.id !== "snooze")
                   .slice(1)
@@ -664,7 +714,9 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                               ? callNow(item)
                               : a.id === "review"
                                 ? openResults(item)
-                                : runPrimary(item)
+                                : a.id === "done"
+                                  ? markDone([item])
+                                  : runPrimary(item)
                           }
                         >
                           {a.label}
@@ -686,6 +738,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                             setCallNote("")
                           }}
                           onSnooze={(hours) => snoozeOne(item, hours)}
+                          onDone={() => markDone([item])}
                         />
                       )}
                     </div>
@@ -962,12 +1015,14 @@ function RowMenu({
   onCallback,
   onLogCall,
   onSnooze,
+  onDone,
 }: {
   disabled?: boolean
   onCall: (outcome: string, hours: number) => void
   onCallback: () => void
   onLogCall: () => void
   onSnooze: (hours: number) => void
+  onDone: () => void
 }) {
   return (
     <DropdownMenu>
@@ -994,6 +1049,10 @@ function RowMenu({
             {o.label}
           </DropdownMenuItem>
         ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={onDone}>
+          <CheckCircle2 className="mr-2 h-3.5 w-3.5" /> Mark as done
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   )

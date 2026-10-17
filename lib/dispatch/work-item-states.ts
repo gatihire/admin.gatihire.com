@@ -1,7 +1,7 @@
 import { supabaseAdmin } from "@/lib/supabase"
 import { logCandidateActivity } from "@/lib/activity-logger"
 
-export type WorkItemAction = "snooze" | "unsnooze" | "log_call"
+export type WorkItemAction = "snooze" | "unsnooze" | "log_call" | "done" | "undone"
 
 export interface ApplyWorkItemActionInput {
   applicationId: string
@@ -51,6 +51,15 @@ export async function applyWorkItemAction(input: ApplyWorkItemActionInput): Prom
   } else if (input.action === "unsnooze") {
     patch.snoozed_until = null
     patch.snooze_reason = null
+  } else if (input.action === "done") {
+    // Mark handled: hide until the item changes. Clear any snooze so the two
+    // dispositions cannot disagree (a still-snoozed done row would be invisible
+    // in both views with no way back).
+    patch.done_at = nowIso
+    patch.snoozed_until = null
+    patch.snooze_reason = null
+  } else if (input.action === "undone") {
+    patch.done_at = null
   } else {
     patch.last_manual_call_at = nowIso
     patch.last_manual_call_outcome = input.outcome ? String(input.outcome).slice(0, 120) : "logged"
@@ -74,7 +83,15 @@ export async function applyWorkItemAction(input: ApplyWorkItemActionInput): Prom
   if (error) return { ok: false, error: error.message }
 
   const eventType =
-    input.action === "snooze" ? "queue_snoozed" : input.action === "unsnooze" ? "queue_unsnoozed" : "manual_call_logged"
+    input.action === "snooze"
+      ? "queue_snoozed"
+      : input.action === "unsnooze"
+        ? "queue_unsnoozed"
+        : input.action === "done"
+          ? "queue_done"
+          : input.action === "undone"
+            ? "queue_undone"
+            : "manual_call_logged"
 
   await logCandidateActivity({
     jobId: String(app.job_id),
@@ -87,6 +104,7 @@ export async function applyWorkItemAction(input: ApplyWorkItemActionInput): Prom
       reason: patch.snooze_reason ?? null,
       outcome: patch.last_manual_call_outcome ?? null,
       note: patch.last_manual_call_note ?? null,
+      done_at: patch.done_at ?? null,
     },
     actor: input.actorEmail || "internal_user",
     actorAuthUserId: input.actorId,

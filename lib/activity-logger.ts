@@ -26,6 +26,8 @@ export type EventType =
   // Today dispatch queue
   | "queue_snoozed"
   | "queue_unsnoozed"
+  | "queue_done"
+  | "queue_undone"
   | "manual_call_logged"
   | "job_reassigned"
   | "job_claimed"
