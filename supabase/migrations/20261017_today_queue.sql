@@ -83,7 +83,7 @@ select case
           when public.hours_between(coalesce(p_whatsapp_sent_at, p_updated_at, app_updated_at, app_applied_at), now_t) >= 12 then 'ghosted'
           else null
         end
-      when (select completed_screen from base or (select ps from base)='completed') then 'call'
+      when ((select completed_screen from base) or (select ps from base)='completed') then 'call'
       else null
     end
   when (select s from base) = 'hr_review' then
