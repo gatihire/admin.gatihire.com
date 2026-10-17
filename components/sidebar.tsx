@@ -70,15 +70,37 @@ export default function Sidebar({ isHrUser = false, permissionKeys = [], isSuper
   }, [])
 
   // WhatsApp unread count for the badge — threads still waiting on us. Counts
-  // only, so the response is a few bytes rather than every conversation.
+  // only, so the response is a few bytes rather than every conversation, and it
+  // is cached for a short window so navigating between pages doesn't re-run the
+  // aggregate on every mount. (With the 20261016 migration applied the read is a
+  // single indexed aggregate; without it, this cache is what keeps the fallback
+  // from scanning the whole table on each navigation.)
   useEffect(() => {
     let cancelled = false
+    const CACHE_KEY = "whatsapp-unread"
+    const CACHE_MS = 60_000
+
+    try {
+      const cached = sessionStorage.getItem(CACHE_KEY)
+      if (cached) {
+        const { value, at } = JSON.parse(cached)
+        if (Date.now() - at < CACHE_MS) {
+          setWhatsappUnread(Number(value) || 0)
+          return () => { cancelled = true }
+        }
+      }
+    } catch {}
+
     const fetchUnread = async () => {
       try {
         const res = await fetch("/api/whatsapp/inbox?countsOnly=1", { credentials: "include" })
         if (res.ok) {
           const data = await res.json()
-          if (!cancelled) setWhatsappUnread(Number(data?.counts?.unread) || 0)
+          const value = Number(data?.counts?.unread) || 0
+          if (!cancelled) setWhatsappUnread(value)
+          try {
+            sessionStorage.setItem(CACHE_KEY, JSON.stringify({ value, at: Date.now() }))
+          } catch {}
         }
       } catch {}
     }

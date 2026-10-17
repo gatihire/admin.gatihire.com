@@ -354,6 +354,11 @@ UI: Super Admin → Analytics → **Team** tab gets the action columns + a per-u
 16. **New `/whatsapp` inbox** — one row per *thread* (a `phone_screening_participant`), not per application, because a candidate can be talking to us on a thread with no live application. Chips: Needs a human / Needs reply / Declined / No reply / All, computed from the same pure helpers the engine uses (`lib/dispatch/conversations.ts`) so the two surfaces can never disagree. Reuses `WhatsAppConversationModal` (live thread + Supabase Realtime), supports nudge / call now / open job, and adds a sidebar unread badge via `GET /api/whatsapp/inbox?countsOnly=1`.
     - No new schema: "unread" is derived (still waiting on us) and self-clears, avoiding a migration that can't be applied from here.
 
+**Phase 6 — inbox scalability** ✅ (needs one migration applied by hand)
+17. **The inbox read was O(whole table).** `lib/dispatch/conversations.ts` classified every `phone_screening_participants` row in Node, and the sidebar badge (`?countsOnly=1`) re-invoked that scan on *every page load*. Cost grew with the table, not with what was on screen, and every thread was shipped even though the UI shows a page.
+    The rules now live in SQL — `supabase/migrations/20261016_whatsapp_inbox.sql` defines `whatsapp_thread_category()` / `whatsapp_thread_unread()` (mirroring `conversations.ts`), a `whatsapp_threads` view that exposes them plus the candidate/job display fields for server-side filter+search, and `whatsapp_inbox_counts()` that returns the chip/badge counts as a single aggregate. The API filters, searches and paginates (`limit`/`offset`) in Postgres; the list loads a page at a time ("Load more") and counts only ride along on page one. The sidebar badge is also cached in `sessionStorage` for 60s so navigating doesn't re-run the aggregate on every mount.
+    - **Action required:** run that migration in the Supabase SQL editor. Until it's applied, the route sees the missing view/function and falls back to the old Node classifier, so nothing breaks — the read is just still O(table).
+
 ---
 
 ## 11. Open questions / decisions needed
