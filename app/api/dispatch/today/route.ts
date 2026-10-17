@@ -116,6 +116,7 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url)
   const requestedScope = searchParams.get("scope")
   const includeSnoozed = searchParams.get("includeSnoozed") === "true"
+  const includeDone = searchParams.get("includeDone") === "true"
   const scope: Scope =
     requestedScope === "team" && canViewTeam ? "team" : requestedScope === "mine" ? "mine" : canViewTeam ? "team" : "mine"
 
@@ -310,7 +311,7 @@ export async function GET(request: NextRequest) {
       state: stateByApp.get(String(a.id)) ?? null,
     }))
 
-  const items = groupOverdue(deriveWorkItems(inputs, { now, includeSnoozed }))
+  const items = groupOverdue(deriveWorkItems(inputs, { now, includeSnoozed, includeDone }))
 
   // ── Header stats ───────────────────────────────────────────────────────────
   const stats: DispatchStats = {

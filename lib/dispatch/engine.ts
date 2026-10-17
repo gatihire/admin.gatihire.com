@@ -391,11 +391,10 @@ function hoursBetween(from: string, now: Date): number {
   return Math.max(0, (now.getTime() - t) / HOUR_MS)
 }
 
-function slaStateFor(ageHours: number): SlaState {
-  // Matches the design prototype: anything past a day is late, past six hours is
-  // a warning. Per-kind `slaHours` is still returned for tooltips/future use.
-  if (ageHours >= 24) return "late"
-  if (ageHours >= 6) return "warn"
+function slaStateFor(ageHours: number, slaHours: number): SlaState {
+  if (slaHours <= 0) return "ok"
+  if (ageHours >= slaHours * 1.5) return "late"
+  if (ageHours >= slaHours) return "warn"
   return "ok"
 }
 
@@ -770,7 +769,7 @@ function deriveOne(input: WorkItemInput, now: Date): WorkItem | null {
     waitingSince,
     ageHours: Math.round(ageHours),
     slaHours: cfg.slaHours,
-    slaState: slaStateFor(ageHours),
+    slaState: slaStateFor(ageHours, cfg.slaHours),
     priority: priorityFor(kind, ageHours),
     title,
     detail,

@@ -165,6 +165,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
   const [scope, setScope] = useState<Scope>(defaultScope)
   const [kindFilter, setKindFilter] = useState<"all" | WorkItemKind>("all")
   const [includeSnoozed, setIncludeSnoozed] = useState(false)
+  const [includeDone, setIncludeDone] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [pending, setPending] = useState<Set<string>>(new Set())
 
@@ -176,17 +177,21 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
   const [callNote, setCallNote] = useState("")
   const [callbackItem, setCallbackItem] = useState<WorkItem | null>(null)
   const [callbackAt, setCallbackAt] = useState(() => toLocalInput(new Date(Date.now() + 60 * 60 * 1000)))
+  const [dropOpen, setDropOpen] = useState(false)
+  const [dropIds, setDropIds] = useState<string[]>([])
 
   const load = useCallback(
-    async (opts?: { scope?: Scope; includeSnoozed?: boolean; quiet?: boolean }) => {
+    async (opts?: { scope?: Scope; includeSnoozed?: boolean; includeDone?: boolean; quiet?: boolean }) => {
       const nextScope = opts?.scope ?? scope
       const nextSnoozed = opts?.includeSnoozed ?? includeSnoozed
+      const nextDone = opts?.includeDone ?? includeDone
       if (opts?.quiet) setRefreshing(true)
       else setLoading(true)
       setError(null)
       try {
         const qs = new URLSearchParams({ scope: nextScope })
         if (nextSnoozed) qs.set("includeSnoozed", "true")
+        if (nextDone) qs.set("includeDone", "true")
         const res = await fetch(`/api/dispatch/today?${qs.toString()}`, { credentials: "include", cache: "no-store" })
         const json = await res.json().catch(() => null)
         if (!res.ok) throw new Error((json as any)?.error || "Could not load your queue")
@@ -200,7 +205,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
         setRefreshing(false)
       }
     },
-    [scope, includeSnoozed]
+    [scope, includeSnoozed, includeDone]
   )
 
   useEffect(() => {
@@ -393,7 +398,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
 
   const dropApplications = (applicationIds: string[], key: string) =>
     withPending(key, async () => {
-      await Promise.all(
+      await Promise.allSettled(
         applicationIds.map((id) =>
           api(`/api/applications/${id}`, {
             method: "PUT",
@@ -496,7 +501,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
               ))}
             </div>
           )}
-          <Button variant="outline" size="sm" onClick={() => load({ scope, includeSnoozed, quiet: true })} disabled={loading || refreshing}>
+          <Button variant="outline" size="sm" onClick={() => load({ scope, includeSnoozed, includeDone, quiet: true })} disabled={loading || refreshing}>
             {loading || refreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
             <span className="ml-2">Refresh</span>
           </Button>
@@ -527,17 +532,30 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                 Every candidate the pipeline says needs a human decision, most urgent first.
               </p>
             </div>
-            <label className="flex cursor-pointer items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-              <Checkbox
-                checked={includeSnoozed}
-                onCheckedChange={(v) => {
-                  const next = v === true
-                  setIncludeSnoozed(next)
-                  void load({ scope, includeSnoozed: next })
-                }}
-              />
-              Show snoozed
-            </label>
+            <div className="flex items-center gap-3">
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+                <Checkbox
+                  checked={includeSnoozed}
+                  onCheckedChange={(v) => {
+                    const next = v === true
+                    setIncludeSnoozed(next)
+                    void load({ scope, includeSnoozed: next, includeDone })
+                  }}
+                />
+                Show snoozed
+              </label>
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+                <Checkbox
+                  checked={includeDone}
+                  onCheckedChange={(v) => {
+                    const next = v === true
+                    setIncludeDone(next)
+                    void load({ scope, includeSnoozed, includeDone: next })
+                  }}
+                />
+                Show done
+              </label>
+            </div>
           </div>
 
           {/* Filter chips */}
@@ -552,6 +570,22 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                 count={counts[k] || 0}
               />
             ))}
+            {selected.size > 0 && filtered.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  const allOnFilter = filtered.filter((i) => i.selectable).map((i) => i.applicationId)
+                  if (allOnFilter.length === selected.size) {
+                    setSelected(new Set())
+                    return
+                  }
+                  setSelected(new Set([...Array.from(selected), ...allOnFilter]))
+                }}
+                className="ml-auto text-xs text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+              >
+                Select all on this filter
+              </button>
+            )}
           </div>
 
           {/* Bulk bar */}
@@ -588,19 +622,11 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                   <CheckCircle2 className="mr-1.5 h-3.5 w-3.5" /> Mark done
                 </Button>
                 {canManage && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="text-red-600 hover:text-red-700 dark:text-red-400"
+                  <DropConfirm
+                    count={selected.size}
                     disabled={pending.has("bulk:drop")}
-                    onClick={() => {
-                      if (confirm(`Drop ${selected.size} application(s)? This rejects them.`)) {
-                        dropApplications(Array.from(selected), "bulk:drop")
-                      }
-                    }}
-                  >
-                    Drop
-                  </Button>
+                    onConfirm={() => dropApplications(Array.from(selected), "bulk:drop")}
+                  />
                 )}
                 <Button variant="ghost" size="sm" onClick={() => setSelected(new Set())}>
                   Clear
@@ -631,8 +657,13 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                 const grouped = (item.groupCount ?? 0) > 1
                 const busy =
                   pending.has(`call:${item.key}`) ||
+                  pending.has(`nudge:${item.key}`) ||
                   pending.has(`remind:${item.key}`) ||
-                  pending.has(`done:${item.key}`)
+                  pending.has(`log:${item.key}`) ||
+                  pending.has(`snooze:${item.key}`) ||
+                  pending.has(`callback:${item.key}`) ||
+                  pending.has(`done:${item.key}`) ||
+                  pending.has(`undo:${item.applicationId}`)
                 const secondary = item.actions
                   .filter((a) => a.id !== "log_call" && a.id !== "snooze")
                   .slice(1)
@@ -667,6 +698,11 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                         <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${KIND_STYLE[item.kind]}`}>
                           {item.kindLabel}
                         </span>
+                        {item.stage && (
+                          <span className="rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[11px] font-medium text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                            {item.stage.replace(/_/g, " ")}
+                          </span>
+                        )}
                         <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${slaClasses(item.slaState)}`}>
                           <AlarmClock className="mr-1 inline h-3 w-3 align-[-2px]" />
                           Waiting {formatAge(item.ageHours)}
@@ -688,7 +724,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
 
                       <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-200">{item.title}</p>
                       <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-                        {[item.jobTitle, item.clientName, item.candidateMeta].filter(Boolean).join(" · ")}
+                        {item.clientName || item.candidateMeta || ""}
                       </p>
                       {item.detail && <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{item.detail}</p>}
                       {item.quote && (
@@ -969,6 +1005,7 @@ function Chip({
   return (
     <button
       type="button"
+      aria-pressed={active}
       onClick={onClick}
       className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
         active
@@ -1006,6 +1043,53 @@ function RailCard({
         )}
       </div>
     </div>
+  )
+}
+
+function DropConfirm({
+  count,
+  disabled,
+  onConfirm,
+}: {
+  count: number
+  disabled?: boolean
+  onConfirm: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <Button
+        variant="outline"
+        size="sm"
+        className="text-red-600 hover:text-red-700 dark:text-red-400"
+        disabled={disabled || count === 0}
+        onClick={() => setOpen(true)}
+      >
+        Drop
+      </Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Drop {count} application{count === 1 ? "" : "s"}</DialogTitle>
+            <DialogDescription>This will mark them as rejected and remove them from the queue.</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                setOpen(false)
+                onConfirm()
+              }}
+            >
+              Confirm drop
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }
 
