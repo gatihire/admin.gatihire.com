@@ -8,6 +8,7 @@ import {
   ChevronDown,
   ClipboardList,
   Clock,
+  Loader2,
   MessageCircle,
   MousePointerClick,
   PhoneCall,
@@ -386,6 +387,10 @@ export function WhatsAppConversationModal({
   // polling updates this instead, so a reply that arrives while the modal is
   // open appears on its own.
   const [liveHistory, setLiveHistory] = useState<unknown>(history)
+  // True until the first thread fetch settles. Callers that don't hand us the
+  // history (the Today board and the inbox pass `[]`) would otherwise flash an
+  // empty "0 entries" thread until the slow fallback poll fired.
+  const [loading, setLoading] = useState(false)
   const [liveInfo, setLiveInfo] = useState<{ infoData?: any; infoSources?: any; preScreenResult?: any }>({
     infoData: infoData ?? undefined,
     infoSources: infoSources ?? undefined,
@@ -474,6 +479,15 @@ export function WhatsAppConversationModal({
         inFlight = false
       }
     }
+
+    // Load the thread immediately on open. `history` is only the caller's
+    // initial value — the Today board and the inbox both pass `[]`, so without
+    // this the thread sat empty at "0 entries" until a Realtime update or the
+    // slow (45s) fallback poll happened to fire.
+    setLoading(true)
+    void refetch(true).finally(() => {
+      if (!cancelled) setLoading(false)
+    })
 
     // Coalesce bursts: a webhook can write the participant row several times in
     // quick succession, and each write fires its own event.
@@ -634,7 +648,7 @@ export function WhatsAppConversationModal({
               <p className="truncate text-[11px] text-zinc-500">{roleLabel}</p>
             )}
             <p className="text-[11px] text-zinc-500">
-              {withPending.length} entries
+              {loading && withPending.length === 0 ? "Loading…" : `${withPending.length} entries`}
               {systemCount > 0 && (
                 <button
                   type="button"
@@ -707,23 +721,33 @@ export function WhatsAppConversationModal({
           ref={scrollRef}
           className="flex-1 space-y-1 overflow-y-auto bg-[#ece5dd] px-3 py-3"
         >
-          {visible.map((item) => {
-            const day = item.at ? dayLabel(item.at) : ""
-            const showDay = day !== lastDay
-            lastDay = day
-            return (
-              <div key={item.id}>
-                {showDay && (
-                  <div className="flex justify-center py-2">
-                    <span className="rounded-full bg-white/70 px-2.5 py-0.5 text-[10px] font-semibold text-zinc-500 shadow-sm">
-                      {day}
-                    </span>
-                  </div>
-                )}
-                <Bubble item={item} />
-              </div>
-            )
-          })}
+          {loading && visible.length === 0 ? (
+            <div className="flex h-full items-center justify-center gap-2 text-xs text-zinc-500">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading conversation…
+            </div>
+          ) : visible.length === 0 ? (
+            <div className="flex h-full items-center justify-center px-6 text-center text-xs text-zinc-500">
+              No messages on this thread yet. Send one below to start the conversation.
+            </div>
+          ) : (
+            visible.map((item) => {
+              const day = item.at ? dayLabel(item.at) : ""
+              const showDay = day !== lastDay
+              lastDay = day
+              return (
+                <div key={item.id}>
+                  {showDay && (
+                    <div className="flex justify-center py-2">
+                      <span className="rounded-full bg-white/70 px-2.5 py-0.5 text-[10px] font-semibold text-zinc-500 shadow-sm">
+                        {day}
+                      </span>
+                    </div>
+                  )}
+                  <Bubble item={item} />
+                </div>
+              )
+            })
+          )}
         </div>
 
         {canSend ? (
