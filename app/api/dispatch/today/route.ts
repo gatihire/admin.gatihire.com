@@ -75,6 +75,32 @@ async function fetchInChunks(opts: {
   return { data: out, error: null }
 }
 
+/**
+ * Read work_item_states, tolerating a database that predates the "done" column
+ * (20261017_work_item_done.sql). Selecting a column PostgREST does not know
+ * about fails the whole query — which would take the Today page down — so fall
+ * back to the older column set (no done_at) and treat every row as not-done.
+ */
+async function fetchWorkStates(ids: string[]): Promise<{ data: any[]; error: any }> {
+  const columns =
+    "application_id, snoozed_until, snooze_reason, last_manual_call_at, last_manual_call_outcome, last_manual_call_note, assigned_auth_user_id"
+  const withDone = await fetchInChunks({
+    table: "work_item_states",
+    select: `${columns}, done_at`,
+    column: "application_id",
+    ids,
+  })
+  if (!withDone.error) return withDone
+
+  const code = String((withDone.error as any)?.code || "")
+  const msg = String((withDone.error as any)?.message || "").toLowerCase()
+  const missingColumn =
+    code === "42703" || code === "PGRST204" || msg.includes("done_at") || msg.includes("does not exist")
+  if (!missingColumn) return withDone
+
+  return fetchInChunks({ table: "work_item_states", select: columns, column: "application_id", ids })
+}
+
 type Scope = "mine" | "team"
 
 export async function GET(request: NextRequest) {
@@ -190,13 +216,7 @@ export async function GET(request: NextRequest) {
         })
       : Promise.resolve({ data: [] as any[], error: null }),
     appIds.length
-      ? fetchInChunks({
-          table: "work_item_states",
-          select:
-            "application_id, snoozed_until, snooze_reason, last_manual_call_at, last_manual_call_outcome, last_manual_call_note, assigned_auth_user_id, done_at",
-          column: "application_id",
-          ids: appIds,
-        })
+      ? fetchWorkStates(appIds)
       : Promise.resolve({ data: [] as any[], error: null }),
     appIds.length
       ? fetchInChunks({
