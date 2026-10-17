@@ -7,43 +7,44 @@ ready-to-paste Google Chat messages, then what each thing is and how to use it.
 
 ## 1. Google Chat messages (copy & paste)
 
-### Message A — the Today board
+These are written as instructions — the reader can follow them top to bottom
+without any training.
 
-> 📋 **Meet your *Today* board**
->
-> **Where:** the new **Today** item at the top of the left sidebar.
-> **What it is:** one list of every candidate the pipeline says needs **your** decision — most urgent first. No more digging through pipeline columns to find what's waiting.
->
-> **Chips across the top** (only the ones that apply show up):
-> • *Needs a human* / *AI flagged* — the screening handed it to a person
-> • *Replied* — they messaged us and we haven't answered yet
-> • *No reply* — we messaged, they went quiet
-> • *Declined* — not interested
-> • *Calls to review*, *Reschedule*, *Ready to send*, *Client approved*, *Client overdue*, *Offers*
->
-> **Each row tells you the next step** as one button (Take over, Nudge on WhatsApp, Open conversation, Send to the client, Schedule interview…), with a **⋯** menu for log a call / snooze.
->
-> **Tidy up in bulk:** tick several rows → *Nudge on WhatsApp*, *Snooze 1 day*, or *Drop*.
->
-> **Admins:** switch between **My accounts** and **Team** at the top right.
+### Message A — how to use the Today board
 
-### Message B — the WhatsApp inbox
+> 📋 **Your day now starts on the *Today* page**
+>
+> Open the new **Today** tab at the top of the left sidebar. It's one list of everything that needs **you** today — most urgent first. Here's all you do:
+>
+> **1. Look at the chips across the top.** Start with the red ones — *Needs a human* and *Replied*. A real person is waiting on us there. (*No reply*, *Declined* and the rest are quieter — get to them after.)
+>
+> **2. Press the blue button on the row.** It's already the next step — *Take over*, *Nudge on WhatsApp*, *Open conversation*, *Send to the client*, *Schedule interview*… Just follow it.
+>
+> **3. Not now?** Open the **⋯** menu on the row → *Snooze*. It'll come back later. Nothing gets lost.
+>
+> **4. Same job, lots of people?** Tick several rows → *Nudge on WhatsApp* / *Snooze 1 day* — one click for all of them.
+>
+> **5. Done = gone.** When you act, the row clears itself. When the list is empty, you're caught up. 🎉
+>
+> **Admins only:** use the switch at the top right to see **My accounts** (just yours) or the whole **Team**.
 
-> 💬 **New: a WhatsApp inbox — and reply alerts that don't miss anything**
->
-> **Where:** the new **WhatsApp** item in the left sidebar (with an unread badge).
-> **What it is:** one row per candidate conversation, newest first:
-> • *Needs a human* — they asked for a call, or the AI handed it over
-> • *Needs reply* — they messaged us and we haven't answered yet
-> • *Declined* — not interested
-> • *No reply* — we messaged, they went quiet
-> • *All*
->
-> **From a row:** **Open** (the live conversation), **Nudge** (send a WhatsApp follow-up), **Call now**, or **⋯ → Open job**.
->
-> Search by candidate, role or client. Replies update live.
+### Message B — how to use the WhatsApp inbox
 
-> **Also:** the **Today** board now shows **Replied**, **Declined** and **No reply** at **every stage** — not just during AI screening — so a reply that lands after shortlisting no longer slips through.
+> 💬 **The new WhatsApp inbox — where you answer candidates**
+>
+> Look for **WhatsApp** in the left sidebar. **The number on it = how many people are still waiting on a reply from us.** Aim to get it to zero.
+>
+> **1. Click it.** Newest conversations are at the top.
+>
+> **2. Open the *Needs a human* chip first** — these are people who asked for a call, or that the AI handed to a person.
+>
+> **3. Click *Open* on a row** to read the whole conversation, then hit **Nudge** to send a quick WhatsApp follow-up, or **Call now**.
+>
+> **4. That's it — answering clears the thread.** Nothing to "mark as read".
+>
+> **5. Can't find someone?** Use the **search** box (name, job or client).
+>
+> **Also new:** the **Today** page now shows **Replied / Declined / No reply** at *every* stage — so a reply that comes in after shortlisting no longer gets missed.
 
 ---
 
