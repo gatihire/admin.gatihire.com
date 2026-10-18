@@ -586,28 +586,6 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
               </p>
             </div>
             <div className="flex items-center gap-3">
-              <label className="flex cursor-pointer items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-                <Checkbox
-                  checked={includeSnoozed}
-                  onCheckedChange={(v) => {
-                    const next = v === true
-                    setIncludeSnoozed(next)
-                    void load({ scope, includeSnoozed: next, includeDone })
-                  }}
-                />
-                Show snoozed
-              </label>
-              <label className="flex cursor-pointer items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400">
-                <Checkbox
-                  checked={includeDone}
-                  onCheckedChange={(v) => {
-                    const next = v === true
-                    setIncludeDone(next)
-                    void load({ scope, includeSnoozed, includeDone: next })
-                  }}
-                />
-                Show done
-              </label>
             </div>
           </div>
 

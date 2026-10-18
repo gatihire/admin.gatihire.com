@@ -398,11 +398,11 @@ export function CandidateProfileSidebar({
 
           {/* Pipeline stage + job opening context (shown when opened from Today / WhatsApp inbox) */}
           {(stageLabel || jobOpening?.title) && (
-            <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-3.5 space-y-2">
+            <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-3 space-y-2">
               {stageLabel && (
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Pipeline stage</span>
-                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold bg-indigo-100 text-indigo-700 capitalize">
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-100 text-indigo-700 capitalize">
                     {stageLabel.replace(/_/g, " ")}
                   </span>
                 </div>
@@ -428,15 +428,15 @@ export function CandidateProfileSidebar({
                   )}
                   {jobOpening.description && (
                     <>
-                      <p className={`text-xs text-zinc-600 mt-1.5 leading-relaxed whitespace-pre-line ${jobDescExpanded ? "" : "line-clamp-4"}`}>
+                      <p className={`text-xs text-zinc-600 mt-1 leading-relaxed whitespace-pre-line ${jobDescExpanded ? "" : "line-clamp-3"}`}>
                         {jobOpening.description}
                       </p>
-                      {jobOpening.description.length > 280 && (
+                      {jobOpening.description.length > 200 && (
                         <button
                           onClick={() => setJobDescExpanded(!jobDescExpanded)}
-                          className="text-[11px] font-bold text-indigo-600 hover:underline mt-1"
+                          className="text-[11px] font-semibold text-indigo-600 hover:underline mt-0.5"
                         >
-                          {jobDescExpanded ? "Show less" : "Show full job description"}
+                          {jobDescExpanded ? "Show less" : "Show more"}
                         </button>
                       )}
                     </>
@@ -446,110 +446,63 @@ export function CandidateProfileSidebar({
             </div>
           )}
 
-          {/* Contact info row */}
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-4 text-xs text-zinc-500">
-            {c.phone && (
-              <span className="flex items-center gap-1.5">
-                <Phone className="h-3.5 w-3.5 text-zinc-400" />
-                {c.phone}
-              </span>
-            )}
-            {c.email && (
-              <span className="flex items-center gap-1.5">
-                <Mail className="h-3.5 w-3.5 text-zinc-400" />
-                <span className="truncate max-w-[200px]">{c.email}</span>
-              </span>
-            )}
-            {c.linkedin_profile && (
-              <a
-                href={c.linkedin_profile}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-1.5 text-[#0A66C2] hover:underline"
-              >
-                <ExternalLink className="h-3.5 w-3.5" />
-                LinkedIn
-              </a>
-            )}
-          </div>
-
-          {/* Action buttons */}
-          <div className="flex flex-wrap gap-2 mt-4">
-            {c.phone && (
-              <button
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold text-white transition-colors"
-                style={{ background: "#25D366" }}
-                onClick={() => { navigator.clipboard.writeText(c.phone || ""); toast({ title: "Phone copied" }) }}
-              >
-                <Phone className="h-3.5 w-3.5" /> WhatsApp
-              </button>
-            )}
-            {c.email && (
-              <button
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold text-zinc-600 bg-white border border-zinc-200 hover:bg-zinc-50 transition-colors"
-                onClick={() => { navigator.clipboard.writeText(c.email || ""); toast({ title: "Email copied" }) }}
-              >
-                <Mail className="h-3.5 w-3.5" /> Email
-              </button>
-            )}
-            {c.phone && (
-              <button
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold text-zinc-600 bg-white border border-zinc-200 hover:bg-zinc-50 transition-colors"
-                onClick={() => { navigator.clipboard.writeText(c.phone || ""); toast({ title: "Phone copied" }) }}
-              >
-                <Phone className="h-3.5 w-3.5" /> Call
-              </button>
-            )}
-            {c.file_url && (
-              <button
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold text-zinc-600 bg-white border border-zinc-200 hover:bg-zinc-50 transition-colors"
-                onClick={() => window.open(c.file_url, "_blank")}
-              >
-                <Download className="h-3.5 w-3.5" /> Resume
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* ═══════════════════════════════════════════════════════════════
-            AI MATCH ANALYSIS
-            ═══════════════════════════════════════════════════════════════ */}
-        {(aiInfo?.score != null || aiInfo?.recommendation) && (
-          <div className="px-7 py-4 border-b border-zinc-100 bg-white">
-            <p className="font-mono text-[10px] font-bold uppercase tracking-[0.1em] text-zinc-400 mb-2">
-              AI Match Analysis
-            </p>
-            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200">
-              <div className="flex flex-wrap gap-2 mb-2">
-                {aiScore != null && (
-                  <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold ${
-                    aiScore >= 7 ? "bg-emerald-100 text-emerald-700" :
-                    aiScore >= 4 ? "bg-amber-100 text-amber-700" :
-                    "bg-red-100 text-red-600"
-                  }`}>
-                    Score: {aiScore}/10
-                  </span>
-                )}
-                {aiInfo.recommendation && (
-                  <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold capitalize ${
-                    aiInfo.recommendation === "advance" ? "bg-emerald-100 text-emerald-700" :
-                    aiInfo.recommendation === "further_review" ? "bg-amber-100 text-amber-700" :
-                    "bg-red-100 text-red-600"
-                  }`}>
-                    {aiInfo.recommendation.replace(/_/g, " ")}
-                  </span>
-                )}
-              </div>
-              <p className="text-xs text-emerald-800 leading-relaxed">
-                {aiInfo.recommendation === "advance"
-                  ? "This candidate is a strong fit based on AI screening. Consider advancing to the next stage."
-                  : aiInfo.recommendation === "further_review"
-                  ? "This candidate may be a fit but needs further evaluation. Review the transcript for details."
-                  : "This candidate did not meet the screening criteria. Review the transcript for specifics."}
-              </p>
+          {/* Contact + actions */}
+          <div className="flex flex-wrap items-center justify-between gap-3 mt-4">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-600">
+              {c.phone && (
+                <span className="flex items-center gap-1.5">
+                  <Phone className="h-3.5 w-3.5 text-zinc-400" />
+                  {c.phone}
+                </span>
+              )}
+              {c.email && (
+                <span className="flex items-center gap-1.5">
+                  <Mail className="h-3.5 w-3.5 text-zinc-400" />
+                  <span className="truncate max-w-[180px]">{c.email}</span>
+                </span>
+              )}
+              {c.linkedin_profile && (
+                <a
+                  href={c.linkedin_profile}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 text-[#0A66C2] hover:underline"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  LinkedIn
+                </a>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {c.phone && (
+                <button
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 transition-colors"
+                  onClick={() => { navigator.clipboard.writeText(c.phone || ""); toast({ title: "Phone copied" }) }}
+                >
+                  <Phone className="h-3.5 w-3.5" /> Call
+                </button>
+              )}
+              {c.email && (
+                <button
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 transition-colors"
+                  onClick={() => { navigator.clipboard.writeText(c.email || ""); toast({ title: "Email copied" }) }}
+                >
+                  <Mail className="h-3.5 w-3.5" /> Email
+                </button>
+              )}
+              {c.file_url && (
+                <a
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 transition-colors"
+                  href={c.file_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <Download className="h-3.5 w-3.5" /> Resume
+                </a>
+              )}
             </div>
           </div>
-        )}
+        </div>
 
         {/* ═══════════════════════════════════════════════════════════════
             TABS
