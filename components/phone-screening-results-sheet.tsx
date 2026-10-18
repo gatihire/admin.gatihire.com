@@ -216,11 +216,14 @@ export function PhoneScreeningResultsSheet({
   open,
   onOpenChange,
   onReviewed,
+  stageLabel,
 }: {
   participantId: string | null
   open: boolean
   onOpenChange: (open: boolean) => void
   onReviewed?: () => void
+  /** Optional current pipeline stage (e.g. "shortlist") shown in the header so the HR always sees where the candidate stands. */
+  stageLabel?: string | null
 }) {
   const [loading, setLoading] = useState(false)
   const [showWhatsAppThread, setShowWhatsAppThread] = useState(false)
@@ -538,7 +541,14 @@ export function PhoneScreeningResultsSheet({
                       </span>
                     </div>
                     <div className="min-w-0">
-                      <span className="block truncate">{data.candidates?.name || "Candidate"}</span>
+                      <span className="flex items-center gap-2">
+                        <span className="truncate">{data.candidates?.name || "Candidate"}</span>
+                        {stageLabel && (
+                          <span className="inline-flex shrink-0 items-center rounded-full border border-indigo-200 bg-indigo-50 px-2 py-0.5 text-[11px] font-medium text-indigo-700">
+                            Stage: {stageLabel.replace(/_/g, " ")}
+                          </span>
+                        )}
+                      </span>
                       <SheetDescription className="text-xs">{data.candidates?.current_role || "—"}</SheetDescription>
                     </div>
                   </SheetTitle>

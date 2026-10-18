@@ -789,7 +789,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                     </div>
 
                     <div className="flex shrink-0 flex-wrap items-center gap-2">
-                      <Button size="sm" onClick={() => runPrimary(item)} disabled={busy}>
+                      <Button size="sm" onClick={() => runPrimary(item)} disabled={busy} title={item.detail || item.cta}>
                         {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
                         {item.cta}
                       </Button>
@@ -799,6 +799,15 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                           variant="outline"
                           size="sm"
                           disabled={busy}
+                          title={
+                            a.id === "call"
+                              ? "Place a manual call to the candidate right now"
+                              : a.id === "review"
+                                ? "Open the screening questions and answers"
+                                : a.id === "done"
+                                  ? "Mark handled — hides the row until anything changes"
+                                  : a.label
+                          }
                           onClick={() =>
                             a.id === "call"
                               ? callNow(item)
@@ -921,6 +930,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
         open={!!sheetItem}
         onOpenChange={(open) => !open && setSheetItem(null)}
         onReviewed={() => load({ quiet: true })}
+        stageLabel={sheetItem?.stage ?? null}
       />
 
       {/* WhatsApp conversation */}
