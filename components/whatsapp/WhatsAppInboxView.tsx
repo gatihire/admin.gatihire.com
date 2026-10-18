@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
+import dynamic from "next/dynamic"
 import { formatDistanceToNow } from "date-fns"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -17,6 +18,11 @@ import { useToast } from "@/hooks/use-toast"
 import { ToastAction } from "@/components/ui/toast"
 import { supabase } from "@/lib/supabase"
 import { WhatsAppConversationModal } from "@/components/whatsapp-conversation-modal"
+
+const CandidateProfileSidebar = dynamic(
+  () => import("@/components/candidate-profile-sidebar").then((m) => m.CandidateProfileSidebar),
+  { ssr: false }
+)
 import {
   CATEGORY_LABELS,
   CONVERSATION_CATEGORIES,
@@ -78,8 +84,31 @@ export function WhatsAppInboxView() {
   const [search, setSearch] = useState("")
   const [debounced, setDebounced] = useState("")
   const [convoItem, setConvoItem] = useState<ConversationThread | null>(null)
+  const [profileThread, setProfileThread] = useState<ConversationThread | null>(null)
+  const [profileParticipant, setProfileParticipant] = useState<any | null>(null)
+  const [profileJob, setProfileJob] = useState<any | null>(null)
   const [pending, setPending] = useState<Set<string>>(new Set())
   const [subfilter, setSubfilter] = useState<"default" | "newest" | "urgent">("default")
+
+  // Clicking the candidate name opens the same profile sidebar as the jobs
+  // pipeline, plus the job opening context fetched lazily.
+  const openProfile = (t: ConversationThread) => {
+    setProfileThread(t)
+    setProfileParticipant(null)
+    setProfileJob(null)
+    if (t.participantId) {
+      fetch(`/api/phone-screening/participants/${t.participantId}`, { credentials: "include" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((p) => setProfileParticipant(p || null))
+        .catch(() => {})
+    }
+    if (t.jobId) {
+      fetch(`/api/jobs/${t.jobId}`, { credentials: "include" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((j) => setProfileJob(j || null))
+        .catch(() => {})
+    }
+  }
 
   // Debounce the search box so each keystroke isn't its own server query.
   useEffect(() => {
@@ -452,7 +481,22 @@ export function WhatsAppInboxView() {
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="flex flex-wrap items-center gap-2">
-                        <span className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          title="View candidate profile"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            openProfile(t)
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.stopPropagation()
+                              openProfile(t)
+                            }
+                          }}
+                          className="truncate cursor-pointer text-sm font-semibold text-zinc-900 underline-offset-2 hover:underline dark:text-zinc-50"
+                        >
                           {t.candidateName}
                         </span>
                         <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${CATEGORY_STYLE[t.category]}`}>
@@ -551,6 +595,32 @@ export function WhatsAppInboxView() {
         onOpenChange={(open) => !open && setConvoItem(null)}
         onSent={() => refreshOnScreen()}
       />
+
+      {/* Candidate profile sidebar (same view as the jobs pipeline) + job opening */}
+      {profileThread && (
+        <CandidateProfileSidebar
+          candidate={{ id: profileThread.candidateId, name: profileThread.candidateName }}
+          application={null}
+          isOpen={!!profileThread}
+          onClose={() => {
+            setProfileThread(null)
+            setProfileParticipant(null)
+            setProfileJob(null)
+          }}
+          jobId={profileThread.jobId ?? undefined}
+          participant={profileParticipant}
+          stageLabel={profileThread.participantStatus ?? null}
+          jobOpening={
+            profileThread.jobTitle || profileThread.clientName || profileJob?.description
+              ? {
+                  title: profileThread.jobTitle,
+                  clientName: profileThread.clientName,
+                  description: profileJob?.description ?? null,
+                }
+              : null
+          }
+        />
+      )}
     </div>
   )
 }

@@ -88,10 +88,15 @@ interface CandidateProfileSidebarProps {
   aiInfo?: { recommendation?: string; score?: number }
   participant?: any | null
   fitScore?: number | null
+  /** Pipeline stage to display in the header (e.g. from Today / WhatsApp inbox). */
+  stageLabel?: string | null
+  /** Job opening context (title, client, description) to show in the header. */
+  jobOpening?: { title?: string | null; clientName?: string | null; description?: string | null } | null
 }
 
 export function CandidateProfileSidebar({
   candidate: rawCandidate, application, isOpen, onClose, jobId, aiInfo, participant, fitScore,
+  stageLabel, jobOpening,
 }: CandidateProfileSidebarProps) {
   const { toast } = useToast()
   const [activeTab, setActiveTab] = useState("screening")
@@ -105,6 +110,7 @@ export function CandidateProfileSidebar({
   const [questionsDraft, setQuestionsDraft] = useState<string>(participant?.generated_questions || "")
   const [fitAnalysis, setFitAnalysis] = useState<any>(null)
   const [fitLoading, setFitLoading] = useState(false)
+  const [jobDescExpanded, setJobDescExpanded] = useState(false)
 
   // Merge raw candidate data with enriched data
   const c = useMemo(() => {
@@ -389,6 +395,56 @@ export function CandidateProfileSidebar({
               </div>
             )}
           </div>
+
+          {/* Pipeline stage + job opening context (shown when opened from Today / WhatsApp inbox) */}
+          {(stageLabel || jobOpening?.title) && (
+            <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-3.5 space-y-2">
+              {stageLabel && (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Pipeline stage</span>
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold bg-indigo-100 text-indigo-700 capitalize">
+                    {stageLabel.replace(/_/g, " ")}
+                  </span>
+                </div>
+              )}
+              {jobOpening?.title && (
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Job opening</span>
+                    {jobId && (
+                      <a
+                        href={`/jobs/${jobId}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 hover:underline"
+                      >
+                        View job <ExternalLink className="h-3 w-3" />
+                      </a>
+                    )}
+                  </div>
+                  <p className="text-sm font-bold text-zinc-800 mt-0.5">{jobOpening.title}</p>
+                  {jobOpening.clientName && (
+                    <p className="text-xs text-zinc-500">{jobOpening.clientName}</p>
+                  )}
+                  {jobOpening.description && (
+                    <>
+                      <p className={`text-xs text-zinc-600 mt-1.5 leading-relaxed whitespace-pre-line ${jobDescExpanded ? "" : "line-clamp-4"}`}>
+                        {jobOpening.description}
+                      </p>
+                      {jobOpening.description.length > 280 && (
+                        <button
+                          onClick={() => setJobDescExpanded(!jobDescExpanded)}
+                          className="text-[11px] font-bold text-indigo-600 hover:underline mt-1"
+                        >
+                          {jobDescExpanded ? "Show less" : "Show full job description"}
+                        </button>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Contact info row */}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-4 text-xs text-zinc-500">

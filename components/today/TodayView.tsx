@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
+import dynamic from "next/dynamic"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
@@ -44,6 +45,11 @@ import {
 } from "lucide-react"
 import { PhoneScreeningResultsSheet } from "@/components/phone-screening-results-sheet"
 import { WhatsAppConversationModal } from "@/components/whatsapp-conversation-modal"
+
+const CandidateProfileSidebar = dynamic(
+  () => import("@/components/candidate-profile-sidebar").then((m) => m.CandidateProfileSidebar),
+  { ssr: false }
+)
 import { useToast } from "@/hooks/use-toast"
 import { useInternalPermissions } from "@/hooks/use-internal-permissions"
 import {
@@ -174,6 +180,9 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
 
   // Modals
   const [sheetItem, setSheetItem] = useState<WorkItem | null>(null)
+  const [profileItem, setProfileItem] = useState<WorkItem | null>(null)
+  const [profileParticipant, setProfileParticipant] = useState<any | null>(null)
+  const [profileJob, setProfileJob] = useState<any | null>(null)
   const [convoItem, setConvoItem] = useState<WorkItem | null>(null)
   const [callItem, setCallItem] = useState<WorkItem | null>(null)
   const [callOutcome, setCallOutcome] = useState(CALL_OUTCOMES[0])
@@ -305,6 +314,24 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
       return
     }
     setSheetItem(item)
+  }
+
+  // Open the same candidate profile sidebar used in the jobs pipeline, plus the
+  // job opening (title/client/description) fetched lazily for the header card.
+  const openProfile = (item: WorkItem) => {
+    setProfileItem(item)
+    setProfileParticipant(null)
+    setProfileJob(null)
+    if (item.participantId) {
+      api(`/api/phone-screening/participants/${item.participantId}`)
+        .then((p) => setProfileParticipant(p || null))
+        .catch(() => {})
+    }
+    if (item.jobId) {
+      api(`/api/jobs/${item.jobId}`)
+        .then((j) => setProfileJob(j || null))
+        .catch(() => {})
+    }
   }
 
   const openConversation = (item: WorkItem) => {
@@ -744,7 +771,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                       <div className="flex flex-wrap items-center gap-2">
                         <button
                           type="button"
-                          onClick={() => openResults(item)}
+                          onClick={() => openProfile(item)}
                           className="truncate text-sm font-semibold text-zinc-900 hover:underline dark:text-zinc-50"
                         >
                           {item.candidateName}
@@ -932,6 +959,46 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
         onReviewed={() => load({ quiet: true })}
         stageLabel={sheetItem?.stage ?? null}
       />
+
+      {/* Candidate profile sidebar (same view as the jobs pipeline) + job opening */}
+      {profileItem && (
+        <CandidateProfileSidebar
+          candidate={{ id: profileItem.candidateId, name: profileItem.candidateName }}
+          application={
+            profileItem.applicationId
+              ? {
+                  id: profileItem.applicationId,
+                  candidate_id: profileItem.candidateId,
+                  status: profileItem.stage ?? "",
+                  notes: "",
+                }
+              : null
+          }
+          isOpen={!!profileItem}
+          onClose={() => {
+            setProfileItem(null)
+            setProfileParticipant(null)
+            setProfileJob(null)
+          }}
+          jobId={profileItem.jobId ?? undefined}
+          aiInfo={
+            profileItem.aiScore != null || profileItem.aiRecommendation
+              ? { score: profileItem.aiScore ?? undefined, recommendation: profileItem.aiRecommendation ?? undefined }
+              : undefined
+          }
+          participant={profileParticipant}
+          stageLabel={profileItem.stage ?? null}
+          jobOpening={
+            profileItem.jobTitle || profileItem.clientName || profileJob?.description
+              ? {
+                  title: profileItem.jobTitle,
+                  clientName: profileItem.clientName,
+                  description: profileJob?.description ?? null,
+                }
+              : null
+          }
+        />
+      )}
 
       {/* WhatsApp conversation */}
       <WhatsAppConversationModal
