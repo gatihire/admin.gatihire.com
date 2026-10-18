@@ -79,6 +79,7 @@ export function WhatsAppInboxView() {
   const [debounced, setDebounced] = useState("")
   const [convoItem, setConvoItem] = useState<ConversationThread | null>(null)
   const [pending, setPending] = useState<Set<string>>(new Set())
+  const [subfilter, setSubfilter] = useState<"default" | "newest" | "urgent">("default")
 
   // Debounce the search box so each keystroke isn't its own server query.
   useEffect(() => {
@@ -300,6 +301,26 @@ export function WhatsAppInboxView() {
 
   const hasMore = items.length < filteredTotal
 
+  const displayItems = useMemo(() => {
+    const list = items.slice()
+    if (subfilter === "newest") {
+      list.sort(
+        (a, b) =>
+          new Date(b.lastActivityAt || 0).getTime() - new Date(a.lastActivityAt || 0).getTime() ||
+          a.candidateName.localeCompare(b.candidateName)
+      )
+    } else if (subfilter === "urgent") {
+      const catRank = (c: ConversationCategory) =>
+        c === "needs_human" ? 0 : c === "needs_reply" ? 1 : c === "declined" ? 2 : c === "no_reply" ? 3 : 4
+      list.sort(
+        (a, b) =>
+          catRank(a.category) - catRank(b.category) ||
+          new Date(b.lastActivityAt || 0).getTime() - new Date(a.lastActivityAt || 0).getTime()
+      )
+    }
+    return list
+  }, [items, subfilter])
+
   return (
     <div className="mx-auto max-w-5xl p-4 sm:p-6">
       <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
@@ -351,6 +372,34 @@ export function WhatsAppInboxView() {
         })}
       </div>
 
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <span className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">Sort</span>
+        {(
+          [
+            { key: "default" as const, label: "Recommended" },
+            { key: "newest" as const, label: "Newest" },
+            { key: "urgent" as const, label: "Most urgent" },
+          ]
+        ).map((o) => {
+          const active = subfilter === o.key
+          return (
+            <button
+              key={o.key}
+              type="button"
+              aria-pressed={active}
+              onClick={() => setSubfilter(o.key)}
+              className={`rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                active
+                  ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300"
+                  : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              }`}
+            >
+              {o.label}
+            </button>
+          )
+        })}
+      </div>
+
       <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
         {loading && items.length === 0 ? (
           <div className="space-y-3 p-5">
@@ -384,7 +433,7 @@ export function WhatsAppInboxView() {
           </div>
         ) : (
           <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
-            {items.map((t) => {
+            {displayItems.map((t) => {
               const busy =
                 pending.has(`nudge:${t.participantId}`) ||
                 pending.has(`call:${t.participantId}`) ||
