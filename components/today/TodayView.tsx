@@ -84,6 +84,8 @@ const SNOOZE_OPTIONS: Array<{ hours: number; label: string }> = [
 
 const CALL_OUTCOMES = ["connected", "no answer", "busy", "voicemail", "wrong number", "callback booked"]
 
+const PAGE_SIZE = 50
+
 const KIND_STYLE: Record<WorkItemKind, string> = {
   human: "bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/40 dark:text-rose-300 dark:border-rose-900",
   ghosted: "bg-slate-100 text-slate-700 border-slate-300 dark:bg-slate-900/50 dark:text-slate-300 dark:border-slate-700",
@@ -178,6 +180,10 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
   const [callNote, setCallNote] = useState("")
   const [callbackItem, setCallbackItem] = useState<WorkItem | null>(null)
   const [callbackAt, setCallbackAt] = useState(() => toLocalInput(new Date(Date.now() + 60 * 60 * 1000)))
+  const [postCallItem, setPostCallItem] = useState<WorkItem | null>(null)
+  const [postCallOutcome, setPostCallOutcome] = useState(CALL_OUTCOMES[0])
+  const [postCallNote, setPostCallNote] = useState("")
+  const [postCallNudge, setPostCallNudge] = useState(true)
   const [dropOpen, setDropOpen] = useState(false)
   const [dropIds, setDropIds] = useState<string[]>([])
 
@@ -227,6 +233,11 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
     }
     return list
   }, [items, kindFilter, subfilter])
+
+  // Paginate so a 150+ item queue never renders as one endless page.
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE)
+  useEffect(() => setVisibleCount(PAGE_SIZE), [kindFilter, subfilter, scope, includeSnoozed, includeDone])
+  const visible = useMemo(() => filtered.slice(0, visibleCount), [filtered, visibleCount])
 
   const presentKinds = useMemo(() => WORK_ITEM_KINDS.filter((k) => (counts[k] || 0) > 0), [counts])
 
@@ -311,14 +322,21 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
         method: "POST",
         body: JSON.stringify({ participantId: item.participantId }),
       })
-      toast({
-        title: res?.callPlaced === false ? "Call not placed" : "Calling now",
-        description:
-          res?.callPlaced === false
-            ? res?.error || res?.reason || "The provider did not accept the call."
-            : `Placing a call to ${item.candidateName}.`,
-        variant: res?.callPlaced === false ? "destructive" : undefined,
-      })
+      if (res?.callPlaced === false) {
+        toast({
+          title: "Call not placed",
+          description: res?.error || res?.reason || "The provider did not accept the call.",
+          variant: "destructive",
+        })
+      } else {
+        toast({ title: "Calling now", description: `Placing a call to ${item.candidateName}.` })
+        // Offer to log the outcome and/or nudge right after — then the normal
+        // flow resumes on the next load.
+        setPostCallOutcome(CALL_OUTCOMES[0])
+        setPostCallNote("")
+        setPostCallNudge(true)
+        setPostCallItem(item)
+      }
       await load({ quiet: true })
     })
 
@@ -684,7 +702,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                 </p>
               </div>
             ) : (
-              filtered.map((item) => {
+              visible.map((item) => {
                 const Icon = KIND_ICON[item.kind]
                 const grouped = (item.groupCount ?? 0) > 1
                 const busy =
@@ -820,6 +838,14 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
             )}
           </div>
 
+          {filtered.length > visible.length && (
+            <div className="border-t border-zinc-100 px-5 py-3 text-center dark:border-zinc-800">
+              <Button variant="outline" size="sm" onClick={() => setVisibleCount((c) => c + PAGE_SIZE)}>
+                Load more ({visible.length} of {filtered.length} shown)
+              </Button>
+            </div>
+          )}
+
           {(stats?.with_client ?? 0) > 0 && (
             <div className="border-t border-zinc-100 px-5 py-3 text-center text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
               {stats!.with_client} candidate{stats!.with_client === 1 ? " is" : "s are"} with clients. Nothing to do until they decide.
@@ -907,6 +933,80 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
         onOpenChange={(open) => !open && setConvoItem(null)}
         onSent={() => load({ quiet: true })}
       />
+
+      {/* Post-call follow-up: log the outcome and optionally nudge, then resume */}
+      <Dialog open={!!postCallItem} onOpenChange={(open) => !open && setPostCallItem(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Call placed — what happened?</DialogTitle>
+            <DialogDescription>
+              {postCallItem ? `${postCallItem.candidateName} · ${postCallItem.jobTitle}` : ""}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">Outcome</label>
+              <select
+                value={postCallOutcome}
+                onChange={(e) => setPostCallOutcome(e.target.value)}
+                className="w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+              >
+                {CALL_OUTCOMES.map((o) => (
+                  <option key={o} value={o}>
+                    {o}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">Note (optional)</label>
+              <Textarea value={postCallNote} onChange={(e) => setPostCallNote(e.target.value)} rows={3} placeholder="What was said…" />
+            </div>
+            <label className="flex cursor-pointer items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300">
+              <Checkbox checked={postCallNudge} onCheckedChange={(v) => setPostCallNudge(v === true)} />
+              Also send a WhatsApp nudge with the details after the call
+            </label>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">
+              Saving logs the call and resumes the normal flow — the row returns on its own when anything changes.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPostCallItem(null)}>
+              Skip
+            </Button>
+            <Button
+              disabled={!!postCallItem && pending.has(`postcall:${postCallItem.key}`)}
+              onClick={async () => {
+                if (!postCallItem) return
+                const item = postCallItem
+                await withPending(`postcall:${item.key}`, async () => {
+                  await applyWorkItems([item.applicationId], {
+                    action: "log_call",
+                    outcome: postCallOutcome,
+                    note: postCallNote,
+                  })
+                  if (postCallNudge && item.participantId) {
+                    try {
+                      await nudgeOne(item)
+                      toast({ title: "Nudge sent", description: `WhatsApp message sent to ${item.candidateName}.` })
+                    } catch {
+                      toast({
+                        title: "Nudge failed",
+                        description: "The call was logged but the WhatsApp nudge did not go out.",
+                        variant: "destructive",
+                      })
+                    }
+                  }
+                  await load({ quiet: true })
+                })
+                setPostCallItem(null)
+              }}
+            >
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Log-call dialog */}
       <Dialog open={!!callItem} onOpenChange={(open) => !open && setCallItem(null)}>
