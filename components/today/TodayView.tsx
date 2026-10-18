@@ -164,6 +164,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
   const [error, setError] = useState<string | null>(null)
   const [scope, setScope] = useState<Scope>(defaultScope)
   const [kindFilter, setKindFilter] = useState<"all" | WorkItemKind>("all")
+  const [subfilter, setSubfilter] = useState<"default" | "newest" | "urgent">("default")
   const [includeSnoozed, setIncludeSnoozed] = useState(false)
   const [includeDone, setIncludeDone] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -217,10 +218,15 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
   const counts = useMemo(() => data?.counts ?? {}, [data])
   const rail = data?.rail
 
-  const filtered = useMemo(
-    () => (kindFilter === "all" ? items : items.filter((i) => i.kind === kindFilter)),
-    [items, kindFilter]
-  )
+  const filtered = useMemo(() => {
+    let list = kindFilter === "all" ? items : items.filter((i) => i.kind === kindFilter)
+    if (subfilter === "newest") {
+      list = [...list].sort((a, b) => b.ageHours - a.ageHours || a.key.localeCompare(b.key))
+    } else if (subfilter === "urgent") {
+      list = [...list].sort((a, b) => a.priority - b.priority || a.ageHours - b.ageHours)
+    }
+    return list
+  }, [items, kindFilter, subfilter])
 
   const presentKinds = useMemo(() => WORK_ITEM_KINDS.filter((k) => (counts[k] || 0) > 0), [counts])
 
@@ -570,6 +576,32 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                 count={counts[k] || 0}
               />
             ))}
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                type="button"
+                aria-pressed={subfilter === "default"}
+                onClick={() => setSubfilter("default")}
+                className={`rounded-full border px-2 py-0.5 text-[11px] transition-colors ${subfilter === "default" ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300" : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"}`}
+              >
+                Default
+              </button>
+              <button
+                type="button"
+                aria-pressed={subfilter === "newest"}
+                onClick={() => setSubfilter("newest")}
+                className={`rounded-full border px-2 py-0.5 text-[11px] transition-colors ${subfilter === "newest" ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300" : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"}`}
+              >
+                Newest
+              </button>
+              <button
+                type="button"
+                aria-pressed={subfilter === "urgent"}
+                onClick={() => setSubfilter("urgent")}
+                className={`rounded-full border px-2 py-0.5 text-[11px] transition-colors ${subfilter === "urgent" ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300" : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"}`}
+              >
+                Urgent
+              </button>
+            </div>
             {selected.size > 0 && filtered.length > 0 && (
               <button
                 type="button"
@@ -581,7 +613,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                   }
                   setSelected(new Set([...Array.from(selected), ...allOnFilter]))
                 }}
-                className="ml-auto text-xs text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+                className="text-xs text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
               >
                 Select all on this filter
               </button>
@@ -692,9 +724,13 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
 
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-50">
+                        <button
+                          type="button"
+                          onClick={() => openResults(item)}
+                          className="truncate text-sm font-semibold text-zinc-900 hover:underline dark:text-zinc-50"
+                        >
                           {item.candidateName}
-                        </span>
+                        </button>
                         <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${KIND_STYLE[item.kind]}`}>
                           {item.kindLabel}
                         </span>
@@ -724,7 +760,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
 
                       <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-200">{item.title}</p>
                       <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-                        {item.clientName || item.candidateMeta || ""}
+                        {item.clientName || ""}
                       </p>
                       {item.detail && <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{item.detail}</p>}
                       {item.quote && (
