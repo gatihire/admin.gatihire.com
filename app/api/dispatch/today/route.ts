@@ -101,6 +101,20 @@ async function fetchWorkStates(ids: string[]): Promise<{ data: any[]; error: any
   return fetchInChunks({ table: "work_item_states", select: columns, column: "application_id", ids })
 }
 
+function isMissingDbObject(err: any): boolean {
+  const code = String(err?.code || "")
+  const msg = String(err?.message || "").toLowerCase()
+  return (
+    code === "42P01" ||
+    code === "PGRST106" ||
+    code === "42703" ||
+    code === "PGRST204" ||
+    msg.includes("does not exist") ||
+    (msg.includes("relation") && msg.includes("does not exist")) ||
+    (msg.includes("function") && msg.includes("does not exist"))
+  )
+}
+
 type Scope = "mine" | "team"
 
 export async function GET(request: NextRequest) {
@@ -311,7 +325,42 @@ export async function GET(request: NextRequest) {
       state: stateByApp.get(String(a.id)) ?? null,
     }))
 
-  const items = groupOverdue(deriveWorkItems(inputs, { now, includeSnoozed, includeDone }))
+  // Try DB-backed path first (view + counts) with safe fallback
+  let items = groupOverdue(deriveWorkItems(inputs, { now, includeSnoozed, includeDone }))
+  try {
+    const countsRes = await (supabaseAdmin as any)
+      .rpc("today_inbox_counts", { include_snoozed: includeSnoozed, include_done: includeDone, now_t: now.toISOString() })
+    if (countsRes?.error && !isMissingDbObject(countsRes.error)) throw countsRes.error
+    if (!countsRes?.error && countsRes?.data) {
+      const vw = await (supabaseAdmin as any)
+        .from("today_work_items")
+        .select("*")
+        .limit(5000)
+      if (vw?.error && !isMissingDbObject(vw.error)) throw vw?.error
+      if (!vw?.error && Array.isArray(vw.data)) {
+        const mapped = vw.data
+          .map((r: any) => {
+            const app = activeApps.find((a) => String(a.id) === String(r.application_id))
+            if (!app || !app.jobs || !app.candidates) return null
+            const p = participantByKey.get(`${app.job_id}:${app.candidate_id}`)
+            return {
+              application: app,
+              job: app.jobs,
+              candidate: app.candidates,
+              participant: p ?? null,
+              shortlist: shareByApp.get(String(app.id)) ?? null,
+              interview: interviewByApp.get(String(app.id)) ?? null,
+              state: stateByApp.get(String(app.id)) ?? null,
+            }
+          })
+          .filter(Boolean) as WorkItemInput[]
+        items = groupOverdue(deriveWorkItems(mapped, { now, includeSnoozed, includeDone }))
+      }
+    }
+  } catch (e) {
+    // fall back to full Node path
+  }
+
 
   // ── Header stats ───────────────────────────────────────────────────────────
   const stats: DispatchStats = {
