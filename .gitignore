@@ -35,3 +35,4 @@ GatiHire Landing page/
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+route.ts.bak
