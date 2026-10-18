@@ -1,23 +1,26 @@
--- Clean slate
-drop function if exists public.today_inbox_counts(boolean, boolean, timestamptz) cascade;
-drop function if exists public.today_work_item_kind(text,text,timestamptz,timestamptz,text,text,text,text,timestamptz,timestamptz,timestamptz,int,boolean,boolean,timestamptz,text,text,timestamptz,timestamptz) cascade;
-drop function if exists public.today_waiting_since(text,timestamptz,timestamptz,text,timestamptz,timestamptz,timestamptz,timestamptz) cascade;
-drop function if exists public.hours_between(timestamptz,timestamptz) cascade;
-drop view if exists public.today_work_items cascade;
-
--- 1. hours_between
-create function public.hours_between(from_t timestamptz, to_t timestamptz)
+-- 1. time difference hours
+create or replace function public.hours_between(from_t timestamptz, to_t timestamptz)
 returns numeric
-language sql immutable as $$
+language sql
+immutable
+as $$
   select greatest(0, extract(epoch from (to_t - from_t)) / 3600.0);
 $$;
 
--- 2. waiting since
-create function public.today_waiting_since(
-  app_status text, app_updated_at timestamptz, app_applied_at timestamptz,
-  p_status text, p_updated_at timestamptz, p_whatsapp_sent_at timestamptz,
-  sl_created_at timestamptz, iv_scheduled_at timestamptz
-) returns timestamptz language sql stable as $$
+-- 2. compute waitingSince
+create or replace function public.today_waiting_since(
+  app_status text,
+  app_updated_at timestamptz,
+  app_applied_at timestamptz,
+  p_status text,
+  p_updated_at timestamptz,
+  p_whatsapp_sent_at timestamptz,
+  sl_created_at timestamptz,
+  iv_scheduled_at timestamptz
+) returns timestamptz
+language sql
+stable
+as $$
   select coalesce(
     case when lower(app_status)='ai_screen' then coalesce(p_whatsapp_sent_at,p_updated_at,app_updated_at,app_applied_at) end,
     case when lower(app_status) in ('ai_screen','hr_review','reply','declined','call','hold') then coalesce(p_updated_at,app_updated_at,app_applied_at) end,
@@ -28,15 +31,30 @@ create function public.today_waiting_since(
   );
 $$;
 
--- 3. kind
-create function public.today_work_item_kind(
-  app_status text, app_updated_at timestamptz, app_applied_at timestamptz,
-  p_status text, p_review_status text, p_whatsapp_response text, p_whatsapp_reply_text text,
-  p_whatsapp_reply_at timestamptz, p_whatsapp_sent_at timestamptz, p_updated_at timestamptz,
-  p_outreach_nudge_count int, p_needs_manual_followup boolean, p_ai_suggests_rejection boolean,
-  sl_created_at timestamptz, sl_status text, iv_status text, iv_scheduled_at timestamptz,
+-- 3. kind determination
+create or replace function public.today_work_item_kind(
+  app_status text,
+  app_updated_at timestamptz,
+  app_applied_at timestamptz,
+  p_status text,
+  p_review_status text,
+  p_whatsapp_response text,
+  p_whatsapp_reply_text text,
+  p_whatsapp_reply_at timestamptz,
+  p_whatsapp_sent_at timestamptz,
+  p_updated_at timestamptz,
+  p_outreach_nudge_count int,
+  p_needs_manual_followup boolean,
+  p_ai_suggests_rejection boolean,
+  sl_created_at timestamptz,
+  sl_status text,
+  iv_status text,
+  iv_scheduled_at timestamptz,
   now_t timestamptz default now()
-) returns text language sql stable as $$
+) returns text
+language sql
+stable
+as $$
 with base as (
   select
     lower(coalesce(app_status,'')) as s,
@@ -89,7 +107,7 @@ end;
 $$;
 
 -- 4. view
-create view public.today_work_items
+create or replace view public.today_work_items
 with (security_invoker = true)
 as
 select
@@ -112,7 +130,7 @@ left join public.work_item_states st on st.application_id=a.id
 where lower(coalesce(a.status,'')) in ('ai_screen','hr_review','shortlist','client_review','interview','offer');
 
 -- 5. counts
-create function public.today_inbox_counts(include_snoozed boolean default false, include_done boolean default false, now_t timestamptz default now())
+create or replace function public.today_inbox_counts(include_snoozed boolean default false, include_done boolean default false, now_t timestamptz default now())
 returns jsonb language sql stable security invoker as $$
   with t as (
     select
