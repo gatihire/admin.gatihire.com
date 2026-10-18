@@ -235,10 +235,12 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
 
   const filtered = useMemo(() => {
     let list = kindFilter === "all" ? items : items.filter((i) => i.kind === kindFilter)
+    // ageHours = time waiting, so the newest items have the SMALLEST age.
     if (subfilter === "newest") {
-      list = [...list].sort((a, b) => b.ageHours - a.ageHours || a.key.localeCompare(b.key))
+      list = [...list].sort((a, b) => a.ageHours - b.ageHours || a.key.localeCompare(b.key))
     } else if (subfilter === "urgent") {
-      list = [...list].sort((a, b) => a.priority - b.priority || a.ageHours - b.ageHours)
+      // priority is higher = more urgent (same direction as the engine's default sort).
+      list = [...list].sort((a, b) => b.priority - a.priority || b.ageHours - a.ageHours)
     }
     return list
   }, [items, kindFilter, subfilter])
