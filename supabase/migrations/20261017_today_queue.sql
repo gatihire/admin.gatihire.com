@@ -109,6 +109,14 @@ end;
 $$;
 
 -- 4. view
+-- The three 1:N joins below use `left join lateral ... limit 1` so the view
+-- emits exactly ONE row per application. Plain joins fanned out (an application
+-- with 2 participants × 2 shares × 2 interviews produced 8 rows), which
+-- inflated counts and put the same candidate on the board several times.
+-- The lateral winners mirror the dispatch engine's TS-side map rules:
+--   participant: newest first (engine keeps the newest per job+candidate)
+--   share:       a pending share beats decided/withdrawn (still needs client)
+--   interview:   a rescheduled interview beats completed/cancelled
 create or replace view public.today_work_items
 with (security_invoker = true)
 as
@@ -125,13 +133,31 @@ select
 from public.applications a
 left join public.jobs j on j.id=a.job_id
 left join public.candidates c on c.id=a.candidate_id
-left join public.phone_screening_participants p on p.job_id=a.job_id and p.candidate_id=a.candidate_id
-left join public.shortlist_share_candidates sl on sl.application_id=a.id
-left join public.job_interviews iv on iv.application_id=a.id
+left join lateral (
+  select p.* from public.phone_screening_participants p
+  where p.job_id=a.job_id and p.candidate_id=a.candidate_id
+  order by p.updated_at desc nulls last, p.id asc
+  limit 1
+) p on true
+left join lateral (
+  select sl.* from public.shortlist_share_candidates sl
+  where sl.application_id=a.id
+  order by (lower(coalesce(sl.status,''))='pending') desc, sl.id asc
+  limit 1
+) sl on true
+left join lateral (
+  select iv.* from public.job_interviews iv
+  where iv.application_id=a.id
+  order by (lower(coalesce(iv.status,''))='rescheduled') desc, iv.id asc
+  limit 1
+) iv on true
 left join public.work_item_states st on st.application_id=a.id
 where lower(coalesce(a.status,'')) in ('ai_screen','applied','hr_review','shortlist','client_review','interview','offer');
 
 -- 5. counts
+-- Same lateral collapse as the view: one row per application, or the total
+-- double-counts every application whose participant/share/interview history has
+-- more than one row (this was the SQL-says-187 vs board-says-69 parity gap).
 create or replace function public.today_inbox_counts(include_snoozed boolean default false, include_done boolean default false, now_t timestamptz default now())
 returns jsonb language sql stable security invoker as $$
   with t as (
@@ -145,9 +171,24 @@ returns jsonb language sql stable security invoker as $$
       coalesce(st.done_at,'epoch')::timestamptz as done_at,
       public.today_waiting_since(a.status,a.updated_at,a.applied_at,p.status,p.updated_at,p.whatsapp_sent_at,sl.created_at,iv.scheduled_at) as ws
     from public.applications a
-    left join public.phone_screening_participants p on p.job_id=a.job_id and p.candidate_id=a.candidate_id
-    left join public.shortlist_share_candidates sl on sl.application_id=a.id
-    left join public.job_interviews iv on iv.application_id=a.id
+    left join lateral (
+      select p.* from public.phone_screening_participants p
+      where p.job_id=a.job_id and p.candidate_id=a.candidate_id
+      order by p.updated_at desc nulls last, p.id asc
+      limit 1
+    ) p on true
+    left join lateral (
+      select sl.* from public.shortlist_share_candidates sl
+      where sl.application_id=a.id
+      order by (lower(coalesce(sl.status,''))='pending') desc, sl.id asc
+      limit 1
+    ) sl on true
+    left join lateral (
+      select iv.* from public.job_interviews iv
+      where iv.application_id=a.id
+      order by (lower(coalesce(iv.status,''))='rescheduled') desc, iv.id asc
+      limit 1
+    ) iv on true
     left join public.work_item_states st on st.application_id=a.id
     where lower(coalesce(a.status,'')) in ('ai_screen','applied','hr_review','shortlist','client_review','interview','offer')
   )

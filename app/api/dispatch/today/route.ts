@@ -342,29 +342,41 @@ export async function GET(request: NextRequest) {
       .rpc("today_inbox_counts", { include_snoozed: includeSnoozed, include_done: includeDone, now_t: now.toISOString() })
     if (countsRes?.error && !isMissingDbObject(countsRes.error)) throw countsRes.error
     if (!countsRes?.error && countsRes?.data) {
-      const vw = await (supabaseAdmin as any)
-        .from("today_work_items")
-        .select("*")
-        .limit(5000)
+      // PostgREST caps a single response at the project's `max-rows` (1000 by
+      // default), so a bare `.limit(5000)` silently returned only the first
+      // 1000 of ~2200 view rows — the board showed an arbitrary ~45% window of
+      // the queue (and dropped rows inconsistently between kinds). Page it.
+      const vw = await fetchAll<any>((from, to) =>
+        (supabaseAdmin as any)
+          .from("today_work_items")
+          .select("*")
+          .order("application_id", { ascending: true })
+          .range(from, to)
+      )
       if (vw?.error && !isMissingDbObject(vw.error)) throw vw?.error
       if (!vw?.error && Array.isArray(vw.data)) {
-        const mapped = vw.data
-          .map((r: any) => {
-            const app = activeApps.find((a) => String(a.id) === String(r.application_id))
-            if (!app || !app.jobs || !app.candidates) return null
-            const p = participantByKey.get(`${app.job_id}:${app.candidate_id}`)
-            return {
-              application: app,
-              job: app.jobs,
-              candidate: app.candidates,
-              participant: p ?? null,
-              shortlist: shareByApp.get(String(app.id)) ?? null,
-              interview: interviewByApp.get(String(app.id)) ?? null,
-              state: stateByApp.get(String(app.id)) ?? null,
-            }
+        // The view's participant/share/interview joins fan out: one application
+        // can emit several rows, and deriving per row put the same candidate on
+        // the board 2–4 times (duplicate React keys, inflated chip counts).
+        // We re-derive from our own maps anyway, so one input per application
+        // is all the view needs to hand us.
+        const activeAppById = new Map(activeApps.map((a) => [String(a.id), a]))
+        const inputsByApp = new Map<string, WorkItemInput>()
+        for (const r of vw.data) {
+          const app = activeAppById.get(String(r.application_id))
+          if (!app || !app.jobs || !app.candidates) continue
+          const p = participantByKey.get(`${app.job_id}:${app.candidate_id}`)
+          inputsByApp.set(String(app.id), {
+            application: app,
+            job: app.jobs,
+            candidate: app.candidates,
+            participant: p ?? null,
+            shortlist: shareByApp.get(String(app.id)) ?? null,
+            interview: interviewByApp.get(String(app.id)) ?? null,
+            state: stateByApp.get(String(app.id)) ?? null,
           })
-          .filter(Boolean) as WorkItemInput[]
-        items = groupOverdue(deriveWorkItems(mapped, { now, includeSnoozed, includeDone }))
+        }
+        items = groupOverdue(deriveWorkItems([...inputsByApp.values()], { now, includeSnoozed, includeDone }))
       }
     }
   } catch (e) {
