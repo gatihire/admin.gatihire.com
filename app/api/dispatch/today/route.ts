@@ -22,7 +22,11 @@ export const runtime = "nodejs"
 
 // Statuses that can still have work waiting on a human. `hired` / `rejected` are
 // done, and `applied` is handled automatically by the AI screen.
-const ACTIVE_STATUSES = ["ai_screen", "hr_review", "shortlist", "client_review", "interview", "offer"]
+// `applied` belongs here: the AI screen moves nobody forward on its own, so a
+// candidate who replied, declined or got flagged while sitting in `applied`
+// must still reach a human — without it the Reply/Decline/Flagged views miss
+// the bulk of the queue.
+const ACTIVE_STATUSES = ["applied", "ai_screen", "hr_review", "shortlist", "client_review", "interview", "offer"]
 const SHORTLISTED_OR_LATER = ["shortlist", "client_review", "interview", "offer", "hired"]
 
 const MAX_APPLICATIONS = 20000

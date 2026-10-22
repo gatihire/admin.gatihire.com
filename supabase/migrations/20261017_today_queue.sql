@@ -22,8 +22,8 @@ language sql
 stable
 as $$
   select coalesce(
-    case when lower(app_status)='ai_screen' then coalesce(p_whatsapp_sent_at,p_updated_at,app_updated_at,app_applied_at) end,
-    case when lower(app_status) in ('ai_screen','hr_review','reply','declined','call','hold') then coalesce(p_updated_at,app_updated_at,app_applied_at) end,
+    case when lower(app_status) in ('ai_screen','applied') then coalesce(p_whatsapp_sent_at,p_updated_at,app_updated_at,app_applied_at) end,
+    case when lower(app_status) in ('ai_screen','applied','hr_review','reply','declined','call','hold') then coalesce(p_updated_at,app_updated_at,app_applied_at) end,
     case when lower(app_status) in ('shortlist','client_review','overdue') then coalesce(sl_created_at,app_updated_at,app_applied_at) end,
     case when lower(app_status) in ('resched','interview') then coalesce(iv_scheduled_at,app_updated_at,app_applied_at) end,
     case when lower(app_status)='offer' then coalesce(app_updated_at,app_applied_at) end,
@@ -70,7 +70,9 @@ with base as (
 select case
   when (select (not live_call) and declined from base) then 'declined'
   when (select (not live_call) and has_unanswered from base) then 'reply'
-  when (select s from base)='ai_screen' then
+  -- 'applied' shares the ai_screen branch: the AI screen never advances anyone
+  -- on its own, so candidates parked in applied must surface replies/flags.
+  when (select s from base) in ('ai_screen','applied') then
     case
       when (select (not live_call) and (not declined) and wants_human from base) then 'human'
       when ((select ps from base) in ('needs_review','needs_manual_followup','unreachable','failed') or coalesce(p_needs_manual_followup,false) or coalesce(p_ai_suggests_rejection,false)) and (not (select live_call from base)) then 'human'
@@ -127,7 +129,7 @@ left join public.phone_screening_participants p on p.job_id=a.job_id and p.candi
 left join public.shortlist_share_candidates sl on sl.application_id=a.id
 left join public.job_interviews iv on iv.application_id=a.id
 left join public.work_item_states st on st.application_id=a.id
-where lower(coalesce(a.status,'')) in ('ai_screen','hr_review','shortlist','client_review','interview','offer');
+where lower(coalesce(a.status,'')) in ('ai_screen','applied','hr_review','shortlist','client_review','interview','offer');
 
 -- 5. counts
 create or replace function public.today_inbox_counts(include_snoozed boolean default false, include_done boolean default false, now_t timestamptz default now())
@@ -147,7 +149,7 @@ returns jsonb language sql stable security invoker as $$
     left join public.shortlist_share_candidates sl on sl.application_id=a.id
     left join public.job_interviews iv on iv.application_id=a.id
     left join public.work_item_states st on st.application_id=a.id
-    where lower(coalesce(a.status,'')) in ('ai_screen','hr_review','shortlist','client_review','interview','offer')
+    where lower(coalesce(a.status,'')) in ('ai_screen','applied','hr_review','shortlist','client_review','interview','offer')
   )
   select jsonb_build_object('total', count(*) filter (where kind is not null and (include_snoozed or not is_snoozed) and (include_done or done_at < ws)))
   from t;

@@ -55,6 +55,8 @@ import { useInternalPermissions } from "@/hooks/use-internal-permissions"
 import {
   formatAge,
   kindLabel,
+  nextStageFor,
+  stageLabel,
   WORK_ITEM_KINDS,
   type WorkItem,
   type WorkItemKind,
@@ -89,6 +91,13 @@ const SNOOZE_OPTIONS: Array<{ hours: number; label: string }> = [
 ]
 
 const CALL_OUTCOMES = ["connected", "no answer", "busy", "voicemail", "wrong number", "callback booked"]
+
+// Structured interview answers — the form a human fills after speaking to the
+// candidate, so every manual conversation leaves the same record behind.
+const COMM_RATINGS = ["Excellent", "Good", "Average", "Poor"]
+const FIT_RATINGS = ["Strong fit", "Partial fit", "Weak fit"]
+const SALARY_CHECKS = ["Within band", "Above band", "Below band", "Not discussed"]
+const DECISIONS = ["Advance", "Hold", "Reject"] as const
 
 const PAGE_SIZE = 50
 
@@ -184,15 +193,20 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
   const [profileParticipant, setProfileParticipant] = useState<any | null>(null)
   const [profileJob, setProfileJob] = useState<any | null>(null)
   const [convoItem, setConvoItem] = useState<WorkItem | null>(null)
-  const [callItem, setCallItem] = useState<WorkItem | null>(null)
-  const [callOutcome, setCallOutcome] = useState(CALL_OUTCOMES[0])
-  const [callNote, setCallNote] = useState("")
+  // One interview form serves both "Call manually → post-call" and "Log a call"
+  // — the same questions, the same record. `mode` only controls the extras
+  // (post-call offers a WhatsApp nudge; manual log does not).
+  const [interview, setInterview] = useState<{ item: WorkItem; mode: "post_call" | "log" } | null>(null)
+  const [ivOutcome, setIvOutcome] = useState(CALL_OUTCOMES[0])
+  const [ivComm, setIvComm] = useState(COMM_RATINGS[1])
+  const [ivFit, setIvFit] = useState(FIT_RATINGS[0])
+  const [ivSalary, setIvSalary] = useState(SALARY_CHECKS[3])
+  const [ivNotice, setIvNotice] = useState("")
+  const [ivDecision, setIvDecision] = useState<(typeof DECISIONS)[number] | "">("")
+  const [ivNote, setIvNote] = useState("")
+  const [ivNudge, setIvNudge] = useState(true)
   const [callbackItem, setCallbackItem] = useState<WorkItem | null>(null)
   const [callbackAt, setCallbackAt] = useState(() => toLocalInput(new Date(Date.now() + 60 * 60 * 1000)))
-  const [postCallItem, setPostCallItem] = useState<WorkItem | null>(null)
-  const [postCallOutcome, setPostCallOutcome] = useState(CALL_OUTCOMES[0])
-  const [postCallNote, setPostCallNote] = useState("")
-  const [postCallNudge, setPostCallNudge] = useState(true)
   const [dropOpen, setDropOpen] = useState(false)
   const [dropIds, setDropIds] = useState<string[]>([])
 
@@ -359,15 +373,93 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
         })
       } else {
         toast({ title: "Calling now", description: `Placing a call to ${item.candidateName}.` })
-        // Offer to log the outcome and/or nudge right after — then the normal
-        // flow resumes on the next load.
-        setPostCallOutcome(CALL_OUTCOMES[0])
-        setPostCallNote("")
-        setPostCallNudge(true)
-        setPostCallItem(item)
+        // Offer the interview form right after — outcome, answers, decision.
+        openInterview(item, "post_call")
       }
       await load({ quiet: true })
     })
+
+  // ── interview form ──────────────────────────────────────────────────────
+  const openInterview = (item: WorkItem, mode: "post_call" | "log") => {
+    setIvOutcome(CALL_OUTCOMES[0])
+    setIvComm(COMM_RATINGS[1])
+    setIvFit(FIT_RATINGS[0])
+    setIvSalary(SALARY_CHECKS[3])
+    setIvNotice("")
+    setIvDecision("")
+    setIvNote("")
+    setIvNudge(true)
+    setInterview({ item, mode })
+  }
+
+  /** Move the candidate one pipeline step forward (the "not done, advance" action). */
+  const advanceStage = (item: WorkItem, target?: string) =>
+    withPending(`advance:${item.key}`, async () => {
+      const to = target || nextStageFor(item.stage)
+      await api(`/api/applications/${item.applicationId}`, {
+        method: "PUT",
+        body: JSON.stringify({ status: to, origin: "today" }),
+      })
+      toast({
+        title: `Moved to ${stageLabel(to)}`,
+        description: `${item.candidateName} is one step ahead in ${item.jobTitle}.`,
+      })
+      await load({ quiet: true })
+    })
+
+  /**
+   * Save the interview form: always log the call with the structured answers,
+   * then act on the decision — Advance moves a stage, Reject drops the
+   * application. Nothing here leaves the row as a bare "done".
+   */
+  const saveInterview = () => {
+    if (!interview) return
+    const { item, mode } = interview
+    return withPending(`iv:${item.key}`, async () => {
+      const connected = ivOutcome === "connected"
+      const noteParts: string[] = []
+      if (connected) {
+        noteParts.push(`Communication: ${ivComm}`, `Experience fit: ${ivFit}`, `Salary: ${ivSalary}`)
+        if (ivNotice.trim()) noteParts.push(`Notice: ${ivNotice.trim()}`)
+        if (ivDecision) noteParts.push(`Decision: ${ivDecision}`)
+      }
+      if (ivNote.trim()) noteParts.push(ivNote.trim())
+      const note = noteParts.join(" · ").slice(0, 1000)
+      await applyWorkItems([item.applicationId], { action: "log_call", outcome: ivOutcome, note })
+
+      if (connected && ivDecision === "Advance") {
+        const to = nextStageFor(item.stage)
+        await api(`/api/applications/${item.applicationId}`, {
+          method: "PUT",
+          body: JSON.stringify({ status: to, origin: "today" }),
+        })
+        toast({ title: `Moved to ${stageLabel(to)}`, description: `${item.candidateName} advanced after the call.` })
+      } else if (connected && ivDecision === "Reject") {
+        await api(`/api/applications/${item.applicationId}`, {
+          method: "PUT",
+          body: JSON.stringify({ status: "rejected", notes: "Rejected from the Today interview form", origin: "today" }),
+        })
+        toast({ title: "Rejected", description: `${item.candidateName} is out of the pipeline.` })
+      } else {
+        toast({ title: "Call logged", description: item.candidateName })
+      }
+
+      if (mode === "post_call" && ivNudge && item.participantId) {
+        try {
+          await nudgeOne(item)
+          toast({ title: "Nudge sent", description: `WhatsApp message sent to ${item.candidateName}.` })
+        } catch {
+          toast({
+            title: "Nudge failed",
+            description: "The call was logged but the WhatsApp nudge did not go out.",
+            variant: "destructive",
+          })
+        }
+      }
+      setInterview(null)
+      await load({ quiet: true })
+    })
+  }
 
   const nudgeText = (item: WorkItem) =>
     `Hi ${firstName(item.candidateName)}, following up on your application for ${item.jobTitle}. Do you have a few minutes to chat?`
@@ -717,12 +809,17 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                   pending.has(`nudge:${item.key}`) ||
                   pending.has(`remind:${item.key}`) ||
                   pending.has(`log:${item.key}`) ||
+                  pending.has(`iv:${item.key}`) ||
+                  pending.has(`advance:${item.key}`) ||
                   pending.has(`snooze:${item.key}`) ||
                   pending.has(`callback:${item.key}`) ||
                   pending.has(`done:${item.key}`) ||
                   pending.has(`undo:${item.applicationId}`)
                 const secondary = item.actions
                   .filter((a) => a.id !== "log_call" && a.id !== "snooze")
+                  // Stage movement needs the manage permission; the rest of the
+                  // queue stays visible to read-only viewers.
+                  .filter((a) => canManage || (a.id !== "advance" && a.id !== "reject"))
                   .slice(1)
                 return (
                   <div
@@ -803,9 +900,10 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                       {secondary.map((a) => (
                         <Button
                           key={a.id}
-                          variant="outline"
+                          variant={a.variant === "danger" ? "outline" : "outline"}
                           size="sm"
                           disabled={busy}
+                          className={a.variant === "danger" ? "text-red-600 hover:text-red-700 dark:text-red-400" : undefined}
                           title={
                             a.id === "call"
                               ? "Place a manual call to the candidate right now"
@@ -813,7 +911,11 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                                 ? "Open the screening questions and answers"
                                 : a.id === "done"
                                   ? "Mark handled — hides the row until anything changes"
-                                  : a.label
+                                  : a.id === "advance"
+                                    ? `Move the candidate to the next stage (${stageLabel(nextStageFor(item.stage))})`
+                                    : a.id === "reject"
+                                      ? "Reject this application and remove it from the queue"
+                                      : a.label
                           }
                           onClick={() =>
                             a.id === "call"
@@ -822,10 +924,14 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                                 ? openResults(item)
                                 : a.id === "done"
                                   ? markDone([item])
-                                  : runPrimary(item)
+                                  : a.id === "advance"
+                                    ? advanceStage(item)
+                                    : a.id === "reject"
+                                      ? (setDropIds([item.applicationId]), setDropOpen(true))
+                                      : runPrimary(item)
                           }
                         >
-                          {a.label}
+                          {a.id === "advance" ? `Move to ${stageLabel(nextStageFor(item.stage))}` : a.label}
                         </Button>
                       ))}
                       {!grouped && (
@@ -838,11 +944,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                             setCallbackItem(item)
                             setCallbackAt(toLocalInput(new Date(Date.now() + 60 * 60 * 1000)))
                           }}
-                          onLogCall={() => {
-                            setCallItem(item)
-                            setCallOutcome(CALL_OUTCOMES[0])
-                            setCallNote("")
-                          }}
+                          onLogCall={() => openInterview(item, "log")}
                           onSnooze={(hours) => snoozeOne(item, hours)}
                           onDone={() => markDone([item])}
                         />
@@ -991,21 +1093,23 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
         onSent={() => load({ quiet: true })}
       />
 
-      {/* Post-call follow-up: log the outcome and optionally nudge, then resume */}
-      <Dialog open={!!postCallItem} onOpenChange={(open) => !open && setPostCallItem(null)}>
-        <DialogContent>
+      {/* Interview feedback form — shown after a placed call or from "Log a call".
+          Captures the outcome, the questions a human asks on the call, and a real
+          decision (advance / hold / reject), so no row ends as a bare "done". */}
+      <Dialog open={!!interview} onOpenChange={(open) => !open && setInterview(null)}>
+        <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>Call placed — what happened?</DialogTitle>
+            <DialogTitle>{interview?.mode === "post_call" ? "Call placed — how did it go?" : "Log an interview call"}</DialogTitle>
             <DialogDescription>
-              {postCallItem ? `${postCallItem.candidateName} · ${postCallItem.jobTitle}` : ""}
+              {interview ? `${interview.item.candidateName} · ${interview.item.jobTitle}` : ""}
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3">
+          <div className="max-h-[65vh] space-y-3 overflow-y-auto pr-1">
             <div>
-              <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">Outcome</label>
+              <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">Call outcome</label>
               <select
-                value={postCallOutcome}
-                onChange={(e) => setPostCallOutcome(e.target.value)}
+                value={ivOutcome}
+                onChange={(e) => setIvOutcome(e.target.value)}
                 className="w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
               >
                 {CALL_OUTCOMES.map((o) => (
@@ -1015,98 +1119,175 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                 ))}
               </select>
             </div>
+
+            {ivOutcome === "connected" && (
+              <>
+                <p className="rounded-md bg-blue-50 px-3 py-2 text-xs text-blue-700 dark:bg-blue-950/30 dark:text-blue-300">
+                  Ask these while you talk — the answers are saved to the candidate&apos;s timeline.
+                </p>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                      How is their communication?
+                    </label>
+                    <select
+                      value={ivComm}
+                      onChange={(e) => setIvComm(e.target.value)}
+                      className="w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                    >
+                      {COMM_RATINGS.map((r) => (
+                        <option key={r} value={r}>
+                          {r}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                      Experience fit for this role?
+                    </label>
+                    <select
+                      value={ivFit}
+                      onChange={(e) => setIvFit(e.target.value)}
+                      className="w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                    >
+                      {FIT_RATINGS.map((r) => (
+                        <option key={r} value={r}>
+                          {r}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                      Salary vs the job&apos;s band?
+                    </label>
+                    <select
+                      value={ivSalary}
+                      onChange={(e) => setIvSalary(e.target.value)}
+                      className="w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                    >
+                      {SALARY_CHECKS.map((r) => (
+                        <option key={r} value={r}>
+                          {r}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                      Notice period / availability
+                    </label>
+                    <input
+                      value={ivNotice}
+                      onChange={(e) => setIvNotice(e.target.value)}
+                      placeholder="e.g. 30 days, immediate"
+                      className="w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                    Your decision <span className="text-red-500">*</span>
+                  </label>
+                  <div className="flex gap-2">
+                    {DECISIONS.map((d) => (
+                      <button
+                        key={d}
+                        type="button"
+                        aria-pressed={ivDecision === d}
+                        onClick={() => setIvDecision(d)}
+                        className={`flex-1 rounded-md border px-3 py-2 text-sm font-medium transition-colors ${
+                          ivDecision === d
+                            ? d === "Advance"
+                              ? "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-300"
+                              : d === "Reject"
+                                ? "border-red-300 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300"
+                                : "border-amber-300 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                            : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                        }`}
+                      >
+                        {d === "Advance" ? `Advance to ${stageLabel(nextStageFor(interview?.item.stage ?? ""))}` : d}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+                    {ivDecision === "Advance"
+                      ? `Saves the call and moves ${interview?.item.candidateName} to ${stageLabel(nextStageFor(interview?.item.stage ?? ""))}.`
+                      : ivDecision === "Reject"
+                        ? "Saves the call and rejects this application."
+                        : ivDecision === "Hold"
+                          ? "Saves the call and hides the row for a day — it comes back tomorrow."
+                          : "Pick one — a call without a decision stays on the board."}
+                  </p>
+                </div>
+              </>
+            )}
+
             <div>
-              <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">Note (optional)</label>
-              <Textarea value={postCallNote} onChange={(e) => setPostCallNote(e.target.value)} rows={3} placeholder="What was said…" />
+              <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">Notes (optional)</label>
+              <Textarea value={ivNote} onChange={(e) => setIvNote(e.target.value)} rows={3} placeholder="What was said…" />
             </div>
-            <label className="flex cursor-pointer items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300">
-              <Checkbox checked={postCallNudge} onCheckedChange={(v) => setPostCallNudge(v === true)} />
-              Also send a WhatsApp nudge with the details after the call
-            </label>
-            <p className="text-xs text-zinc-500 dark:text-zinc-400">
-              Saving logs the call and resumes the normal flow — the row returns on its own when anything changes.
-            </p>
+
+            {interview?.mode === "post_call" && (
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300">
+                <Checkbox checked={ivNudge} onCheckedChange={(v) => setIvNudge(v === true)} />
+                Also send a WhatsApp nudge with the details after the call
+              </label>
+            )}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setPostCallItem(null)}>
-              Skip
+            <Button variant="outline" onClick={() => setInterview(null)}>
+              Cancel
             </Button>
             <Button
-              disabled={!!postCallItem && pending.has(`postcall:${postCallItem.key}`)}
-              onClick={async () => {
-                if (!postCallItem) return
-                const item = postCallItem
-                await withPending(`postcall:${item.key}`, async () => {
-                  await applyWorkItems([item.applicationId], {
-                    action: "log_call",
-                    outcome: postCallOutcome,
-                    note: postCallNote,
-                  })
-                  if (postCallNudge && item.participantId) {
-                    try {
-                      await nudgeOne(item)
-                      toast({ title: "Nudge sent", description: `WhatsApp message sent to ${item.candidateName}.` })
-                    } catch {
-                      toast({
-                        title: "Nudge failed",
-                        description: "The call was logged but the WhatsApp nudge did not go out.",
-                        variant: "destructive",
-                      })
-                    }
-                  }
-                  await load({ quiet: true })
-                })
-                setPostCallItem(null)
-              }}
+              disabled={!!interview && pending.has(`iv:${interview.item.key}`)}
+              onClick={() => void saveInterview()}
             >
-              Save
+              {ivDecision === "Advance" ? "Save & advance" : ivDecision === "Reject" ? "Save & reject" : "Save"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* Log-call dialog */}
-      <Dialog open={!!callItem} onOpenChange={(open) => !open && setCallItem(null)}>
+      {/* Reject confirmation — a rejection is a decision, so it always asks first */}
+      <Dialog
+        open={dropOpen && dropIds.length > 0}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDropOpen(false)
+            setDropIds([])
+          }
+        }}
+      >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Log a call</DialogTitle>
+            <DialogTitle>Reject {dropIds.length === 1 ? "this candidate" : `${dropIds.length} candidates`}?</DialogTitle>
             <DialogDescription>
-              {callItem ? `${callItem.candidateName} · ${callItem.jobTitle}` : ""}
+              This marks the application as rejected and takes it out of the pipeline. It cannot be undone from here.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3">
-            <div>
-              <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">Outcome</label>
-              <select
-                value={callOutcome}
-                onChange={(e) => setCallOutcome(e.target.value)}
-                className="w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
-              >
-                {CALL_OUTCOMES.map((o) => (
-                  <option key={o} value={o}>
-                    {o}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-300">Note (optional)</label>
-              <Textarea value={callNote} onChange={(e) => setCallNote(e.target.value)} rows={3} placeholder="What was said…" />
-            </div>
-          </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCallItem(null)}>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setDropOpen(false)
+                setDropIds([])
+              }}
+            >
               Cancel
             </Button>
             <Button
-              disabled={!!callItem && pending.has(`log:${callItem.key}`)}
-              onClick={async () => {
-                if (!callItem) return
-                await logCallOutcome(callItem, callOutcome, callNote)
-                setCallItem(null)
+              variant="destructive"
+              disabled={dropIds.length > 0 && pending.has("bulk:drop")}
+              onClick={() => {
+                const ids = dropIds
+                setDropOpen(false)
+                setDropIds([])
+                void dropApplications(ids, ids.length === 1 ? `reject:${ids[0]}` : "bulk:drop")
               }}
             >
-              Save
+              Reject
             </Button>
           </DialogFooter>
         </DialogContent>

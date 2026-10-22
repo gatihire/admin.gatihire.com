@@ -767,9 +767,60 @@ export class SupabaseCandidateService {
     }
   }
 
+  /**
+   * Look for an existing candidate that is almost certainly the same person:
+   * exact email match (case-insensitive), or the same 10-digit phone number
+   * with an identical name (ignoring case and spacing). Phone alone is NOT
+   * enough — shared/placeholder numbers belong to different people.
+   * Returns the existing candidate id, or null when this looks like someone new.
+   */
+  static async findDuplicateCandidate(candidate: Omit<ComprehensiveCandidateData, 'id'>): Promise<string | null> {
+    const email = (candidate.email || '').trim().toLowerCase()
+    if (email) {
+      const { data } = await supabaseAdmin
+        .from('candidates')
+        .select('id, email')
+        .ilike('email', email)
+        .limit(1)
+      if (data && data.length > 0) return data[0].id
+    }
+
+    const digits = (candidate.phone || '').replace(/\D/g, '').slice(-10)
+    const nameKey = (candidate.name || '').trim().toLowerCase().replace(/\s+/g, '')
+    if (digits.length >= 10 && nameKey) {
+      // Phones are stored in mixed formats, so match on the last 10 digits in JS
+      // over a bounded recent window rather than an unindexable SQL expression.
+      const { data } = await supabaseAdmin
+        .from('candidates')
+        .select('id, phone, name')
+        .not('phone', 'is', null)
+        .order('uploaded_at', { ascending: false })
+        .limit(500)
+      const match = (data || []).find((row) => {
+        const rowDigits = (row.phone || '').replace(/\D/g, '').slice(-10)
+        if (rowDigits !== digits) return false
+        if (!nameKey) return true
+        const rowName = (row.name || '').trim().toLowerCase().replace(/\s+/g, '')
+        return rowName === nameKey
+      })
+      if (match) return match.id
+    }
+
+    return null
+  }
+
   // Add new candidate
   static async addCandidate(candidate: Omit<ComprehensiveCandidateData, 'id'>): Promise<string> {
     try {
+      // De-duplicate before insert: the same person re-uploaded (casing differences
+      // in email, the same phone with a slightly different name) used to create a
+      // second candidate row, which then showed up twice on the dashboard.
+      const existingId = await this.findDuplicateCandidate(candidate)
+      if (existingId) {
+        console.warn(`Skipped duplicate candidate insert — an existing record (${existingId}) already matches by email or phone+name.`)
+        return existingId
+      }
+
       const candidateData = this.mapCandidateToInsert(candidate)
       
       const { data, error } = await supabaseAdmin

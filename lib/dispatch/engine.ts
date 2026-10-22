@@ -155,6 +155,8 @@ export type WorkItemActionId =
   | "snooze" // hide for a while
   | "done" // mark handled — hide until the item changes
   | "drop" // reject the application
+  | "advance" // move the candidate to the next pipeline stage
+  | "reject" // reject the application (with confirmation)
 
 export interface WorkItemAction {
   id: WorkItemActionId
@@ -256,6 +258,8 @@ const KIND_CONFIG: Record<WorkItemKind, KindConfig> = {
     selectable: true,
     actions: [
       { id: "review", label: "Take over", variant: "primary" },
+      { id: "advance", label: "Move forward", variant: "default" },
+      { id: "reject", label: "Reject", variant: "danger" },
       { id: "call", label: "Call manually", variant: "default" },
       { id: "log_call", label: "Log a call", variant: "default" },
       { id: "snooze", label: "Snooze", variant: "default" },
@@ -269,6 +273,8 @@ const KIND_CONFIG: Record<WorkItemKind, KindConfig> = {
     selectable: true,
     actions: [
       { id: "nudge", label: "Nudge on WhatsApp", variant: "primary" },
+      { id: "advance", label: "Move forward", variant: "default" },
+      { id: "reject", label: "Reject", variant: "danger" },
       { id: "call", label: "Call manually", variant: "default" },
       { id: "log_call", label: "Log a call", variant: "default" },
       { id: "snooze", label: "Snooze", variant: "default" },
@@ -282,6 +288,8 @@ const KIND_CONFIG: Record<WorkItemKind, KindConfig> = {
     selectable: true,
     actions: [
       { id: "reply", label: "Open conversation", variant: "primary" },
+      { id: "advance", label: "Move forward", variant: "default" },
+      { id: "reject", label: "Reject", variant: "danger" },
       { id: "review", label: "Questions", variant: "default" },
       { id: "log_call", label: "Log a call", variant: "default" },
       { id: "snooze", label: "Snooze", variant: "default" },
@@ -295,6 +303,8 @@ const KIND_CONFIG: Record<WorkItemKind, KindConfig> = {
     selectable: true,
     actions: [
       { id: "reply", label: "Open conversation", variant: "primary" },
+      { id: "advance", label: "Move forward", variant: "default" },
+      { id: "reject", label: "Reject", variant: "danger" },
       { id: "call", label: "Call manually", variant: "default" },
       { id: "log_call", label: "Log a call", variant: "default" },
       { id: "snooze", label: "Snooze", variant: "default" },
@@ -319,6 +329,8 @@ const KIND_CONFIG: Record<WorkItemKind, KindConfig> = {
     selectable: true,
     actions: [
       { id: "decide", label: "Review and decide", variant: "primary" },
+      { id: "advance", label: "Move forward", variant: "default" },
+      { id: "reject", label: "Reject", variant: "danger" },
       { id: "review", label: "Questions", variant: "default" },
       { id: "log_call", label: "Log a call", variant: "default" },
       { id: "snooze", label: "Snooze", variant: "default" },
@@ -332,6 +344,8 @@ const KIND_CONFIG: Record<WorkItemKind, KindConfig> = {
     selectable: false,
     actions: [
       { id: "review", label: "Review the call", variant: "primary" },
+      { id: "advance", label: "Move forward", variant: "default" },
+      { id: "reject", label: "Reject", variant: "danger" },
       { id: "log_call", label: "Log a call", variant: "default" },
       { id: "snooze", label: "Snooze", variant: "default" },
     ],
@@ -575,7 +589,12 @@ function deriveKind(input: WorkItemInput, now: Date): { kind: WorkItemKind; trut
     if (hasUnansweredReply(p)) return { kind: "reply", truth }
   }
 
-  if (status === "ai_screen") {
+  // The screening pipeline. `applied` sits here too: most candidates live in
+  // `applied` (the AI screen moves nobody forward by itself), so a candidate
+  // there who replied, declined or got flagged must surface the same way as one
+  // already parked in `ai_screen` — otherwise the Reply/Decline/Flagged views
+  // silently miss the bulk of the queue.
+  if (status === "ai_screen" || status === "applied") {
     const declined = hasDeclined(p)
 
     // An explicit button intent ("Call me now") only exists while the screening
@@ -873,6 +892,43 @@ export function countsByKind(items: WorkItem[]): Record<string, number> {
   const out: Record<string, number> = {}
   for (const item of items) out[item.kind] = (out[item.kind] || 0) + 1
   return out
+}
+
+// ── Stage movement ────────────────────────────────────────────────────────
+// The pipeline order a human decision walks a candidate through. `applied`
+// starts the chain (the AI screen never advances anybody on its own); each
+// "Move forward" click in Today takes the next step. Kept here so the Today
+// board and any future caller share one definition of "next".
+const STAGE_ORDER = ["applied", "ai_screen", "shortlist", "client_review", "interview", "offer", "hired"]
+
+const STAGE_LABELS: Record<string, string> = {
+  applied: "Applied",
+  ai_screen: "AI Screen",
+  hr_review: "HR Review",
+  shortlist: "Shortlist",
+  client_review: "Client Review",
+  interview: "Interview",
+  offer: "Offer",
+  hired: "Hired",
+  rejected: "Rejected",
+}
+
+export function stageLabel(status: string): string {
+  return STAGE_LABELS[status] || (status || "").replace(/_/g, " ")
+}
+
+/**
+ * The stage a candidate lands on when a human moves them forward.
+ * hr_review and everything non-standard sit on the shortlist step — a human who
+ * has taken over a screening row is deciding "shortlist or not", so that is
+ * where "Move forward" puts them.
+ */
+export function nextStageFor(status: string): string {
+  const s = String(status || "")
+  if (s === "hr_review") return "shortlist"
+  const idx = STAGE_ORDER.indexOf(s)
+  if (idx === -1) return "shortlist" // unknown/legacy status → the decision stage
+  return STAGE_ORDER[Math.min(idx + 1, STAGE_ORDER.length - 1)]
 }
 
 /** Human-readable age, e.g. "3h", "2d", "45m". */
