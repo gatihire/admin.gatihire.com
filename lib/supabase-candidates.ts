@@ -568,6 +568,9 @@ export class SupabaseCandidateService {
         .select('*', { count: 'exact' })
         .order(sortBy, { ascending: sortOrder === 'asc' })
         .or('source.is.null,source.neq.juicebox')
+        // Re-uploaded duplicates are parked with status='duplicate' (see the
+        // merge script) — keep them out of the dashboard list.
+        .neq('status', 'duplicate')
 
       // Apply status filter if not 'all'
       if (status && status !== 'all') {
