@@ -254,13 +254,16 @@ const KIND_CONFIG: Record<WorkItemKind, KindConfig> = {
     label: "Needs a human",
     slaHours: 6,
     basePriority: 86,
-    cta: "Take over",
+    // The generic human config is the AI-flagged variant; the asked-to-call
+    // variant is selected in deriveOne (HUMAN_WANTS_CALL below) because the
+    // right first move differs: a candidate waiting on a call needs the call,
+    // a flagged screening needs a judgment.
+    cta: "Review & decide",
     selectable: true,
     actions: [
-      { id: "review", label: "Take over", variant: "primary" },
+      { id: "decide", label: "Review & decide", variant: "primary" },
       { id: "advance", label: "Move forward", variant: "default" },
       { id: "reject", label: "Reject", variant: "danger" },
-      { id: "call", label: "Call manually", variant: "default" },
       { id: "log_call", label: "Log a call", variant: "default" },
       { id: "snooze", label: "Snooze", variant: "default" },
     ],
@@ -273,9 +276,10 @@ const KIND_CONFIG: Record<WorkItemKind, KindConfig> = {
     selectable: true,
     actions: [
       { id: "nudge", label: "Nudge on WhatsApp", variant: "primary" },
+      { id: "reply", label: "Open chat", variant: "default" },
       { id: "advance", label: "Move forward", variant: "default" },
       { id: "reject", label: "Reject", variant: "danger" },
-      { id: "call", label: "Call manually", variant: "default" },
+      { id: "call", label: "Call now", variant: "default" },
       { id: "log_call", label: "Log a call", variant: "default" },
       { id: "snooze", label: "Snooze", variant: "default" },
     ],
@@ -284,13 +288,12 @@ const KIND_CONFIG: Record<WorkItemKind, KindConfig> = {
     label: "Replied",
     slaHours: 4,
     basePriority: 82,
-    cta: "Open conversation",
+    cta: "Open chat",
     selectable: true,
     actions: [
-      { id: "reply", label: "Open conversation", variant: "primary" },
+      { id: "reply", label: "Open chat", variant: "primary" },
       { id: "advance", label: "Move forward", variant: "default" },
       { id: "reject", label: "Reject", variant: "danger" },
-      { id: "review", label: "Questions", variant: "default" },
       { id: "log_call", label: "Log a call", variant: "default" },
       { id: "snooze", label: "Snooze", variant: "default" },
     ],
@@ -299,13 +302,13 @@ const KIND_CONFIG: Record<WorkItemKind, KindConfig> = {
     label: "Declined",
     slaHours: 8,
     basePriority: 80,
-    cta: "Open conversation",
+    cta: "Open chat",
     selectable: true,
     actions: [
-      { id: "reply", label: "Open conversation", variant: "primary" },
+      { id: "reply", label: "Open chat", variant: "primary" },
       { id: "advance", label: "Move forward", variant: "default" },
       { id: "reject", label: "Reject", variant: "danger" },
-      { id: "call", label: "Call manually", variant: "default" },
+      { id: "call", label: "Call now", variant: "default" },
       { id: "log_call", label: "Log a call", variant: "default" },
       { id: "snooze", label: "Snooze", variant: "default" },
     ],
@@ -325,13 +328,12 @@ const KIND_CONFIG: Record<WorkItemKind, KindConfig> = {
     label: "AI flagged",
     slaHours: 8,
     basePriority: 68,
-    cta: "Review and decide",
+    cta: "Review & decide",
     selectable: true,
     actions: [
-      { id: "decide", label: "Review and decide", variant: "primary" },
+      { id: "decide", label: "Review & decide", variant: "primary" },
       { id: "advance", label: "Move forward", variant: "default" },
       { id: "reject", label: "Reject", variant: "danger" },
-      { id: "review", label: "Questions", variant: "default" },
       { id: "log_call", label: "Log a call", variant: "default" },
       { id: "snooze", label: "Snooze", variant: "default" },
     ],
@@ -385,6 +387,28 @@ const KIND_CONFIG: Record<WorkItemKind, KindConfig> = {
       { id: "snooze", label: "Snooze", variant: "default" },
     ],
   },
+}
+
+/**
+ * Variant of the "human" kind for a candidate who pressed "Call me now" (or
+ * asked for a call) on WhatsApp. The row's job is to get them on the phone —
+ * so the primary button places the call, and opening the chat sits right next
+ * to it. Review/decide makes no sense here: there is nothing to judge yet.
+ */
+const HUMAN_WANTS_CALL: KindConfig = {
+  label: "Asked to call",
+  slaHours: 6,
+  basePriority: 90,
+  cta: "Call now",
+  selectable: true,
+  actions: [
+    { id: "call", label: "Call now", variant: "primary" },
+    { id: "reply", label: "Open chat", variant: "default" },
+    { id: "advance", label: "Move forward", variant: "default" },
+    { id: "reject", label: "Reject", variant: "danger" },
+    { id: "log_call", label: "Log a call", variant: "default" },
+    { id: "snooze", label: "Snooze", variant: "default" },
+  ],
 }
 
 const OVERDUE_AFTER_HOURS = 48
@@ -570,7 +594,7 @@ export function hasUnansweredReply(p?: DispatchParticipant | null): boolean {
  * Decide the single action this application needs, or `null` when nothing is
  * waiting on a human. First matching rule wins.
  */
-function deriveKind(input: WorkItemInput, now: Date): { kind: WorkItemKind; truth: CallTruth | null } | null {
+function deriveKind(input: WorkItemInput, now: Date): { kind: WorkItemKind; truth: CallTruth | null; wantsCall?: boolean } | null {
   const { application: app, participant: p } = input
   const status = String(app.status || "")
   const truth = getCallTruth(p ?? null)
@@ -599,7 +623,7 @@ function deriveKind(input: WorkItemInput, now: Date): { kind: WorkItemKind; trut
 
     // An explicit button intent ("Call me now") only exists while the screening
     // is live, so it stays scoped here.
-    if (!live && !declined && wantsHuman(p)) return { kind: "human", truth }
+    if (!live && !declined && wantsHuman(p)) return { kind: "human", truth, wantsCall: true }
 
     const flagged =
       !declined &&
@@ -759,7 +783,9 @@ function deriveOne(input: WorkItemInput, now: Date): WorkItem | null {
   if (!decision) return null
 
   const { kind, truth } = decision
-  const cfg = KIND_CONFIG[kind]
+  // A candidate who explicitly asked for a call gets the call-first action set;
+  // every other "human" row is a judgment call (review & decide).
+  const cfg = decision.wantsCall ? HUMAN_WANTS_CALL : KIND_CONFIG[kind]
   const waitingSince = waitingSinceFor(input, kind)
   const ageHours = hoursBetween(waitingSince, now)
   const { title, detail } = titlesFor(input, kind, truth)

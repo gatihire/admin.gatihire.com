@@ -75,6 +75,8 @@ interface TodayResponse {
   generatedAt: string
   stats: DispatchStats
   counts: Record<string, number>
+  /** Items on other recruiters' desks when scope=mine (0 otherwise). */
+  teamHidden?: number
   items: WorkItem[]
   rail: {
     interviews: RailInterview[]
@@ -264,8 +266,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
   useEffect(() => setVisibleCount(PAGE_SIZE), [kindFilter, subfilter, scope, includeSnoozed, includeDone])
   const visible = useMemo(() => filtered.slice(0, visibleCount), [filtered, visibleCount])
 
-  const presentKinds = useMemo(() => WORK_ITEM_KINDS.filter((k) => (counts[k] || 0) > 0), [counts])
-
+  const teamHidden = data?.teamHidden ?? 0
   // ── plumbing ────────────────────────────────────────────────────────────
   const withPending = useCallback(
     async (key: string, fn: () => Promise<void>) => {
@@ -515,6 +516,30 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
     }
   }
 
+  /** Dispatch any engine action by id (used by the ⋯ menu leftovers). */
+  const runActionById = (item: WorkItem, id: string): void | Promise<void> => {
+    switch (id) {
+      case item.primaryAction:
+        return runPrimary(item)
+      case "call":
+        return callNow(item)
+      case "reply":
+        return openConversation(item)
+      case "review":
+      case "decide":
+        return openResults(item)
+      case "advance":
+        return advanceStage(item)
+      case "reject":
+        setDropIds([item.applicationId])
+        return setDropOpen(true)
+      case "done":
+        return markDone([item])
+      default:
+        return runPrimary(item)
+    }
+  }
+
   const logCallOutcome = (item: WorkItem, outcome: string, note: string, hours?: number) =>
     withPending(`log:${item.key}`, async () => {
       await applyWorkItems([item.applicationId], { action: "log_call", outcome, note, hours })
@@ -684,7 +709,9 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
           {/* Filter chips */}
           <div className="flex flex-wrap items-center gap-2 border-b border-zinc-100 px-5 py-3 dark:border-zinc-800">
             <Chip active={kindFilter === "all"} onClick={() => setKindFilter("all")} label="All" count={items.length} />
-            {presentKinds.map((k) => (
+            {/* Every kind renders even at zero — a tab that only appears when
+                something is waiting looks like a broken filter otherwise. */}
+            {WORK_ITEM_KINDS.map((k) => (
               <Chip
                 key={k}
                 active={kindFilter === k}
@@ -736,6 +763,25 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
               </button>
             )}
           </div>
+
+          {/* Scope hint: on "My accounts", explain work that exists on other
+              recruiters' desks — this is why a Reply/Declined tab can look
+              empty while the work is really one click away in Team scope. */}
+          {scope === "mine" && teamHidden > 0 && (
+            <div className="flex flex-wrap items-center gap-2 border-b border-zinc-100 bg-amber-50/60 px-5 py-2 text-xs text-amber-800 dark:border-zinc-800 dark:bg-amber-950/20 dark:text-amber-300">
+              <Users className="h-3.5 w-3.5 shrink-0" />
+              <span>
+                {teamHidden} more item{teamHidden === 1 ? " is" : "s are"} waiting on other recruiters&apos; desks.
+              </span>
+              <button
+                type="button"
+                onClick={() => load({ scope: "team" })}
+                className="font-medium underline underline-offset-2 hover:text-amber-900 dark:hover:text-amber-200"
+              >
+                Switch to Team view →
+              </button>
+            </div>
+          )}
 
           {/* Bulk bar */}
           {selected.size > 0 && (
@@ -816,11 +862,25 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                   pending.has(`done:${item.key}`) ||
                   pending.has(`undo:${item.applicationId}`)
                 const secondary = item.actions
-                  .filter((a) => a.id !== "log_call" && a.id !== "snooze")
-                  // Stage movement needs the manage permission; the rest of the
-                  // queue stays visible to read-only viewers.
-                  .filter((a) => canManage || (a.id !== "advance" && a.id !== "reject"))
-                  .slice(1)
+                  // Only the two judgment buttons sit next to the primary CTA.
+                  // Everything else — open chat, call, review, done — lives in
+                  // the ⋯ menu so a row never shows more than three buttons.
+                  .filter((a) => a.id === "advance" || a.id === "reject")
+                  // Stage movement needs the manage permission.
+                  .filter(() => canManage)
+                // Leftover actions for the ⋯ menu (log_call / snooze / done are
+                // already native menu entries).
+                const menuExtras = item.actions
+                  .filter(
+                    (a) =>
+                      a.id !== item.primaryAction &&
+                      a.id !== "advance" &&
+                      a.id !== "reject" &&
+                      a.id !== "log_call" &&
+                      a.id !== "snooze" &&
+                      a.id !== "done"
+                  )
+                  .map((a) => ({ label: a.label, onSelect: () => runActionById(item, a.id) }))
                 return (
                   <div
                     key={item.key}
@@ -900,36 +960,16 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                       {secondary.map((a) => (
                         <Button
                           key={a.id}
-                          variant={a.variant === "danger" ? "outline" : "outline"}
+                          variant="outline"
                           size="sm"
                           disabled={busy}
                           className={a.variant === "danger" ? "text-red-600 hover:text-red-700 dark:text-red-400" : undefined}
                           title={
-                            a.id === "call"
-                              ? "Place a manual call to the candidate right now"
-                              : a.id === "review"
-                                ? "Open the screening questions and answers"
-                                : a.id === "done"
-                                  ? "Mark handled — hides the row until anything changes"
-                                  : a.id === "advance"
-                                    ? `Move the candidate to the next stage (${stageLabel(nextStageFor(item.stage))})`
-                                    : a.id === "reject"
-                                      ? "Reject this application and remove it from the queue"
-                                      : a.label
+                            a.id === "advance"
+                              ? `Move the candidate to the next stage (${stageLabel(nextStageFor(item.stage))})`
+                              : "Reject this application and remove it from the queue"
                           }
-                          onClick={() =>
-                            a.id === "call"
-                              ? callNow(item)
-                              : a.id === "review"
-                                ? openResults(item)
-                                : a.id === "done"
-                                  ? markDone([item])
-                                  : a.id === "advance"
-                                    ? advanceStage(item)
-                                    : a.id === "reject"
-                                      ? (setDropIds([item.applicationId]), setDropOpen(true))
-                                      : runPrimary(item)
-                          }
+                          onClick={() => runActionById(item, a.id)}
                         >
                           {a.id === "advance" ? `Move to ${stageLabel(nextStageFor(item.stage))}` : a.label}
                         </Button>
@@ -937,6 +977,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                       {!grouped && (
                         <RowMenu
                           disabled={busy}
+                          extras={menuExtras}
                           onCall={(outcome, hours) =>
                             logCallOutcome(item, outcome, `Logged from Today queue: ${outcome}`, hours)
                           }
@@ -1376,6 +1417,9 @@ function Chip({
   label: string
   count: number
 }) {
+  // Every kind always renders, even at zero — a tab that disappears looks
+  // like a broken filter. Zero-count chips are dimmed but still clickable.
+  const empty = count === 0 && !active
   return (
     <button
       type="button"
@@ -1384,7 +1428,9 @@ function Chip({
       className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
         active
           ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300"
-          : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+          : empty
+            ? "border-zinc-200 bg-white text-zinc-300 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-600"
+            : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
       }`}
     >
       {label}
@@ -1469,6 +1515,7 @@ function DropConfirm({
 
 function RowMenu({
   disabled,
+  extras,
   onCall,
   onCallback,
   onLogCall,
@@ -1476,6 +1523,8 @@ function RowMenu({
   onDone,
 }: {
   disabled?: boolean
+  /** Kind-specific leftovers (open chat, call now, review…) shown first. */
+  extras?: { label: string; onSelect: () => void }[]
   onCall: (outcome: string, hours: number) => void
   onCallback: () => void
   onLogCall: () => void
@@ -1490,6 +1539,12 @@ function RowMenu({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-60">
+        {(extras ?? []).map((e) => (
+          <DropdownMenuItem key={e.label} onSelect={e.onSelect}>
+            {e.label}
+          </DropdownMenuItem>
+        ))}
+        {extras && extras.length > 0 && <DropdownMenuSeparator />}
         <DropdownMenuLabel>I called them</DropdownMenuLabel>
         <DropdownMenuItem onSelect={() => onCall("no answer", 4)}>No answer · hide 4h</DropdownMenuItem>
         <DropdownMenuItem onSelect={() => onCall("busy", 2)}>Line busy · hide 2h</DropdownMenuItem>

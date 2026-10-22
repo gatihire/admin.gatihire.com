@@ -174,6 +174,12 @@ export async function GET(request: NextRequest) {
   const allJobs = (jobsPaged.data ?? []) as any[]
   const allApps = (appsPaged.data ?? []) as any[]
 
+  // Everything with an active status, regardless of scope. The scoped view
+  // drives the board itself; the unscoped set also feeds the derived maps
+  // (participants, states, shares, interviews) so the "N items on other desks"
+  // hint can derive conversation kinds for jobs outside the viewer's scope.
+  const allActiveApps = allApps.filter((a) => a.jobs && ACTIVE_STATUSES.includes(String(a.status)))
+
   // Soft scope: everything is visible, but "mine" narrows to work this user
   // owns, collaborates on, or that nobody owns yet (an unassigned opening hidden
   // from everyone is work that silently dies).
@@ -188,8 +194,8 @@ export async function GET(request: NextRequest) {
   const scopedApps = allApps.filter((a) => a.jobs && inScope(String(a.job_id), a.jobs.owner_auth_user_id || null))
   const activeApps = scopedApps.filter((a) => ACTIVE_STATUSES.includes(String(a.status)))
 
-  const appIds = activeApps.map((a) => String(a.id))
-  const jobIds = Array.from(new Set(scopedApps.map((a) => String(a.job_id))))
+  const appIds = allActiveApps.map((a) => String(a.id))
+  const jobIds = Array.from(new Set(allActiveApps.map((a) => String(a.job_id))))
   const candidateIds = Array.from(new Set(scopedApps.map((a) => String(a.candidate_id))))
 
   const [participantsPaged, statesPaged, sharesPaged, interviewsPaged] = await Promise.all([
@@ -365,6 +371,38 @@ export async function GET(request: NextRequest) {
     // fall back to full Node path
   }
 
+  // Scope hint: when the viewer is on "My accounts", how much work exists on
+  // other recruiters' desks? Pure re-derivation of rows we already fetched —
+  // no extra queries. This powers the "N items on other desks" nudge so a
+  // missing Reply or Declined tab is explained instead of looking broken.
+  let teamHidden = 0
+  if (scope === "mine") {
+    const teamInputs: WorkItemInput[] = allApps
+      .filter((a) => a.jobs && a.candidates && ACTIVE_STATUSES.includes(String(a.status)))
+      .map((a) => ({
+        application: {
+          id: a.id,
+          job_id: a.job_id,
+          candidate_id: a.candidate_id,
+          status: a.status,
+          origin: a.origin,
+          source: a.source,
+          match_score: a.match_score,
+          created_by: a.created_by,
+          applied_at: a.applied_at,
+          updated_at: a.updated_at,
+        },
+        job: a.jobs,
+        candidate: a.candidates,
+        participant: participantByKey.get(`${a.job_id}:${a.candidate_id}`) ?? null,
+        shortlist: shareByApp.get(String(a.id)) ?? null,
+        interview: interviewByApp.get(String(a.id)) ?? null,
+        state: stateByApp.get(String(a.id)) ?? null,
+      }))
+    const teamItems = groupOverdue(deriveWorkItems(teamInputs, { now, includeSnoozed, includeDone }))
+    // Subtract what the viewer already sees, so the hint never double-counts.
+    teamHidden = Math.max(0, teamItems.length - items.length)
+  }
 
   // ── Header stats ───────────────────────────────────────────────────────────
   const stats: DispatchStats = {
@@ -463,6 +501,7 @@ export async function GET(request: NextRequest) {
     generatedAt: now.toISOString(),
     stats,
     counts: countsByKind(items),
+    teamHidden,
     items,
     rail: {
       interviews: railInterviews,
