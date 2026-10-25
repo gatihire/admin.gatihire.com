@@ -387,6 +387,14 @@ function getActionForCard(application: Application, callStatus?: string, partici
       if (nextRetry) {
         return { label: `Auto-retry in ${formatRetryTime(nextRetry)} (attempt ${retryCount + 1}/2)`, cta: "Retrying...", icon: RefreshCw, color: "bg-blue-50 border-blue-200 text-blue-800", action: null }
       }
+      const bolnaStatus = participant?.bolna_status
+      const executionId = participant?.bolna_execution_id
+      if (executionId && (bolnaStatus === "failed" || bolnaStatus === "error" || bolnaStatus === "stopped" || bolnaStatus === "canceled")) {
+        return { label: "Call not connected — needs manual follow-up", cta: "Manual Follow-up", icon: UserX, color: "bg-red-50 border-red-200 text-red-800", action: "manual_followup" }
+      }
+      if (executionId && !bolnaStatus) {
+        return { label: "Call placed — awaiting provider response", cta: "In Progress", icon: PhoneCall, color: "bg-amber-50 border-amber-200 text-amber-800", action: null }
+      }
       return { label: "AI call in progress — results will appear shortly", cta: "In Progress", icon: PhoneCall, color: "bg-amber-50 border-amber-200 text-amber-800", action: null }
     }
     
@@ -1591,6 +1599,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
     participant?.bolna_status === "completed" || participant?.status === "completed" || callStatus === "done"
 
   const saveNotes = async () => {
+    if (notesSaving) return
     setNotesSaving(true)
     try {
       const res = await fetch(`/api/applications/${application.id}`, {

@@ -627,10 +627,17 @@ export function WhatsAppConversationModal({
   let lastDay = ""
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
+    <div className="fixed inset-0 z-[9999] flex items-end justify-center sm:items-center">
       <div
         className="absolute inset-0 bg-zinc-900/40 backdrop-blur-[2px]"
-        onClick={() => onOpenChange(false)}
+        onClick={(e) => {
+          e.preventDefault()
+          e.stopPropagation()
+          onOpenChange(false)
+        }}
+        onPointerDown={(e) => {
+          e.stopPropagation()
+        }}
         aria-hidden
       />
       <div
@@ -638,6 +645,8 @@ export function WhatsAppConversationModal({
         aria-modal="true"
         aria-label={`WhatsApp conversation with ${candidateName || "candidate"}`}
         className="relative flex max-h-[86vh] w-full flex-col overflow-hidden rounded-t-2xl bg-white shadow-2xl sm:max-w-[520px] sm:rounded-2xl"
+        onClick={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
       >
         <header className="flex items-center justify-between border-b border-zinc-200 bg-zinc-50 px-4 py-3">
           <div className="min-w-0">
@@ -669,7 +678,11 @@ export function WhatsAppConversationModal({
             )}
             <button
               type="button"
-              onClick={() => onOpenChange(false)}
+              onClick={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                onOpenChange(false)
+              }}
               className="rounded-lg px-2 py-1 text-xs font-medium text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800"
             >
               Close
