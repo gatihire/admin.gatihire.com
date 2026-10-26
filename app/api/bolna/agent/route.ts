@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import {
-  createBolnaAgent, updateBolnaAgent, BOLNA_MASTER_PROMPT, BOLNA_MASTER_PROMPT_HINGLISH,
+  createBolnaAgent, updateBolnaAgent, BOLNA_MASTER_PROMPT,
   BOLNA_WELCOME_MESSAGE, BOLNA_WELCOME_MESSAGE_HINGLISH, type BolnaAgentLanguage,
 } from "@/lib/bolna"
 import { logger } from "@/lib/logger"
@@ -10,7 +10,7 @@ export const runtime = "nodejs"
 
 const PROMPTS: Record<BolnaAgentLanguage, { master: string; welcome: string; transcriberLanguage: string }> = {
   hinglish: {
-    master: BOLNA_MASTER_PROMPT_HINGLISH,
+    master: BOLNA_MASTER_PROMPT,
     welcome: BOLNA_WELCOME_MESSAGE_HINGLISH,
     transcriberLanguage: "hi",
   },

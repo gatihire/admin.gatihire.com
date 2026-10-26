@@ -557,22 +557,23 @@ export function WhatsAppInboxView() {
                             </DropdownMenuItem>
                           </>
                         )}
-                        {t.applicationId && (
+                        {(t as any).applicationId && (
                           <>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
                               onSelect={async () => {
-                                const key = `wa-advance:${t.applicationId}`
+                                const appId = (t as any).applicationId
+                                const key = `wa-advance:${appId}`
                                 setPending((p) => new Set(p).add(key))
                                 try {
-                                  const res = await fetch(`/api/applications/${t.applicationId}`, {
+                                  const res = await fetch(`/api/applications/${appId}`, {
                                     method: "PUT",
                                     headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({ status: "shortlist", origin: t.origin || "inbound" }),
+                                    body: JSON.stringify({ status: "shortlist", origin: (t as any).origin || "inbound" }),
                                   })
                                   if (!res.ok) throw new Error("Failed")
                                   toast({ title: "Moved to shortlist" })
-                                  setItems((prev) => prev.filter((i) => i.applicationId !== t.applicationId))
+                                  setItems((prev) => prev.filter((i: any) => i.applicationId !== appId))
                                 } catch (e: any) {
                                   toast({ title: "Failed to advance", description: e.message, variant: "destructive" })
                                 } finally {
@@ -583,24 +584,25 @@ export function WhatsAppInboxView() {
                                   })
                                 }
                               }}
-                              disabled={pending.has(`wa-advance:${t.applicationId}`)}
+                              disabled={pending.has(`wa-advance:${(t as any).applicationId}`)}
                             >
                               <ThumbsUp className="mr-2 h-4 w-4 text-emerald-600" />
                               Advance to shortlist
                             </DropdownMenuItem>
                             <DropdownMenuItem
                               onSelect={async () => {
-                                const key = `wa-reject:${t.applicationId}`
+                                const appId = (t as any).applicationId
+                                const key = `wa-reject:${appId}`
                                 setPending((p) => new Set(p).add(key))
                                 try {
-                                  const res = await fetch(`/api/applications/${t.applicationId}`, {
+                                  const res = await fetch(`/api/applications/${appId}`, {
                                     method: "PUT",
                                     headers: { "Content-Type": "application/json" },
                                     body: JSON.stringify({ status: "rejected", notes: "Rejected from WhatsApp inbox" }),
                                   })
                                   if (!res.ok) throw new Error("Failed")
                                   toast({ title: "Rejected" })
-                                  setItems((prev) => prev.filter((i) => i.applicationId !== t.applicationId))
+                                  setItems((prev) => prev.filter((i: any) => i.applicationId !== appId))
                                 } catch (e: any) {
                                   toast({ title: "Failed to reject", description: e.message, variant: "destructive" })
                                 } finally {
@@ -611,7 +613,7 @@ export function WhatsAppInboxView() {
                                   })
                                 }
                               }}
-                              disabled={pending.has(`wa-reject:${t.applicationId}`)}
+                              disabled={pending.has(`wa-reject:${(t as any).applicationId}`)}
                             >
                               <ThumbsDown className="mr-2 h-4 w-4 text-rose-600" />
                               Reject

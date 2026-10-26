@@ -572,6 +572,29 @@ type CallUserDataResult = {
   geminiPromptUsed: string
 }
 
+function toTitleCase(name: string): string {
+  if (!name) return ""
+  return name
+    .toLowerCase()
+    .split(/\s+/)
+    .map((part) => (part ? part.charAt(0).toUpperCase() + part.slice(1) : part))
+    .join(" ")
+}
+
+function getFirstName(name: string): string {
+  if (!name) return ""
+  const parts = toTitleCase(name).trim().split(/\s+/)
+  return parts[0] || ""
+}
+
+function truncateResumeText(resumeText: string | null | undefined): string {
+  if (!resumeText) return ""
+  const text = resumeText.trim()
+  if (text.length <= 1200) return text
+  // Try to cut at a reasonable point - take first 1200 chars
+  return text.slice(0, 1200).trim() + "..."
+}
+
 async function buildCallUserData(
   candidate: ScreeningCandidate,
   job: any,
@@ -581,8 +604,12 @@ async function buildCallUserData(
   infoData?: Record<string, unknown> | null
 ): Promise<CallUserDataResult> {
   const { questions, promptUsed } = await generateJDQuestions(job, candidate as any, infoData)
+  const candidateName = toTitleCase(candidate.name || "")
+  const candidateFirstName = getFirstName(candidate.name || "")
+  const limitedQuestions = questions.slice(0, 5)
   const userData = {
-    candidate_name: candidate.name || "",
+    candidate_name: candidateName,
+    candidate_first_name: candidateFirstName,
     current_role: candidate.current_role || "",
     current_company: candidate.current_company || "",
     total_experience: candidate.total_experience != null ? String(candidate.total_experience) : "",
@@ -590,7 +617,7 @@ async function buildCallUserData(
     skills: Array.isArray(candidate.technical_skills)
       ? (candidate.technical_skills as string[]).join(", ")
       : candidate.technical_skills || "",
-    resume_text: candidate.resume_text || "",
+    resume_text: truncateResumeText(candidate.resume_text),
     ...buildAlreadyCollectedUserData(infoData, buildResumeInfo(candidate)),
     job_title: job.title || "",
     client_name: job.client_name || "",
@@ -605,12 +632,18 @@ async function buildCallUserData(
     job_location: jobLocation(job),
     experience_min: job.experience_min_years != null ? String(job.experience_min_years) : "",
     experience_max: job.experience_max_years != null ? String(job.experience_max_years) : "",
-    origin,
-    questions: questions.map((q, i) => `${i + 1}. ${q}`).join("\n"),
+    origin: origin === "inbound" || origin === "outbound" ? origin : origin,
+    questions: limitedQuestions.map((q, i) => `${i + 1}. ${q}`).join("\n"),
     timezone: "",
     participant_id: participantId || "",
   }
-  return { userData, generatedQuestions: questions, geminiPromptUsed: promptUsed }
+  // Validate placeholders are filled - log if any missing
+  for (const [key, value] of Object.entries(userData)) {
+    if (typeof value === "string" && value.includes("{") && value.includes("}")) {
+      console.warn(`[buildCallUserData] Unfilled placeholder in ${key}:`, value)
+    }
+  }
+  return { userData, generatedQuestions: limitedQuestions, geminiPromptUsed: promptUsed }
 }
 
 export type ScreeningCallMode = "call_now" | "quick_screen" | "collect_info_first"

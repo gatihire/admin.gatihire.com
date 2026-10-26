@@ -87,7 +87,12 @@ export async function POST(request: NextRequest) {
     if (status === "completed") {
       await handleCompletedExecution(participant.id, execution)
     } else {
-      await handleFailedExecution(participant as any, execution)
+      // For completed calls that come as different statuses, still try to handle as completed if they have transcript/extracted data
+      if (execution.transcript || execution.extracted_data) {
+        await handleCompletedExecution(participant.id, execution)
+      } else {
+        await handleFailedExecution(participant as any, execution)
+      }
     }
 
     return NextResponse.json({ status: "ok" })

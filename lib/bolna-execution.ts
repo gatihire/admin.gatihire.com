@@ -331,28 +331,65 @@ export async function handleCompletedExecution(
 ): Promise<void> {
   const transcript = execution.transcript || ""
   const verdict = extractVerdictFromTranscript(transcript)
-  const extracted = execution.extracted_data as Record<string, unknown> | null
+  const extracted = (execution.extracted_data as Record<string, unknown> | null) || (execution as any).custom_extractions || null
 
   await writeTranscriptSegments(participantId, transcript)
 
-  // Accept only verdict-shaped objects (Bolna appends a `{"General":{"Call
-  // Summary":…}}` metadata blob to transcripts — JSON, but not a verdict), and
-  // always normalize so score + recommendation are stored together.
+  // Prefer extracted_data from Bolna; fallback to parsing transcript for backward compat
   let effectiveVerdict: ParsedVerdict | null = null
-  if (verdict) {
-    effectiveVerdict = normalizeVerdict(verdict)
-  } else if (extracted && looksLikeVerdict(extracted)) {
+  if (extracted && looksLikeVerdict(extracted)) {
     effectiveVerdict = normalizeVerdict(extracted)
+  } else if (verdict) {
+    effectiveVerdict = normalizeVerdict(verdict)
   }
 
   const now = new Date().toISOString()
   const rawDuration = execution.conversation_duration ?? execution.telephony_data?.duration
+  const hangupReason = execution.telephony_data?.hangup_reason || null
+  const hangupBy = execution.telephony_data?.hangup_by || null
+  const isSynthesizerError = hangupReason === "synthesizer_error"
+  const isVoicemail =
+    execution.answered_by_voice_mail === true || hangupReason === "voicemail_detected" || hangupReason === "voicemail"
+
+  // Classify outcomes per fix plan (B.2.3)
+  const statusFromExec = (execution.status || "").toLowerCase()
+  const isRetryStatus = ["busy", "no-answer", "failed", "canceled"].includes(statusFromExec)
+
+  let classification: "screened" | "not_screened" | "interrupted" | "retry" | "voicemail" = "screened"
+
+  if (isRetryStatus) {
+    classification = "retry"
+  } else if (isVoicemail) {
+    classification = "voicemail"
+  } else {
+    const durationSec = rawDuration ? Number(rawDuration) : 0
+    // Count user turns roughly
+    const userTurnCount = (transcript.match(/^(user|candidate|human):/gim) || []).length
+    const hasClosingLine = /Dhanyavaad|Thank you.*goodbye|goodbye/i.test(transcript)
+    const hasRecommendation = !!effectiveVerdict?.recommendation
+
+    if (durationSec < 45 || userTurnCount < 3) {
+      classification = "not_screened"
+    } else if (hasClosingLine || hasRecommendation) {
+      classification = "screened"
+    } else {
+      // Candidate was mid-answer when call died (or synthesizer error)
+      classification = "interrupted"
+    }
+  }
+
   const patch: Record<string, unknown> = {
-    status: "completed",
-    bolna_status: "completed",
+    status:
+      classification === "interrupted"
+        ? "failed_partial"
+        : classification === "not_screened" || classification === "retry" || classification === "voicemail"
+        ? "failed"
+        : "completed",
+    bolna_status: execution.status || "completed",
     call_duration_seconds: rawDuration ? Number(rawDuration) : null,
     call_ended_at: now,
     updated_at: now,
+    classification_outcome: classification,
   }
 
   if (execution.telephony_data?.recording_url) {
@@ -366,8 +403,14 @@ export async function handleCompletedExecution(
   if (typeof execution.answered_by_voice_mail === "boolean") {
     patch.call_voicemail = execution.answered_by_voice_mail
   }
-  if (execution.telephony_data?.hangup_reason) {
-    patch.call_hangup_reason = execution.telephony_data.hangup_reason
+  if (hangupReason) {
+    patch.call_hangup_reason = hangupReason
+  }
+  if (hangupBy) {
+    patch.hangup_by = hangupBy
+  }
+  if (hangupBy) {
+    patch.hangup_by = hangupBy
   }
 
   // Store raw transcript, cost breakdown, ring duration, carrier, hangup_by
