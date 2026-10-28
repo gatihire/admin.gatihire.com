@@ -126,11 +126,13 @@ export function transcriptToSegments(
   const segments: { speaker: "ai" | "candidate"; text: string }[] = []
 
   // Patterns for AI speaker
-  const aiPatterns = /^(assistant|ai|agent|bot|system|hiring manager|recruiter):\s*(.*)$/i
+  const aiPatterns = /^(assistant|ai|agent|bot|system|hiring manager|recruiter|ai screener|screener):\s*(.*)$/i
   // Patterns for candidate/user speaker
   const candidatePatterns = /^(user|candidate|human|applicant|interviewee|respondent):\s*(.*)$/i
 
-  for (const rawLine of transcript.split("\n")) {
+  const lines = transcript.split("\n")
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i]
     const line = rawLine.trim()
     if (!line) continue
 
@@ -138,13 +140,61 @@ export function transcriptToSegments(
     const candidateMatch = line.match(candidatePatterns)
 
     if (aiMatch) {
-      if (aiMatch[2].trim()) segments.push({ speaker: "ai", text: aiMatch[2].trim() })
+      if (aiMatch[2] && aiMatch[2].trim()) {
+        segments.push({ speaker: "ai", text: aiMatch[2].trim() })
+      } else if (i + 1 < lines.length) {
+        // Label on its own line, next line is the speech
+        const nextLine = lines[i + 1].trim()
+        if (nextLine && !/^(assistant|ai|agent|bot|system|hiring manager|recruiter|ai screener|screener|user|candidate|human|applicant|interviewee|respondent):/i.test(nextLine) && !/^Candidate$/i.test(nextLine) && !/^AI Screener$/i.test(nextLine)) {
+          segments.push({ speaker: "ai", text: nextLine })
+          i++ // skip next line
+          continue
+        }
+      }
+      continue
     } else if (candidateMatch) {
-      if (candidateMatch[2].trim()) segments.push({ speaker: "candidate", text: candidateMatch[2].trim() })
+      if (candidateMatch[2] && candidateMatch[2].trim()) {
+        segments.push({ speaker: "candidate", text: candidateMatch[2].trim() })
+      } else if (i + 1 < lines.length) {
+        const nextLine = lines[i + 1].trim()
+        if (nextLine && !/^(assistant|ai|agent|bot|system|hiring manager|recruiter|ai screener|screener|user|candidate|human|applicant|interviewee|respondent):/i.test(nextLine) && !/^Candidate$/i.test(nextLine) && !/^AI Screener$/i.test(nextLine)) {
+          segments.push({ speaker: "candidate", text: nextLine })
+          i++
+          continue
+        }
+      }
+      continue
+    } else if (/^AI Screener$/i.test(line)) {
+      // Label on its own line
+      if (i + 1 < lines.length) {
+        const nextLine = lines[i + 1].trim()
+        if (nextLine && !/^Candidate$/i.test(nextLine) && !/^AI Screener$/i.test(nextLine)) {
+          segments.push({ speaker: "ai", text: nextLine })
+          i++
+          continue
+        }
+      }
+      continue
+    } else if (/^Candidate$/i.test(line)) {
+      // Label on its own line
+      if (i + 1 < lines.length) {
+        const nextLine = lines[i + 1].trim()
+        if (nextLine && !/^Candidate$/i.test(nextLine) && !/^AI Screener$/i.test(nextLine)) {
+          segments.push({ speaker: "candidate", text: nextLine })
+          i++
+          continue
+        }
+      }
+      continue
     } else {
       // Continuation of the previous speaker's line.
       const last = segments[segments.length - 1]
-      if (last) last.text = `${last.text} ${line}`
+      if (last) {
+        last.text = `${last.text} ${line}`
+      } else {
+        // No previous speaker, might be candidate response
+        segments.push({ speaker: "candidate", text: line })
+      }
     }
   }
 
@@ -311,12 +361,19 @@ async function buildFallbackVerdictPatch(
     }
     const rating = String(fallback.overall_verdict).toLowerCase()
     const recommendation = ratingAlias[rating] ?? ("further_review")
-    const score = Math.max(0, Math.min(10, Math.round((fallback.confidence_score ?? 0) / 10)))
+    // Derive score from recommendation for consistency (not from confidence)
+    // Penalize very short conversations
+    const wordCount = transcript.split(/\s+/).filter(w => w.length > 0).length
+    let derivedScore = recommendation === "advance" ? 8 : recommendation === "further_review" ? 6 : 2
+    if (wordCount < 50) derivedScore = Math.min(derivedScore, 3)
+    else if (wordCount < 100) derivedScore = Math.min(derivedScore, 4)
+    const score = derivedScore
     return {
       verdict_json: fallback,
       ai_summary: fallback.comprehensive_summary,
-      ai_recommendation: recommendation,
+      ai_recommendation: wordCount < 50 ? (recommendation === "advance" ? "further_review" : "not_a_fit") : recommendation,
       ai_score: score,
+      classification_outcome: wordCount < 50 ? "not_screened" : undefined,
       fallback_summary_used: true,
     }
   } catch (err: any) {
@@ -364,11 +421,17 @@ export async function handleCompletedExecution(
   } else {
     const durationSec = rawDuration ? Number(rawDuration) : 0
     // Count user turns roughly
-    const userTurnCount = (transcript.match(/^(user|candidate|human):/gim) || []).length
-    const hasClosingLine = /Dhanyavaad|Thank you.*goodbye|goodbye/i.test(transcript)
+    // Count candidate turns more robustly
+    const segmentsForCount = transcriptToSegments(transcript)
+    const userTurnCount = segmentsForCount.filter(s => s.speaker === "candidate").filter(s => s.text && s.text.trim().length > 0).length
+    const hasClosingLine = /Dhanyavaad|Thank you.*goodbye|goodbye|Aapka bahut shukriya/i.test(transcript)
     const hasRecommendation = !!effectiveVerdict?.recommendation
 
-    if (durationSec < 45 || userTurnCount < 3) {
+    // If it's a very short call with minimal engagement, it's not a proper screening
+    if (durationSec < 30 || userTurnCount < 2) {
+      classification = "not_screened"
+    } else if (durationSec < 60 || userTurnCount < 3) {
+      // Very short call - likely not a proper screening
       classification = "not_screened"
     } else if (hasClosingLine || hasRecommendation) {
       classification = "screened"
@@ -448,8 +511,23 @@ export async function handleCompletedExecution(
       typeof effectiveVerdict.summary === "string" && effectiveVerdict.summary.trim()
         ? effectiveVerdict.summary
         : JSON.stringify(effectiveVerdict)
-    if (typeof effectiveVerdict.score === "number") patch.ai_score = effectiveVerdict.score
-    if (effectiveVerdict.recommendation) patch.ai_recommendation = effectiveVerdict.recommendation
+    // Don't trust scores from very short calls with minimal engagement
+    const segmentsForCountCheck = transcriptToSegments(transcript)
+    const userTurnCountCheck = segmentsForCountCheck.filter(s => s.speaker === "candidate").filter(s => s.text && s.text.trim().length > 0).length
+    const durationSecCheck = rawDuration ? Number(rawDuration) : 0
+    if (typeof effectiveVerdict.score === "number") {
+      if (durationSecCheck < 30 || userTurnCountCheck < 2) {
+        // For very short calls, be conservative - mark as not screened
+        patch.classification_outcome = "not_screened"
+        patch.ai_score = Math.min(effectiveVerdict.score, 3)
+        patch.ai_recommendation = effectiveVerdict.recommendation === "advance" ? "further_review" : (effectiveVerdict.recommendation || "not_a_fit")
+      } else {
+        patch.ai_score = effectiveVerdict.score
+        if (effectiveVerdict.recommendation) patch.ai_recommendation = effectiveVerdict.recommendation
+      }
+    } else if (effectiveVerdict.recommendation) {
+      patch.ai_recommendation = effectiveVerdict.recommendation
+    }
 
     await writeScreeningAnswers(participantId, effectiveVerdict)
 
@@ -491,6 +569,10 @@ export async function handleCompletedExecution(
   })
 
   // Write the terminal patch first (completed status, transcript, etc.)
+  // If classified as not_screened due to minimal engagement, ensure status reflects it
+  if (patch.classification_outcome === "not_screened" && patch.status !== "failed" && patch.status !== "failed_partial") {
+    patch.status = "failed"
+  }
   await supabaseAdmin
     .from("phone_screening_participants")
     .update(patch)

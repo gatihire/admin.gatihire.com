@@ -9,7 +9,7 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
     const params = await props.params
     const { id } = params
     const body = await request.json()
-    const { status, notes, origin } = body
+    const { status, notes, origin, rejection_reason } = body
 
     // Stage changes are an internal recruiting action. This endpoint used to run
     // unauthenticated, which let anyone rewrite an application and fire a
@@ -50,6 +50,8 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
     if (status !== undefined) patch.status = status
     if (notes !== undefined) patch.notes = notes
     if (origin !== undefined) patch.origin = origin
+    if (rejection_reason !== undefined) patch.rejection_reason = rejection_reason
+    if (status === "rejected" && rejection_reason !== undefined) patch.rejection_reason = rejection_reason
     patch.updated_at = new Date().toISOString()
 
     const { data, error } = await supabaseAdmin

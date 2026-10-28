@@ -501,7 +501,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
   const [pendingStageChange, setPendingStageChange] = useState<{
     applicationId: string; from: string; to: string; candidateName: string
   } | null>(null)
-  const [rejectionReason, setRejectionReason] = useState("")
+  const [rejectionReason, setRejectionReason] = useState("Not a good fit")
   const [filter, setFilter] = useState<FilterValue>("all")
   const [allViewTab, setAllViewTab] = useState<"inbound" | "outbound">("inbound")
   const [callSubFilter, setCallSubFilter] = useState<CallSubFilter>(() =>
@@ -746,7 +746,11 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
     } else if (to === "shortlist" && from !== to) {
       setPendingStageChange({ applicationId: appId, from, to, candidateName: name })
     } else {
-      onStageChange(appId, to)
+      try {
+        onStageChange(appId, to)
+      } catch (e) {
+        console.error("Stage change failed", e)
+      }
     }
   }
 
@@ -1825,6 +1829,11 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                           <p className="mt-0.5 text-[10px] font-mono text-zinc-400">
                             execution {String(participant.bolna_execution_id).slice(0, 12)}…
                           </p>
+                        )}
+                        {participant.classification_outcome === "not_screened" && (
+                          <div className="mt-1 inline-flex items-center px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 text-[9px] font-semibold">
+                            Tried but not screened
+                          </div>
                         )}
                         <WhatsAppThreadTimeline
                           history={participant.whatsapp_history}

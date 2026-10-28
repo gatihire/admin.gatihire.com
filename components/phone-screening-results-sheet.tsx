@@ -1004,7 +1004,12 @@ export function PhoneScreeningResultsSheet({
               {activeTab === "recording" && (
                 <div>
                   {!data.recording_url ? (
-                    <p className="text-sm text-zinc-400 text-center py-8">No recording available</p>
+                    <div className="text-center py-8">
+                      <p className="text-sm text-zinc-400 mb-1">No recording available</p>
+                      {(data as any).classification_outcome === "not_screened" && (
+                        <p className="text-xs text-amber-600">Call was too short to produce a full recording/screening</p>
+                      )}
+                    </div>
                   ) : (
                     <div className="space-y-4">
                       {/* Hidden audio element. Bolna URLs are 307s to signed S3
@@ -1091,6 +1096,11 @@ export function PhoneScreeningResultsSheet({
                       {/* Call details */}
                       <div className="p-3 rounded-xl bg-zinc-50 border border-zinc-100">
                         <p className="text-xs font-bold text-zinc-500 mb-2">Call Details</p>
+                        {(data as any).classification_outcome === "not_screened" && (
+                          <div className="mb-2 px-2 py-1 rounded bg-amber-50 text-amber-700 border border-amber-200 text-xs font-semibold">
+                            Tried but not screened — insufficient conversation
+                          </div>
+                        )}
                         <div className="grid grid-cols-2 gap-2 text-sm">
                           <div>
                             <span className="text-zinc-400 text-xs block">Duration</span>

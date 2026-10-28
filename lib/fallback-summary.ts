@@ -21,7 +21,7 @@ export async function generateFallbackSummary(
   candidate?: { name?: string; phone?: string; current_role?: string },
   job?: { title?: string; client_name?: string }
 ): Promise<FallbackSummary | null> {
-  if (!transcript || transcript.trim().length < 50) {
+  if (!transcript || transcript.trim().length < 30) {
     return null
   }
 
@@ -190,6 +190,12 @@ function determineVerdict(
 ): "pass" | "fail" | "review" {
   let score = 50
 
+  // Penalize very short conversations
+  const wordCount = fullText.split(/\s+/).filter(w => w.length > 0).length
+  if (wordCount < 30) score -= 50
+  else if (wordCount < 50) score -= 40
+  else if (wordCount < 100) score -= 20
+
   if (findings.includes("Work experience discussed")) score += 10
   if (findings.includes("Technical skills discussed")) score += 10
   if (findings.includes("Current compensation discussed") && findings.includes("Expected compensation discussed")) score += 10
@@ -201,7 +207,7 @@ function determineVerdict(
   if (fullText.includes("overqualified") || fullText.includes("too senior")) score -= 10
 
   if (score >= 70) return "pass"
-  if (score <= 35) return "fail"
+  if (score <= 25) return "fail"
   return "review"
 }
 
@@ -231,7 +237,8 @@ export async function storeFallbackSummary(
   }
   const recommendation =
     ratingAlias[String(summary.overall_verdict).toLowerCase()] ?? "further_review"
-  const score = Math.max(0, Math.min(10, Math.round((summary.confidence_score ?? 0) / 10)))
+  // Derive score from recommendation for consistency (not from confidence)
+  const score = recommendation === "advance" ? 8 : recommendation === "further_review" ? 6 : 2
   const { error } = await supabaseAdmin
     .from("phone_screening_participants")
     .update({
