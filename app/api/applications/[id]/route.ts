@@ -50,8 +50,9 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
     if (status !== undefined) patch.status = status
     if (notes !== undefined) patch.notes = notes
     if (origin !== undefined) patch.origin = origin
-    if (rejection_reason !== undefined) patch.rejection_reason = rejection_reason
-    if (status === "rejected" && rejection_reason !== undefined) patch.rejection_reason = rejection_reason
+    if (rejection_reason !== undefined && String(rejection_reason).trim()) {
+      patch.rejection_reason = String(rejection_reason).trim()
+    }
     patch.updated_at = new Date().toISOString()
 
     const { data, error } = await supabaseAdmin
@@ -62,6 +63,45 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
       .single()
 
     if (error) {
+      // Try without rejection_reason if column doesn't exist
+      if (error.message?.includes('rejection_reason') && patch.rejection_reason) {
+        delete patch.rejection_reason
+        const { data: data2, error: error2 } = await supabaseAdmin
+          .from("applications")
+          .update(patch)
+          .eq("id", id)
+          .select()
+          .single()
+        if (error2) {
+          return NextResponse.json({ error: error2.message }, { status: 500 })
+        }
+        // continue with data2
+        const resultData = data2
+        if (status && currentApp.status !== status) {
+          logCandidateActivity({
+            jobId: currentApp.job_id,
+            candidateId: currentApp.candidate_id,
+            applicationId: id,
+            eventType: "stage_changed",
+            eventData: { from: currentApp.status, to: status },
+            actor: "hr",
+            actorAuthUserId: ctx.authUser.id,
+          })
+        }
+        if (shouldSendRejectionEmail && resultData) {
+          try {
+            await sendRejectionEmail({
+              candidateEmail: (currentApp.candidates as any)?.email,
+              candidateName: (currentApp.candidates as any)?.name,
+              jobTitle: (currentApp.jobs as any)?.title,
+              companyName: (currentApp.jobs as any)?.client_name,
+            })
+          } catch (emailErr) {
+            console.error("Failed to send rejection email:", emailErr)
+          }
+        }
+        return NextResponse.json(resultData)
+      }
       return NextResponse.json({ error: error.message }, { status: 500 })
     }
 
