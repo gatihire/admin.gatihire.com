@@ -555,8 +555,17 @@ export function PhoneScreeningResultsSheet({
                 </SheetHeader>
 
                 <div className="flex items-center gap-2 flex-wrap mb-3">
-                  {data.ai_score && <ScoreBadge score={data.ai_score} />}
-                  {data.ai_recommendation && <RecommendationBadge recommendation={data.ai_recommendation} />}
+                  {(data as any).classification_outcome === "not_screened" ? (
+                    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border bg-amber-100 text-amber-700 border-amber-300">
+                      <AlertTriangle className="h-4 w-4" />
+                      <span className="font-semibold text-sm">Not Screened - Call Not Completed</span>
+                    </div>
+                  ) : (
+                    <>
+                      {data.ai_score && <ScoreBadge score={data.ai_score} />}
+                      {data.ai_recommendation && <RecommendationBadge recommendation={data.ai_recommendation} />}
+                    </>
+                  )}
                   {data.call_duration_seconds && (
                     <Badge variant="outline" className="gap-1.5 px-3 py-1.5 text-xs bg-zinc-50 border-zinc-200">
                       <Clock className="h-3.5 w-3.5" />
@@ -1007,7 +1016,7 @@ export function PhoneScreeningResultsSheet({
                     <div className="text-center py-8">
                       <p className="text-sm text-zinc-400 mb-1">No recording available</p>
                       {(data as any).classification_outcome === "not_screened" && (
-                        <p className="text-xs text-amber-600">Call was too short to produce a full recording/screening</p>
+                        <p className="text-xs text-amber-600">Call not completed - candidate unavailable/immediate hangup. Needs to be recalled.</p>
                       )}
                     </div>
                   ) : (
@@ -1098,7 +1107,7 @@ export function PhoneScreeningResultsSheet({
                         <p className="text-xs font-bold text-zinc-500 mb-2">Call Details</p>
                         {(data as any).classification_outcome === "not_screened" && (
                           <div className="mb-2 px-2 py-1 rounded bg-amber-50 text-amber-700 border border-amber-200 text-xs font-semibold">
-                            Tried but not screened — insufficient conversation
+                            Call not completed — candidate unavailable. Needs to be recalled.
                           </div>
                         )}
                         <div className="grid grid-cols-2 gap-2 text-sm">

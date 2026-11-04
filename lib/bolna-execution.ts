@@ -364,16 +364,18 @@ async function buildFallbackVerdictPatch(
     // Derive score from recommendation for consistency (not from confidence)
     // Penalize very short conversations
     const wordCount = transcript.split(/\s+/).filter(w => w.length > 0).length
+    const unavailablePattern = /unavailable|not available|couldn't speak|immediately terminated|hung up|disconnected|call back later/i.test(transcript)
     let derivedScore = recommendation === "advance" ? 8 : recommendation === "further_review" ? 6 : 2
-    if (wordCount < 50) derivedScore = Math.min(derivedScore, 3)
+    if (wordCount < 50 || unavailablePattern) derivedScore = 2
     else if (wordCount < 100) derivedScore = Math.min(derivedScore, 4)
     const score = derivedScore
     return {
       verdict_json: fallback,
       ai_summary: fallback.comprehensive_summary,
-      ai_recommendation: wordCount < 50 ? (recommendation === "advance" ? "further_review" : "not_a_fit") : recommendation,
+      ai_recommendation: (wordCount < 50 || unavailablePattern) ? "not_a_fit" : recommendation,
       ai_score: score,
-      classification_outcome: wordCount < 50 ? "not_screened" : undefined,
+      classification_outcome: (wordCount < 50 || unavailablePattern) ? "not_screened" : undefined,
+      status: (wordCount < 50 || unavailablePattern) ? "failed" : undefined,
       fallback_summary_used: true,
     }
   } catch (err: any) {
@@ -426,9 +428,11 @@ export async function handleCompletedExecution(
     const userTurnCount = segmentsForCount.filter(s => s.speaker === "candidate").filter(s => s.text && s.text.trim().length > 0).length
     const hasClosingLine = /Dhanyavaad|Thank you.*goodbye|goodbye|Aapka bahut shukriya/i.test(transcript)
     const hasRecommendation = !!effectiveVerdict?.recommendation
+    const hungUpByCandidate = hangupBy === "user" || hangupBy === "candidate"
+    const unavailablePattern = /unavailable|not available|couldn't speak|immediately terminated|hung up|disconnected/i.test(transcript)
 
     // If it's a very short call with minimal engagement, it's not a proper screening
-    if (durationSec < 30 || userTurnCount < 2) {
+    if (durationSec < 30 || userTurnCount < 2 || (hungUpByCandidate && durationSec < 60) || unavailablePattern && durationSec < 90) {
       classification = "not_screened"
     } else if (durationSec < 60 || userTurnCount < 3) {
       // Very short call - likely not a proper screening
@@ -515,12 +519,15 @@ export async function handleCompletedExecution(
     const segmentsForCountCheck = transcriptToSegments(transcript)
     const userTurnCountCheck = segmentsForCountCheck.filter(s => s.speaker === "candidate").filter(s => s.text && s.text.trim().length > 0).length
     const durationSecCheck = rawDuration ? Number(rawDuration) : 0
+    const unavailablePatternCheck = /unavailable|not available|couldn't speak|immediately terminated|hung up|disconnected/i.test(transcript)
     if (typeof effectiveVerdict.score === "number") {
-      if (durationSecCheck < 30 || userTurnCountCheck < 2) {
+      if (durationSecCheck < 30 || userTurnCountCheck < 2 || (hangupBy === "user" && durationSecCheck < 60) || (unavailablePatternCheck && durationSecCheck < 90)) {
         // For very short calls, be conservative - mark as not screened
         patch.classification_outcome = "not_screened"
-        patch.ai_score = Math.min(effectiveVerdict.score, 3)
-        patch.ai_recommendation = effectiveVerdict.recommendation === "advance" ? "further_review" : (effectiveVerdict.recommendation || "not_a_fit")
+        if (patch.status === "completed") patch.status = "failed"
+        patch.ai_score = Math.min(effectiveVerdict.score, 2)
+        patch.ai_recommendation = "not_a_fit"
+        patch.verdict_json = { ...(effectiveVerdict as any), score: 2, recommendation: "not_a_fit", notes: "Call not completed - candidate unavailable/immediate hangup. Assessment not based on conversation. HR needs to recall." }
       } else {
         patch.ai_score = effectiveVerdict.score
         if (effectiveVerdict.recommendation) patch.ai_recommendation = effectiveVerdict.recommendation

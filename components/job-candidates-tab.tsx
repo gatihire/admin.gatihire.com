@@ -1832,7 +1832,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                         )}
                         {participant.classification_outcome === "not_screened" && (
                           <div className="mt-1 inline-flex items-center px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 text-[9px] font-semibold">
-                            Tried but not screened
+                            Call not completed — needs to be recalled
                           </div>
                         )}
                         <WhatsAppThreadTimeline
