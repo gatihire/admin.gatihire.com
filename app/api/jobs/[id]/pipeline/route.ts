@@ -11,11 +11,6 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   }
 
   const { id: jobId } = await params
-  const { searchParams } = new URL(request.url)
-  const page = Math.max(1, Number(searchParams.get("page") ?? "1") || 1)
-  const perPageRaw = Number(searchParams.get("perPage") ?? "100") || 100
-  const perPage = Math.min(200, Math.max(1, perPageRaw))
-
   try {
     const [applicationsRes, participantsRes, fitScoresRes, sharesRes] = await Promise.all([
       supabaseAdmin
@@ -82,22 +77,14 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       return scoreB - scoreA
     })
 
-    const total = applications.length
-    const start = (page - 1) * perPage
-    const end = start + perPage
-    const paginatedApplications = applications.slice(start, end)
-
     const missingFitCount = applications.filter(a => !(a.candidate_id in fitScores)).length
 
     return NextResponse.json({
-      applications: paginatedApplications,
+      applications,
       participants,
       fitScores,
       clientDecisions,
       missingFitCount,
-      total,
-      page,
-      perPage,
     })
   } catch (error: any) {
     return NextResponse.json({ error: error.message || "Internal Server Error" }, { status: 500 })

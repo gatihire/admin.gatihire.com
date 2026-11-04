@@ -155,10 +155,6 @@ export function JobDetails({ job, onBack, initialTab, initialStage, initialCallS
   const [sourcingView, setSourcingView] = useState<"db_matches" | "juicebox">("db_matches")
   const [missingFitCount, setMissingFitCount] = useState(0)
   const [backfillRunning, setBackfillRunning] = useState(false)
-  const [pipelinePage, setPipelinePage] = useState(1)
-  const [pipelinePerPage] = useState(100)
-  const [pipelineTotal, setPipelineTotal] = useState(0)
-
   const [selectedFitScore, setSelectedFitScore] = useState<number | null>(null)
 
   const handleViewProfile = (candidate: any, application?: Application, participant?: any, aiInfo?: { recommendation?: string; score?: number }, fitScore?: number | null) => {
@@ -185,32 +181,32 @@ export function JobDetails({ job, onBack, initialTab, initialStage, initialCallS
     } catch { setClient(null) }
   }
 
-  const fetchPipeline = async (opts?: { force?: boolean; silent?: boolean; page?: number }) => {
+  const fetchPipeline = async (opts?: { force?: boolean; silent?: boolean }) => {
     // A manual refresh must not blank the pipeline into skeletons: the
     // recruiter loses their scroll position and their selected stage view for
     // the sake of data they are already looking at. Only the initial load (or an
     // explicit reload) shows the loading state.
     if (!opts?.silent) setApplicationLoading(true)
-    const page = opts?.page ?? pipelinePage
     try {
-      const cacheKey = `internal:pipeline:job:${job.id}:page:${page}:perPage:${pipelinePerPage}`
+      const cacheKey = `internal:pipeline:job:${job.id}`
       if (opts?.force) {
         invalidateSessionCache(cacheKey)
       }
-      console.log(`[fetchPipeline] Fetching pipeline for job=${job.id} force=${opts?.force} page=${page}`)
+      console.log(`[fetchPipeline] Fetching pipeline for job=${job.id} force=${opts?.force}`)
       const data = await cachedFetchJson<any>(
-        cacheKey, `/api/jobs/${job.id}/pipeline?page=${page}&perPage=${pipelinePerPage}`,
+        cacheKey, `/api/jobs/${job.id}/pipeline`,
         undefined, { ttlMs: 30_000, force: Boolean(opts?.force) }
       )
       console.log(`[fetchPipeline] Received data: applications=${data?.applications?.length}, fitScores=${Object.keys(data?.fitScores || {}).length}, missingFitCount=${data?.missingFitCount}`)
       if (data) {
         const newApps = Array.isArray(data.applications) ? data.applications : []
-        setApplications(newApps)
+        setApplications(prev => {
+          if (JSON.stringify(prev) === JSON.stringify(newApps)) return prev
+          return newApps
+        })
         setParticipants(data.participants || {})
         setFitScores(data.fitScores || {})
         setClientDecisions(data.clientDecisions || {})
-        setPipelineTotal(data.total ?? newApps.length)
-        setPipelinePage(data.page ?? page)
         const missing = data.missingFitCount || 0
         setMissingFitCount(missing)
         if (missing > 0 && !backfillRunning) {
@@ -252,7 +248,6 @@ export function JobDetails({ job, onBack, initialTab, initialStage, initialCallS
   const selectStage = useCallback((stage: string) => {
     setActiveTab("pipeline")
     setCandidateStage(stage)
-    setPipelinePage(1)
     // Always write the stage, including "all". Omitting it for "all" made the
     // param disappear, and the restore-on-mount effect then read it as missing
     // and jumped the recruiter back to Applied.
@@ -260,8 +255,7 @@ export function JobDetails({ job, onBack, initialTab, initialStage, initialCallS
     params.set("stage", stage)
     const qs = params.toString()
     router.replace(`/jobs/${job.id}?${qs}`, { scroll: false })
-    fetchPipeline({ page: 1, silent: true })
-  }, [job.id, router, fetchPipeline])
+  }, [job.id, router])
 
   const updateStatus = useCallback(async (applicationId: string, newStatus: string, rejectionReason?: string) => {
     setApplications((prev) => prev.map((app) => app.id === applicationId ? { ...app, status: newStatus } : app))
@@ -289,55 +283,24 @@ export function JobDetails({ job, onBack, initialTab, initialStage, initialCallS
     switch (activeTab) {
       case "pipeline":
         return (
-          <div className="space-y-4">
-            <CandidatesTab
-              jobId={job.id}
-              applications={applications}
-              loading={applicationLoading}
-              activeStage={candidateStage}
-              activeCallSubFilter={candidateSubFilter}
-              clientDecisions={clientDecisions}
-              participants={participants}
-              fitScores={fitScores}
-              missingFitCount={missingFitCount}
-              backfillRunning={backfillRunning}
-              pipelinePage={pipelinePage}
-              pipelinePerPage={pipelinePerPage}
-              pipelineTotal={pipelineTotal}
-              onPipelinePageChange={(page) => { setPipelinePage(page); fetchPipeline({ page }) }}
-              onStageSelect={selectStage}
-              onCallSubFilterChange={setCandidateSubFilter}
-              onStageChange={updateStatus}
-              onApplicationUpdated={updateApplication}
-              onViewProfile={handleViewProfile}
-              onRefresh={() => fetchPipeline({ force: true, page: pipelinePage })}
-            />
-            {(pipelineTotal || applications.length) > 0 && (
-              <div className="flex items-center justify-between pt-4">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => { const p = Math.max(1, pipelinePage - 1); setPipelinePage(p); fetchPipeline({ page: p }) }}
-                  disabled={pipelinePage <= 1 || applicationLoading}
-                >
-                  <ChevronDown className="h-3.5 w-3.5 mr-1 rotate-90" />
-                  Previous
-                </Button>
-                <span className="text-xs text-zinc-500 font-medium">
-                  Page {pipelinePage} of {Math.max(1, Math.ceil((pipelineTotal || applications.length) / pipelinePerPage))} · {pipelineTotal || applications.length} total candidates
-                </span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => { const p = pipelinePage + 1; setPipelinePage(p); fetchPipeline({ page: p }) }}
-                  disabled={pipelinePage >= Math.ceil((pipelineTotal || applications.length) / pipelinePerPage) || applicationLoading}
-                >
-                  Next
-                  <ChevronDown className="h-3.5 w-3.5 ml-1 -rotate-90" />
-                </Button>
-              </div>
-            )}
-          </div>
+          <CandidatesTab
+            jobId={job.id}
+            applications={applications}
+            loading={applicationLoading}
+            activeStage={candidateStage}
+            activeCallSubFilter={candidateSubFilter}
+            clientDecisions={clientDecisions}
+            participants={participants}
+            fitScores={fitScores}
+            missingFitCount={missingFitCount}
+            backfillRunning={backfillRunning}
+            onStageSelect={selectStage}
+            onCallSubFilterChange={setCandidateSubFilter}
+            onStageChange={updateStatus}
+            onApplicationUpdated={updateApplication}
+            onViewProfile={handleViewProfile}
+            onRefresh={() => fetchPipeline({ force: true })}
+          />
         )
       case "sourcing":
         return (
