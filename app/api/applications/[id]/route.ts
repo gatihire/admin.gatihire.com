@@ -102,19 +102,23 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
 
     // Send rejection email for inbound/board-app candidates
     if (shouldSendRejectionEmail && data) {
-      const candidate = (data as any).candidates
-      const job = (data as any).jobs
+      const candidate = (data as any).candidates || currentApp.candidates
+      const job = (data as any).jobs || currentApp.jobs
       const fromEmail = process.env.SMTP_FROM_EMAIL || process.env.SMTP_USER || "noreply@gatihire.com"
 
       try {
-        await sendRejectionEmail({
-          to: candidate?.email || "",
-          from: fromEmail,
-          subject: `Update on your application ${job?.title ? `for ${job.title}` : ""}`,
-          candidateName: candidate?.name,
-          jobTitle: job?.title,
-          companyName: job?.client_name,
-        })
+        if (candidate?.email) {
+          await sendRejectionEmail({
+            to: candidate.email,
+            from: fromEmail,
+            subject: `Update on your application ${job?.title ? `for ${job.title}` : ""}`,
+            candidateName: candidate?.name,
+            jobTitle: job?.title,
+            companyName: job?.client_name,
+          })
+        } else {
+          console.error("Failed to send rejection email: No recipients defined")
+        }
       } catch (emailErr) {
         console.error("Failed to send rejection email:", emailErr)
       }

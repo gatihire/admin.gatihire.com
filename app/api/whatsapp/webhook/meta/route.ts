@@ -256,24 +256,46 @@ async function handleIncomingMessage(message: any, contact: any) {
     }
   }
 
-  // Fallback: normalized full-table scan for rows not yet backfilled.
+  // Fallback: targeted search instead of full table scan to avoid timeouts
   if (matchedSet.size === 0) {
-    // Supabase caps a single select at 1000 rows, so paginate the scan.
-    for (let offset = 0; offset < 20000; offset += 1000) {
-      const { data: phoneMatches, error } = await supabaseAdmin
-        .from("candidates")
-        .select("id, phone")
-        .range(offset, offset + 999)
+    try {
+      // Try to find by last 10 digits first (more targeted)
+      const last10 = normalizedFrom.slice(-10)
+      if (last10.length === 10) {
+        const { data: phoneMatches, error } = await supabaseAdmin
+          .from("candidates")
+          .select("id, phone")
+          .or(`phone.ilike.%${last10}%,phone.ilike.%${normalizedFrom}%`)
+          .limit(200)
 
-      if (error) {
-        logger.warn("Candidate phone scan failed", { phoneNumber, error: error.message })
-        findError = error
-        break
+        if (!error && phoneMatches) {
+          for (const c of phoneMatches) {
+            if (normalizedTo(c.phone) === normalizedFrom) matchedSet.add(c.id)
+          }
+        } else if (error) {
+          findError = error
+        }
       }
-      for (const c of phoneMatches || []) {
-        if (normalizedTo(c.phone) === normalizedFrom) matchedSet.add(c.id)
+      
+      // Only do a very limited scan if still no matches and last10 search failed
+      if (matchedSet.size === 0) {
+        const { data: phoneMatches, error } = await supabaseAdmin
+          .from("candidates")
+          .select("id, phone")
+          .limit(5000)
+
+        if (error) {
+          logger.warn("Candidate phone scan failed", { phoneNumber, error: error.message })
+          findError = error
+        } else {
+          for (const c of phoneMatches || []) {
+            if (normalizedTo(c.phone) === normalizedFrom) matchedSet.add(c.id)
+          }
+        }
       }
-      if ((phoneMatches || []).length < 1000) break
+    } catch (err: any) {
+      logger.warn("Candidate fallback lookup error", { phoneNumber, error: err?.message })
+      findError = err
     }
   }
   matchedCandidateIds = Array.from(matchedSet)

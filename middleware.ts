@@ -27,6 +27,8 @@ export async function middleware(request: NextRequest) {
   const tryRefresh = async (): Promise<RefreshedSession | null> => {
     if (!refreshToken) return null;
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000);
       const res = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=refresh_token`, {
         method: "POST",
         headers: {
@@ -34,7 +36,9 @@ export async function middleware(request: NextRequest) {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ refresh_token: refreshToken }),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
       if (!res.ok) return null;
       const data = (await res.json().catch(() => null)) as any;
       const access_token = String(data?.access_token || "");
@@ -49,12 +53,16 @@ export async function middleware(request: NextRequest) {
 
   const validateAccessToken = async (token: string): Promise<boolean> => {
     try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2000);
       const res = await fetch(`${supabaseUrl}/auth/v1/user`, {
         headers: {
           apikey: supabaseAnonKey,
           authorization: `Bearer ${token}`,
         },
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
       return res.ok;
     } catch {
       return false;

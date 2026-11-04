@@ -90,6 +90,9 @@ function escapeHtml(s: string) {
 }
 
 async function sendEmail(input: SendEmailInput) {
+  if (!input.to || !String(input.to).trim()) {
+    throw new Error("No recipients defined")
+  }
   const { serverToken, messageStream } = getPostmarkConfig()
   const smtpCfg = getSmtpConfig()
   if (smtpCfg.user && smtpCfg.pass) {
