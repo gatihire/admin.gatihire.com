@@ -304,33 +304,33 @@ export function JobDetails({ job, onBack, initialTab, initialStage, initialCallS
               pipelinePage={pipelinePage}
               pipelinePerPage={pipelinePerPage}
               pipelineTotal={pipelineTotal}
-              onPipelinePageChange={(page) => { setPipelinePage(page); fetchPipeline({ page, silent: true }) }}
+              onPipelinePageChange={(page) => { setPipelinePage(page); fetchPipeline({ page }) }}
               onStageSelect={selectStage}
               onCallSubFilterChange={setCandidateSubFilter}
               onStageChange={updateStatus}
               onApplicationUpdated={updateApplication}
               onViewProfile={handleViewProfile}
-              onRefresh={() => fetchPipeline({ force: true, silent: true, page: pipelinePage })}
+              onRefresh={() => fetchPipeline({ force: true, page: pipelinePage })}
             />
-            {pipelineTotal > pipelinePerPage && (
+            {(pipelineTotal || applications.length) > 0 && (
               <div className="flex items-center justify-between pt-4">
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => { const p = Math.max(1, pipelinePage - 1); setPipelinePage(p); fetchPipeline({ page: p, silent: true }) }}
+                  onClick={() => { const p = Math.max(1, pipelinePage - 1); setPipelinePage(p); fetchPipeline({ page: p }) }}
                   disabled={pipelinePage <= 1 || applicationLoading}
                 >
                   <ChevronDown className="h-3.5 w-3.5 mr-1 rotate-90" />
                   Previous
                 </Button>
                 <span className="text-xs text-zinc-500 font-medium">
-                  Page {pipelinePage} of {Math.max(1, Math.ceil(pipelineTotal / pipelinePerPage))} · {pipelineTotal} candidates
+                  Page {pipelinePage} of {Math.max(1, Math.ceil((pipelineTotal || applications.length) / pipelinePerPage))} · {pipelineTotal || applications.length} total candidates
                 </span>
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => { const p = pipelinePage + 1; setPipelinePage(p); fetchPipeline({ page: p, silent: true }) }}
-                  disabled={pipelinePage >= Math.ceil(pipelineTotal / pipelinePerPage) || applicationLoading}
+                  onClick={() => { const p = pipelinePage + 1; setPipelinePage(p); fetchPipeline({ page: p }) }}
+                  disabled={pipelinePage >= Math.ceil((pipelineTotal || applications.length) / pipelinePerPage) || applicationLoading}
                 >
                   Next
                   <ChevronDown className="h-3.5 w-3.5 ml-1 -rotate-90" />
