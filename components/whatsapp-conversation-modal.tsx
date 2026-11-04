@@ -636,11 +636,7 @@ export function WhatsAppConversationModal({
     <div className="fixed inset-0 z-[9999] flex items-end justify-center sm:items-center">
       <div
         className="absolute inset-0 bg-zinc-900/40 backdrop-blur-[2px]"
-        onClick={(e) => {
-          e.preventDefault()
-          e.stopPropagation()
-          onOpenChange(false)
-        }}
+        onClick={() => onOpenChange(false)}
         aria-hidden
       />
       <div
@@ -680,15 +676,7 @@ export function WhatsAppConversationModal({
             )}
             <button
               type="button"
-              onClick={(e) => {
-                e.preventDefault()
-                e.stopPropagation()
-                onOpenChange(false)
-              }}
-              onPointerDown={(e) => {
-                e.preventDefault()
-                e.stopPropagation()
-              }}
+              onClick={() => onOpenChange(false)}
               className="rounded-lg px-2 py-1 text-xs font-medium text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800"
             >
               Close
