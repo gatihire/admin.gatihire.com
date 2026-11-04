@@ -118,6 +118,10 @@ export interface CandidatesTabProps {
   fitScores?: Record<string, number | null> | null
   missingFitCount?: number
   backfillRunning?: boolean
+  pipelinePage?: number
+  pipelinePerPage?: number
+  pipelineTotal?: number
+  onPipelinePageChange?: (page: number) => void
   onStageSelect: (stage: string) => void
   onCallSubFilterChange?: (sub: string) => void
   onStageChange: (applicationId: string, newStage: string, rejectionReason?: string) => void
@@ -496,7 +500,7 @@ function formatElapsedSince(pastIso: string): string {
   return days === 1 ? "yesterday" : `${days} days ago`
 }
 
-export function CandidatesTab({ jobId, applications, loading, activeStage, activeCallSubFilter, clientDecisions, participants: participantsProp, fitScores: fitScoresProp, missingFitCount = 0, backfillRunning = false, onStageSelect, onCallSubFilterChange, onStageChange, onApplicationUpdated, onViewProfile, onRefresh }: CandidatesTabProps) {
+export function CandidatesTab({ jobId, applications, loading, activeStage, activeCallSubFilter, clientDecisions, participants: participantsProp, fitScores: fitScoresProp, missingFitCount = 0, backfillRunning = false, pipelinePage = 1, pipelinePerPage = 100, pipelineTotal, onPipelinePageChange, onStageSelect, onCallSubFilterChange, onStageChange, onApplicationUpdated, onViewProfile, onRefresh }: CandidatesTabProps) {
   const { toast } = useToast()
   const [pendingStageChange, setPendingStageChange] = useState<{
     applicationId: string; from: string; to: string; candidateName: string
