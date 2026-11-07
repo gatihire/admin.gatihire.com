@@ -74,9 +74,58 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     .select("*")
     .eq("participant_id", id)
 
+  // Build up to 2 call attempt results for UI (1st/2nd call tabs + summary cards above)
+  const vj = participant?.verdict_json && typeof participant.verdict_json === "string"
+    ? (() => { try { return JSON.parse(participant.verdict_json) } catch { return participant.verdict_json } })()
+    : participant?.verdict_json
+  const currentAttempt = {
+    attempt: Math.max(1, Number(participant?.call_attempts || 1)),
+    is_current: true,
+    bolna_execution_id: participant?.bolna_execution_id || null,
+    status: participant?.status || null,
+    bolna_status: participant?.bolna_status || null,
+    classification_outcome: (vj as any)?._classification_outcome || (participant as any)?.classification_outcome || null,
+    call_ended_at: participant?.call_ended_at || null,
+    call_duration_seconds: participant?.call_duration_seconds ?? null,
+    recording_url: participant?.recording_url || null,
+    transcript_raw: participant?.transcript_raw || null,
+    transcripts: finalTranscripts,
+    answers: answers || [],
+    ai_score: participant?.ai_score ?? null,
+    ai_recommendation: participant?.ai_recommendation || null,
+    ai_summary: participant?.ai_summary || null,
+    verdict_json: participant?.verdict_json || null,
+    hangup_by: participant?.hangup_by || null,
+    call_hangup_reason: participant?.call_hangup_reason || null,
+    call_disconnect_reason: participant?.call_disconnect_reason || null,
+    call_is_partial: participant?.call_is_partial ?? null,
+  }
+
+  const history = Array.isArray((participant as any)?.screening_context?.call_attempt_history)
+    ? ((participant as any).screening_context.call_attempt_history as any[])
+    : []
+  const historyAttempts = history
+    .filter((h) => h && (h.call_ended_at || h.bolna_execution_id || h.transcript_raw || h.verdict_json || h.ai_summary || h.recording_url))
+    .map((h) => ({ ...h, is_current: false, transcripts: undefined, answers: undefined }))
+
+  // Show at most 2 calls total; prefer current + most recent previous
+  const seenExec = new Set<string>()
+  const callResults: any[] = []
+  for (const a of [currentAttempt, ...historyAttempts]) {
+    const key = a?.bolna_execution_id ? String(a.bolna_execution_id) : `a-${a?.attempt}-${a?.call_ended_at || ""}`
+    if (seenExec.has(key)) continue
+    seenExec.add(key)
+    callResults.push(a)
+    if (callResults.length >= 2) break
+  }
+  // Ensure chronological/attempt labels are sensible (1st/2nd by attempt or order)
+  callResults.sort((a, b) => (Number(a?.attempt || 0) - Number(b?.attempt || 0)) || (String(a?.call_ended_at || "").localeCompare(String(b?.call_ended_at || ""))))
+
   return NextResponse.json({
     ...participant,
     transcripts: finalTranscripts,
     answers: answers || [],
+    call_attempt_history: history,
+    call_results: callResults,
   })
 }

@@ -7,7 +7,7 @@ import {
 } from "@/components/ui/sheet"
 import { Badge } from "@/components/ui/badge"
 import {
-  Loader2, Star, Target, AlertTriangle, CheckCircle, Clock,
+  Loader2, Star, Target, AlertTriangle, CheckCircle, Clock, Sparkles,
   DollarSign, User, Phone as PhoneIcon,
   ExternalLink, ThumbsUp, ThumbsDown, PhoneCall, Play, Pause,
   MessageSquare, BarChart3, Mic, MessageCircle,
@@ -24,7 +24,7 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { CollectedInfoView, PreScreenVerdict } from "@/components/candidate-collected-info"
 import { WhatsAppConversationModal } from "@/components/whatsapp-conversation-modal"
-import { getCallTruth } from "@/lib/call-truth"
+import { getCallTruth, describeCallEnd } from "@/lib/call-truth"
 import { MAX_TOTAL_CALL_ATTEMPTS as MAX_CALL_ATTEMPTS } from "@/lib/scheduled-call"
 
 interface TranscriptSegment {
@@ -41,6 +41,29 @@ interface ScreeningAnswer {
   question_text: string
   answer_text: string
   sentiment: string | null
+}
+
+interface CallResultView {
+  attempt: number
+  is_current?: boolean
+  bolna_execution_id?: string | null
+  status?: string | null
+  bolna_status?: string | null
+  classification_outcome?: string | null
+  call_ended_at?: string | null
+  call_duration_seconds?: number | null
+  recording_url?: string | null
+  transcript_raw?: string | null
+  transcripts?: TranscriptSegment[]
+  answers?: any[]
+  ai_score?: number | null
+  ai_recommendation?: string | null
+  ai_summary?: string | null
+  verdict_json?: Record<string, unknown> | string | null
+  hangup_by?: string | null
+  call_hangup_reason?: string | null
+  call_disconnect_reason?: string | null
+  call_is_partial?: boolean | null
 }
 
 type WhatsAppMessage = {
@@ -89,6 +112,10 @@ interface ParticipantDetail {
   cost_breakdown?: Record<string, number> | null
   carrier?: string | null
   hangup_by?: string | null
+  call_hangup_reason?: string | null
+  call_disconnect_reason?: string | null
+  transcript_raw?: string | null
+  bolna_execution_id?: string | null
   ring_duration?: number | null
   call_voicemail?: boolean | null
   whatsapp_sent_at?: string | null
@@ -131,6 +158,8 @@ interface ParticipantDetail {
   jobs?: { id: string; title: string; client_name?: string | null } | null
   transcripts: TranscriptSegment[]
   answers: ScreeningAnswer[]
+  call_attempt_history?: any[]
+  call_results?: CallResultView[]
 }
 
 function ScoreBadge({ score }: { score: number }) {
@@ -228,6 +257,7 @@ export function PhoneScreeningResultsSheet({
   const [loading, setLoading] = useState(false)
   const [showWhatsAppThread, setShowWhatsAppThread] = useState(false)
   const [data, setData] = useState<ParticipantDetail | null>(null)
+  const [selectedCallIndex, setSelectedCallIndex] = useState(0)
   const [approveStage, setApproveStage] = useState("shortlist")
   const [reviewBusy, setReviewBusy] = useState(false)
   const [retryDialogOpen, setRetryDialogOpen] = useState(false)
@@ -238,6 +268,7 @@ export function PhoneScreeningResultsSheet({
   const [audioDuration, setAudioDuration] = useState(0)
   const [audioError, setAudioError] = useState(false)
   const [refreshingRecording, setRefreshingRecording] = useState(false)
+  const [generatingSummary, setGeneratingSummary] = useState(false)
   const audioRef = useRef<HTMLAudioElement>(null)
   const { toast } = useToast()
 
@@ -262,6 +293,22 @@ export function PhoneScreeningResultsSheet({
     }
   }
 
+  const generateSummary = async () => {
+    if (!participantId) return
+    setGeneratingSummary(true)
+    try {
+      const res = await fetch(`/api/bolna/sync-execution?participantId=${encodeURIComponent(participantId)}&sync=1&force=1`)
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error || "Failed to generate summary")
+      await loadParticipant()
+      toast({ title: "Summary updated", description: "Re-synced from Bolna and regenerated summary/verdict where available." })
+    } catch (e: any) {
+      toast({ title: "Generate summary failed", description: e.message || "Could not generate summary", variant: "destructive" })
+    } finally {
+      setGeneratingSummary(false)
+    }
+  }
+
   // Extracted so a message sent from the WhatsApp composer can refresh the row
   // in place. Without this the thread only updates when the sheet is reopened,
   // so a recruiter who had just typed a reply could not see whether it landed.
@@ -269,7 +316,7 @@ export function PhoneScreeningResultsSheet({
     if (!participantId) return
     return fetch(`/api/phone-screening/participants/${participantId}`)
       .then((res) => res.json())
-      .then((json) => setData(json))
+      .then((json) => { setData(json); setSelectedCallIndex(0) })
       .catch(() => setData(null))
   }, [participantId])
 
@@ -277,6 +324,7 @@ export function PhoneScreeningResultsSheet({
     if (!open || !participantId) return
     setLoading(true)
     setData(null)
+    setSelectedCallIndex(0)
     setActiveTab("transcript")
     setIsPlaying(false)
     setAudioProgress(0)
@@ -514,6 +562,79 @@ export function PhoneScreeningResultsSheet({
   const isTerminal = callTruth.terminal
   const isSuccessfulCompletion = callTruth.state === "completed"
   const isFailedOrPartial = callTruth.state === "our_side_failed" || callTruth.state === "partial" || callTruth.state === "not_placed"
+  const vjRaw: any = (d as any).verdict_json
+  const vjObj = typeof vjRaw === "string" ? (() => { try { return JSON.parse(vjRaw) } catch { return null } })() : vjRaw
+  const classificationOutcome = (d as any).classification_outcome || vjObj?._classification_outcome || vjObj?.classification_outcome
+  const isIncompleteScreening = callTruth.state === "partial" || classificationOutcome === "not_screened" || classificationOutcome === "interrupted" || !!(d as any).call_is_partial || d?.status === "failed_partial"
+  const callEndInfo = describeCallEnd(d)
+
+  // Call attempt results (max 2): "Call 1 / Call 2" tabs + two summary cards above
+  const parseVerdictObj = (vj: any) => {
+    if (!vj) return null
+    if (typeof vj === "string") { try { return JSON.parse(vj) } catch { return null } }
+    return vj
+  }
+  const parseTranscriptSegments = (raw?: string | null): TranscriptSegment[] => {
+    if (!raw) return []
+    const aiPatterns = /^(assistant|ai|agent|bot|system|hiring manager|recruiter):\s*(.*)$/i
+    const candidatePatterns = /^(user|candidate|human|applicant|interviewee|respondent):\s*(.*)$/i
+    const segments: TranscriptSegment[] = []
+    for (const rawLine of String(raw).split("\n")) {
+      const line = rawLine.trim()
+      if (!line) continue
+      const aiMatch = line.match(aiPatterns)
+      const candidateMatch = line.match(candidatePatterns)
+      if (aiMatch) {
+        if (aiMatch[2]?.trim()) segments.push({ id: `raw-${segments.length}`, speaker: "ai", text: aiMatch[2].trim(), start_time_sec: null, end_time_sec: null })
+      } else if (candidateMatch) {
+        if (candidateMatch[2]?.trim()) segments.push({ id: `raw-${segments.length}`, speaker: "candidate", text: candidateMatch[2].trim(), start_time_sec: null, end_time_sec: null })
+      } else if (segments.length) {
+        segments[segments.length - 1].text = `${segments[segments.length - 1].text} ${line}`
+      }
+    }
+    if (!segments.length && String(raw).trim()) segments.push({ id: "raw-0", speaker: "ai", text: String(raw).trim(), start_time_sec: null, end_time_sec: null })
+    return segments
+  }
+  const callResultsView: CallResultView[] = (Array.isArray((d as any).call_results) && (d as any).call_results.length)
+    ? (d as any).call_results.slice(0, 2)
+    : [{
+        attempt: Math.max(1, Number(d?.call_attempts || 1)),
+        is_current: true,
+        bolna_execution_id: d?.bolna_execution_id || null,
+        status: d?.status || null,
+        bolna_status: d?.bolna_status || null,
+        classification_outcome: classificationOutcome,
+        call_ended_at: d?.call_ended_at || null,
+        call_duration_seconds: d?.call_duration_seconds ?? null,
+        recording_url: d?.recording_url || null,
+        transcript_raw: (d as any)?.transcript_raw || null,
+        transcripts: d?.transcripts || [],
+        answers: d?.answers || [],
+        ai_score: d?.ai_score ?? null,
+        ai_recommendation: d?.ai_recommendation || null,
+        ai_summary: d?.ai_summary || null,
+        verdict_json: d?.verdict_json || null,
+        hangup_by: d?.hangup_by || null,
+        call_hangup_reason: (d as any)?.call_hangup_reason || null,
+        call_disconnect_reason: (d as any)?.call_disconnect_reason || null,
+        call_is_partial: d?.call_is_partial ?? null,
+      }]
+  const selectedCall = callResultsView[Math.min(selectedCallIndex, Math.max(0, callResultsView.length - 1))] || callResultsView[0]
+  const selectedVerdict = parseVerdictObj(selectedCall?.verdict_json) || (selectedCall?.is_current ? verd : null)
+  const selectedTranscripts = (selectedCall?.transcripts && selectedCall.transcripts.length)
+    ? selectedCall.transcripts
+    : (selectedCall?.is_current ? (d.transcripts || []) : parseTranscriptSegments(selectedCall?.transcript_raw))
+  const selectedRecordingUrl = selectedCall?.recording_url || (selectedCall?.is_current ? d.recording_url : null)
+  const selectedAnswers = (selectedCall?.answers && selectedCall.answers.length) ? selectedCall.answers : (selectedCall?.is_current ? (d.answers || []) : [])
+  const selectedCls = selectedCall?.classification_outcome || parseVerdictObj(selectedCall?.verdict_json)?._classification_outcome
+  const selectedIncomplete = !!(selectedCall?.call_is_partial || selectedCall?.status === "failed_partial" || selectedCls === "not_screened" || selectedCls === "interrupted" || selectedCall?.bolna_status === "stopped" || selectedCall?.bolna_status === "canceled" || (selectedCall?.is_current && isIncompleteScreening))
+  const selectedCallEndInfo = describeCallEnd({
+    hangup_by: selectedCall?.hangup_by,
+    call_hangup_reason: selectedCall?.call_hangup_reason,
+    call_disconnect_reason: selectedCall?.call_disconnect_reason,
+    verdict_json: selectedCall?.verdict_json,
+    classification_outcome: selectedCall?.classification_outcome,
+  } as any)
 
   // Shared attempt budget. Every placement path — the automatic ladder, the
   // pipeline "Call Now" action and this retry button — draws from the same
@@ -577,10 +698,10 @@ export function PhoneScreeningResultsSheet({
                 </SheetHeader>
 
                 <div className="flex items-center gap-2 flex-wrap mb-3">
-                  {(data as any).classification_outcome === "not_screened" ? (
-                    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border bg-amber-100 text-amber-700 border-amber-300">
+                  {isIncompleteScreening ? (
+                    <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border bg-amber-100 text-amber-800 border-amber-300">
                       <AlertTriangle className="h-4 w-4" />
-                      <span className="font-semibold text-sm">Not Screened - Call Not Completed</span>
+                      <span className="font-semibold text-sm">1st screening incomplete — call not completed properly</span>
                     </div>
                   ) : (
                     <>
@@ -602,13 +723,14 @@ export function PhoneScreeningResultsSheet({
                   )}
                 </div>
 
-                {(data.call_is_partial || data.status === "failed_partial") && (
+                {isIncompleteScreening && (
                   <div className="flex items-start gap-2 p-2.5 rounded-lg border border-orange-200 bg-orange-50/60 text-sm text-orange-900 mb-3">
                     <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
                     <div>
-                      <span className="font-bold">Call disconnected mid-conversation.</span>{" "}
-                      Only a partial transcript was captured — the verdict below is best-effort from
-                      whatever was recorded. Consider re-running the call to get a complete screening.
+                      <span className="font-bold">{callEndInfo.short}.</span>{" "}
+                      {classificationOutcome === "not_screened"
+                        ? "The call did not complete a proper screening (e.g., candidate couldn’t hear, hung up early, or auto-cut). Review the transcript/notes and send the call again."
+                        : "A partial transcript/verdict may be available. Review what was recorded and send the call again if needed."}
                     </div>
                   </div>
                 )}
@@ -752,15 +874,32 @@ export function PhoneScreeningResultsSheet({
                       </div>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      <Button size="sm" variant="outline" className="text-xs">
-                        <RefreshCw className="h-3.5 w-3.5 mr-1" />
-                        Re-run Screening
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="text-xs"
+                        onClick={generateSummary}
+                        disabled={generatingSummary || !d?.bolna_execution_id}
+                        title={!d?.bolna_execution_id ? "No Bolna execution linked for this participant" : "Re-sync from Bolna and generate summary/verdict"}
+                      >
+                        {generatingSummary ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Sparkles className="h-3.5 w-3.5 mr-1" />}
+                        {generatingSummary ? "Generating summary…" : "Generate summary"}
                       </Button>
-                      <Button size="sm" variant="outline" className="text-xs">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="text-xs"
+                        onClick={openRetryDialog}
+                        disabled={reviewBusy || atAttemptCap}
+                        title={atAttemptCap ? "All attempts used" : "Send call again"}
+                      >
                         <PhoneCall className="h-3.5 w-3.5 mr-1" />
-                        Manual Follow-up
+                        Send Call Again
                       </Button>
                     </div>
+                    {!d?.bolna_execution_id && (
+                      <p className="text-[11px] text-zinc-500">No Bolna execution is linked. Summary can only be auto-generated when execution/transcript data is available.</p>
+                    )}
                   </div>
                 </div>
               )}
@@ -803,14 +942,10 @@ export function PhoneScreeningResultsSheet({
                           <p className="text-xs text-red-700 mt-0.5">{callTruth.detail}</p>
                         </div>
                       </div>
-                      <div className="flex gap-2 w-full sm:w-auto">
-                        <Button size="sm" variant="outline" className="h-9 text-xs gap-1 flex-1 sm:flex-none" onClick={() => submitReview("reject")} disabled={reviewBusy}>
-                          <UserX className="h-3.5 w-3.5" />
-                          Manual Follow-up
-                        </Button>
+                      <div className="flex gap-2 w-full sm:w-auto flex-wrap">
                         <Button
                           size="sm"
-                          className="h-9 text-xs bg-zinc-600 hover:bg-zinc-700 gap-1 flex-1 sm:flex-none"
+                          className="h-9 text-xs bg-blue-600 hover:bg-blue-700 gap-1 flex-1 sm:flex-none"
                           onClick={openRetryDialog}
                           disabled={reviewBusy || atAttemptCap}
                           title={
@@ -819,8 +954,22 @@ export function PhoneScreeningResultsSheet({
                               : `Place attempt ${attemptsUsed + 1} of ${MAX_CALL_ATTEMPTS}`
                           }
                         >
-                          {reviewBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-                          {atAttemptCap ? "No attempts left" : "Retry Call"}
+                          {reviewBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PhoneCall className="h-3.5 w-3.5" />}
+                          {atAttemptCap ? "No attempts left" : "Send Call Again"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-9 text-xs gap-1 flex-1 sm:flex-none border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+                          onClick={() => setActiveTab("whatsapp")}
+                          disabled={reviewBusy}
+                        >
+                          <MessageCircle className="h-3.5 w-3.5" />
+                          WhatsApp
+                        </Button>
+                        <Button size="sm" variant="outline" className="h-9 text-xs gap-1 flex-1 sm:flex-none" onClick={() => submitReview("reject")} disabled={reviewBusy}>
+                          <UserX className="h-3.5 w-3.5" />
+                          Manual Follow-up
                         </Button>
                       </div>
                       {/* Spend visibility: which attempt this is, what is left, and
@@ -894,15 +1043,84 @@ export function PhoneScreeningResultsSheet({
 
             </div>
 
+            {/* Two call results summary cards (above call tabs) */}
+            {callResultsView.length > 0 && (
+              <div className="px-4 pt-3">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-zinc-400 mb-2">Call results</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {callResultsView.slice(0, 2).map((cr, idx) => {
+                    const crVerd = parseVerdictObj(cr.verdict_json)
+                    const crCls = cr.classification_outcome || crVerd?._classification_outcome
+                    const crEnd = describeCallEnd({ hangup_by: cr.hangup_by, call_hangup_reason: cr.call_hangup_reason, call_disconnect_reason: cr.call_disconnect_reason, verdict_json: cr.verdict_json, classification_outcome: crCls } as any)
+                    const crIncomplete = cr.status === "failed_partial" || cr.call_is_partial || crCls === "not_screened" || crCls === "interrupted" || cr.bolna_status === "stopped" || cr.bolna_status === "canceled"
+                    const active = idx === Math.min(selectedCallIndex, callResultsView.length - 1)
+                    return (
+                      <button
+                        key={`${cr.bolna_execution_id || cr.attempt}-${idx}`}
+                        type="button"
+                        onClick={() => setSelectedCallIndex(idx)}
+                        className={cn(
+                          "text-left rounded-xl border p-3 transition-colors",
+                          active ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 bg-white hover:bg-zinc-50",
+                          crIncomplete && "border-amber-200"
+                        )}
+                      >
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                          <span className="text-xs font-bold text-zinc-800">{cr.attempt === 1 ? "1st Call" : cr.attempt === 2 ? "2nd Call" : `Call ${cr.attempt}`}</span>
+                          {crIncomplete ? (
+                            <Badge variant="outline" className="text-[10px] bg-amber-50 text-amber-700 border-amber-200">Incomplete</Badge>
+                          ) : cr.ai_score != null ? (
+                            <Badge variant="outline" className="text-[10px]">Score {Math.round(Number(cr.ai_score))}</Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-[10px]">{cr.status || "—"}</Badge>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-zinc-600 line-clamp-2">{crEnd.short}{cr.call_duration_seconds ? ` · ${formatDuration(cr.call_duration_seconds)}` : ""}</p>
+                        {cr.ai_summary && <p className="text-[11px] text-zinc-500 mt-1 line-clamp-2">{String(cr.ai_summary)}</p>}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Call attempt tabs (only 2 calls) */}
+            {callResultsView.length > 0 && (
+              <div className="px-4 pt-3 pb-1">
+                <div className="inline-flex rounded-lg border border-zinc-200 bg-zinc-50 p-0.5">
+                  {callResultsView.slice(0, 2).map((cr, idx) => {
+                    const label = cr.attempt === 1 ? "1st Call" : cr.attempt === 2 ? "2nd Call" : `Call ${cr.attempt}`
+                    const active = idx === Math.min(selectedCallIndex, callResultsView.length - 1)
+                    return (
+                      <button
+                        key={`calltab-${cr.bolna_execution_id || idx}`}
+                        type="button"
+                        onClick={() => setSelectedCallIndex(idx)}
+                        className={cn(
+                          "px-3 py-1.5 text-xs font-semibold rounded-md transition-colors",
+                          active ? "bg-white text-zinc-900 shadow-sm" : "text-zinc-500 hover:text-zinc-700"
+                        )}
+                      >
+                        {label}
+                      </button>
+                    )
+                  })}
+                </div>
+                {callResultsView.length < 2 && (d?.call_attempts ?? 0) < 2 && (
+                  <p className="text-[11px] text-zinc-400 mt-1">Only 1 call attempt so far.</p>
+                )}
+              </div>
+            )}
+
             {/* Tabs — sticky so the panel opened below is always in view */}
             <div className="sticky top-0 z-20 bg-white/95 backdrop-blur border-b border-zinc-200 px-2">
               <div className="flex overflow-x-auto">
                 {TABS.map((tab) => {
                   const Icon = tab.icon
                   const count = tab.id === "whatsapp" ? whatsappHistory.length :
-                                tab.id === "transcript" ? data.transcripts.length :
-                                tab.id === "qa" ? data.answers.length :
-                                tab.id === "recording" ? (data.recording_url ? 1 : 0) :
+                                tab.id === "transcript" ? selectedTranscripts.length :
+                                tab.id === "qa" ? selectedAnswers.length :
+                                tab.id === "recording" ? (selectedRecordingUrl ? 1 : 0) :
                                 tab.id === "jd_fit" ? (jdFit ? 1 : 0) : 0
                   return (
                     <button
@@ -1005,11 +1223,14 @@ export function PhoneScreeningResultsSheet({
               {/* Transcript Tab */}
               {activeTab === "transcript" && (
                 <div>
-                  {data.transcripts.length === 0 ? (
-                    <p className="text-sm text-zinc-400 text-center py-8">No transcript available</p>
+                  {selectedTranscripts.length === 0 ? (
+                    <div className="text-center py-8 space-y-2">
+                      <p className="text-sm text-zinc-400">No transcript available{selectedCall ? ` for ${selectedCall.attempt === 1 ? "1st" : selectedCall.attempt === 2 ? "2nd" : selectedCall.attempt + "th"} call` : ""}</p>
+                      {selectedCall?.ai_summary && <p className="text-xs text-zinc-500 max-w-md mx-auto">{String(selectedCall.ai_summary)}</p>}
+                    </div>
                   ) : (
                     <div className="space-y-2">
-                      {data.transcripts.map((t) => (
+                      {selectedTranscripts.map((t) => (
                         <div
                           key={t.id}
                           className={`p-3 rounded-xl text-sm ${
@@ -1026,6 +1247,27 @@ export function PhoneScreeningResultsSheet({
                           <p className="text-zinc-700">{t.text}</p>
                         </div>
                       ))}
+                      {/* Who ended the call / auto-cut — critical for HR triage of incomplete screenings */}
+                      {(selectedCall?.hangup_by || selectedCall?.call_hangup_reason || selectedCall?.call_disconnect_reason || selectedCall?.call_ended_at) && (
+                        <div className={cn(
+                          "p-3 rounded-xl border text-sm",
+                          selectedIncomplete ? "bg-amber-50 border-amber-200" : "bg-zinc-50 border-zinc-200"
+                        )}>
+                          <p className="text-xs font-bold text-zinc-600 mb-1">Call ended ({selectedCall?.attempt === 1 ? "1st call" : selectedCall?.attempt === 2 ? "2nd call" : `call ${selectedCall?.attempt || ""}`})</p>
+                          <p className="text-zinc-800">{selectedCallEndInfo.short}</p>
+                          <p className="text-[11px] text-zinc-500 mt-1">
+                            Raw: hangup_by={String(selectedCall?.hangup_by || "—")}
+                            {selectedCall?.call_hangup_reason ? ` · hangup_reason=${String(selectedCall.call_hangup_reason)}` : ""}
+                            {selectedCall?.call_disconnect_reason ? ` · disconnect_reason=${String(selectedCall.call_disconnect_reason)}` : ""}
+                            {selectedCall?.call_ended_at ? ` · ended_at=${new Date(selectedCall.call_ended_at).toLocaleString("en-IN")}` : ""}
+                          </p>
+                          {selectedIncomplete && (
+                            <p className="text-[11px] text-amber-700 mt-1 font-medium">
+                              Screening incomplete — use “Send Call Again” (or WhatsApp/schedule flow where enabled). Inbound is disabled on current numbers.
+                            </p>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1034,12 +1276,12 @@ export function PhoneScreeningResultsSheet({
               {/* Recording Tab */}
               {activeTab === "recording" && (
                 <div>
-                  {!data.recording_url ? (
+                  {!selectedRecordingUrl ? (
                     <div className="text-center py-8 space-y-3">
                       <div>
                         <p className="text-sm text-zinc-400 mb-1">No recording available</p>
-                        {(data as any).classification_outcome === "not_screened" && (
-                          <p className="text-xs text-amber-600">Call not completed - candidate unavailable/immediate hangup. Needs to be recalled.</p>
+                        {isIncompleteScreening && (
+                          <p className="text-xs text-amber-600">{callEndInfo.short}. Needs to be recalled (send call again).</p>
                         )}
                       </div>
                       <Button variant="outline" size="sm" className="h-8 text-xs" onClick={refreshRecording} disabled={refreshingRecording}>
@@ -1053,7 +1295,7 @@ export function PhoneScreeningResultsSheet({
                           instead of leaving a dead play button. */}
                       <audio
                         ref={audioRef}
-                        src={data.recording_url}
+                        src={selectedRecordingUrl || ""}
                         preload="metadata"
                         onError={() => setAudioError(true)}
                       />
@@ -1117,13 +1359,13 @@ export function PhoneScreeningResultsSheet({
 
                         <div className="flex gap-2">
                           <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5 flex-1" asChild>
-                            <a href={data.recording_url} target="_blank" rel="noopener noreferrer">
+                            <a href={selectedRecordingUrl || data.recording_url || "#"} target="_blank" rel="noopener noreferrer">
                               <Download className="h-3.5 w-3.5" />
                               Download
                             </a>
                           </Button>
                           <Button variant="outline" size="sm" className="h-8 text-xs gap-1.5 flex-1" asChild>
-                            <a href={data.recording_url} target="_blank" rel="noopener noreferrer">
+                            <a href={selectedRecordingUrl || data.recording_url || "#"} target="_blank" rel="noopener noreferrer">
                               <ExternalLink className="h-3.5 w-3.5" />
                               Open
                             </a>
@@ -1135,9 +1377,9 @@ export function PhoneScreeningResultsSheet({
                       {/* Call details */}
                       <div className="p-3 rounded-xl bg-zinc-50 border border-zinc-100">
                         <p className="text-xs font-bold text-zinc-500 mb-2">Call Details</p>
-                        {(data as any).classification_outcome === "not_screened" && (
+                        {isIncompleteScreening && (
                           <div className="mb-2 px-2 py-1 rounded bg-amber-50 text-amber-700 border border-amber-200 text-xs font-semibold">
-                            Call not completed — candidate unavailable. Needs to be recalled.
+                            1st screening incomplete — {callEndInfo.short}. Send call again to complete screening.
                           </div>
                         )}
                         <div className="grid grid-cols-2 gap-2 text-sm">
@@ -1155,10 +1397,13 @@ export function PhoneScreeningResultsSheet({
                               <span className="text-zinc-700">{data.carrier}</span>
                             </div>
                           )}
-                          {data.hangup_by && (
-                            <div>
-                              <span className="text-zinc-400 text-xs block">Hung up by</span>
-                              <span className="text-zinc-700">{data.hangup_by}</span>
+                          {(data.hangup_by || (data as any).call_hangup_reason || (data as any).call_disconnect_reason) && (
+                            <div className="col-span-2">
+                              <span className="text-zinc-400 text-xs block">Call ended by / reason</span>
+                              <span className="text-zinc-700">{callEndInfo.short}</span>
+                              {data.hangup_by && (
+                                <span className="text-zinc-400 text-xs ml-1">(hangup_by: {data.hangup_by}{(data as any).call_hangup_reason ? `, reason: ${(data as any).call_hangup_reason}` : ""})</span>
+                              )}
                             </div>
                           )}
                           {data.ring_duration != null && (
@@ -1198,11 +1443,11 @@ export function PhoneScreeningResultsSheet({
               {/* Q&A Tab */}
               {activeTab === "qa" && (
                 <div>
-                  {data.answers.length === 0 ? (
+                  {selectedAnswers.length === 0 ? (
                     <p className="text-sm text-zinc-400 text-center py-8">No screening answers available</p>
                   ) : (
                     <div className="space-y-3">
-                      {data.answers.map((a) => (
+                      {selectedAnswers.map((a: any) => (
                         <div key={a.id} className="p-3 rounded-xl bg-zinc-50 border border-zinc-100">
                           <p className="text-xs font-semibold text-zinc-400 mb-1">{a.question_text}</p>
                           <p className="text-sm text-zinc-800">{a.answer_text || "Not disclosed"}</p>

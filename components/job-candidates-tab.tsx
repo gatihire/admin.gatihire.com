@@ -378,10 +378,13 @@ function getActionForCard(application: Application, callStatus?: string, partici
     if (callStatus === "failed") {
       const bolnaStatus = participant?.bolna_status
       const retryCount = participant?.retry_count || 0
-      if (participant?.call_is_partial) return { label: "Call disconnected mid-conversation — partial transcript captured. Review what was recorded.", cta: "Review Partial", icon: AlertCircle, color: "bg-orange-50 border-orange-200 text-orange-800", action: "view_results" }
-      if (bolnaStatus === "no-answer") return { label: `No answer after ${retryCount} attempt${retryCount !== 1 ? "s" : ""} — needs manual follow-up`, cta: "Manual Follow-up", icon: UserX, color: "bg-red-50 border-red-200 text-red-800", action: "manual_followup" }
-      if (bolnaStatus === "busy") return { label: `Line busy after ${retryCount} attempt${retryCount !== 1 ? "s" : ""} — needs manual follow-up`, cta: "Manual Follow-up", icon: UserX, color: "bg-red-50 border-red-200 text-red-800", action: "manual_followup" }
-      return { label: "Call failed — needs manual follow-up", cta: "Manual Follow-up", icon: UserX, color: "bg-red-50 border-red-200 text-red-800", action: "manual_followup" }
+      const hasCallData = !!(participant?.transcript_raw || participant?.recording_url || participant?.call_ended_at || participant?.bolna_execution_id)
+      if (participant?.call_is_partial) return { label: "1st screening incomplete (call disconnected mid-conversation). Review transcript and send call again.", cta: "View 1st uncompleted screening", icon: AlertCircle, color: "bg-orange-50 border-orange-200 text-orange-800", action: "view_results" }
+      // If we have call data but screening wasn't completed properly, let HR review and retry
+      if (hasCallData) return { label: "1st screening incomplete (call ended before proper screening). Review and send call again.", cta: "View 1st uncompleted screening", icon: AlertCircle, color: "bg-orange-50 border-orange-200 text-orange-800", action: "view_results" }
+      if (bolnaStatus === "no-answer") return { label: `No answer after ${retryCount} attempt${retryCount !== 1 ? "s" : ""} — needs follow-up`, cta: "Send Call Again", icon: RefreshCw, color: "bg-red-50 border-red-200 text-red-800", action: "retry_now" }
+      if (bolnaStatus === "busy") return { label: `Line busy after ${retryCount} attempt${retryCount !== 1 ? "s" : ""} — needs follow-up`, cta: "Send Call Again", icon: RefreshCw, color: "bg-red-50 border-red-200 text-red-800", action: "retry_now" }
+      return { label: "Call failed — send call again or follow up on WhatsApp", cta: "Send Call Again", icon: RefreshCw, color: "bg-red-50 border-red-200 text-red-800", action: "retry_now" }
     }
     
     // CALLING
@@ -439,8 +442,25 @@ function getActionForCard(application: Application, callStatus?: string, partici
       return { label: "WhatsApp sent — waiting for candidate to respond", cta: "Waiting", icon: Send, color: "bg-amber-50 border-amber-200 text-amber-800", action: null }
     }
 
-    // REVIEW (AI prescreen flagged for HR)
+    // REVIEW (AI prescreen flagged for HR, or incomplete call screening)
     if (callStatus === "review") {
+      const vj: any = participant?.verdict_json && typeof participant.verdict_json === "string" ? (() => { try { return JSON.parse(participant.verdict_json) } catch { return null } })() : participant?.verdict_json
+      const cls = vj?._classification_outcome || participant?.classification_outcome
+      const isIncompleteCall = !!(
+        participant?.call_is_partial ||
+        cls === "not_screened" || cls === "interrupted" ||
+        ((participant?.bolna_execution_id || participant?.call_ended_at || participant?.transcript_raw || participant?.recording_url) &&
+          (participant?.status === "failed_partial" || participant?.status === "failed" || participant?.bolna_status === "stopped" || participant?.bolna_status === "canceled"))
+      )
+      if (isIncompleteCall) {
+        return {
+          label: "1st screening incomplete (call ended/couldn’t complete). Review what happened and send call again.",
+          cta: "View 1st uncompleted screening",
+          icon: AlertCircle,
+          color: "bg-orange-50 border-orange-200 text-orange-800",
+          action: "view_results",
+        }
+      }
       const aiSaysReject = participant?.screening_context?.aiSuggestsRejection
       if (aiSaysReject) {
         return {

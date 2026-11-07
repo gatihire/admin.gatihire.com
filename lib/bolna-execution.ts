@@ -369,18 +369,113 @@ async function buildFallbackVerdictPatch(
     if (wordCount < 50 || unavailablePattern) derivedScore = 2
     else if (wordCount < 100) derivedScore = Math.min(derivedScore, 4)
     const score = derivedScore
+    const cls = (wordCount < 50 || unavailablePattern) ? "not_screened" : undefined
+    const vj: any = { ...(fallback as any) }
+    if (cls) vj._classification_outcome = cls
     return {
-      verdict_json: fallback,
+      verdict_json: vj,
       ai_summary: fallback.comprehensive_summary,
       ai_recommendation: (wordCount < 50 || unavailablePattern) ? "not_a_fit" : recommendation,
       ai_score: score,
-      classification_outcome: (wordCount < 50 || unavailablePattern) ? "not_screened" : undefined,
       status: (wordCount < 50 || unavailablePattern) ? "failed" : undefined,
       fallback_summary_used: true,
     }
   } catch (err: any) {
     logger.warn("Fallback summary generation failed", { participantId, error: err.message })
     return null
+  }
+}
+
+type CallAttemptSnapshot = {
+  attempt: number
+  bolna_execution_id: string | null
+  status: string | null
+  bolna_status: string | null
+  classification_outcome: string | null
+  call_ended_at: string | null
+  call_duration_seconds: number | null
+  recording_url: string | null
+  transcript_raw: string | null
+  ai_score: number | null
+  ai_recommendation: string | null
+  ai_summary: string | null
+  verdict_json: any
+  hangup_by: string | null
+  call_hangup_reason: string | null
+  call_disconnect_reason: string | null
+  call_is_partial?: boolean | null
+}
+
+function extractClassificationFromVerdict(vj: any): string | null {
+  if (!vj) return null
+  try {
+    const obj = typeof vj === "string" ? JSON.parse(vj) : vj
+    return obj?._classification_outcome || obj?.classification_outcome || null
+  } catch {
+    return null
+  }
+}
+
+async function snapshotPreviousCallAttempt(participantId: string, incomingExecutionId?: string | null): Promise<void> {
+  try {
+    const { data: p } = await supabaseAdmin
+      .from("phone_screening_participants")
+      .select("id, screening_context, verdict_json, ai_score, ai_recommendation, ai_summary, recording_url, call_duration_seconds, call_ended_at, call_hangup_reason, call_disconnect_reason, hangup_by, status, bolna_status, bolna_execution_id, call_attempts, transcript_raw, call_is_partial")
+      .eq("id", participantId)
+      .maybeSingle()
+    if (!p) return
+
+    const incoming = incomingExecutionId ? String(incomingExecutionId) : null
+    const currentExec = p.bolna_execution_id ? String(p.bolna_execution_id) : null
+    // Same execution sync/update: do not create duplicate history
+    if (incoming && currentExec && incoming === currentExec) return
+
+    // Only snapshot if there is evidence of a previous ended call/result
+    const hasPreviousResult = !!(
+      p.call_ended_at || p.recording_url || p.transcript_raw || p.verdict_json || p.ai_summary ||
+      (p.bolna_status && ["completed","failed","stopped","canceled","no-answer","busy","error","call-disconnected"].includes(String(p.bolna_status).toLowerCase()))
+    )
+    if (!hasPreviousResult) return
+
+    const ctx = (p.screening_context && typeof p.screening_context === "object" && !Array.isArray(p.screening_context))
+      ? { ...(p.screening_context as any) }
+      : {}
+    const history: CallAttemptSnapshot[] = Array.isArray(ctx.call_attempt_history) ? [...ctx.call_attempt_history] : []
+
+    // Avoid duplicating the same execution snapshot
+    if (currentExec && history.some(h => h?.bolna_execution_id && String(h.bolna_execution_id) === currentExec)) return
+
+    const attemptNum = Math.max(1, Number(p.call_attempts || 1))
+    const snapshot: CallAttemptSnapshot = {
+      attempt: attemptNum,
+      bolna_execution_id: currentExec,
+      status: p.status ?? null,
+      bolna_status: p.bolna_status ?? null,
+      classification_outcome: extractClassificationFromVerdict(p.verdict_json),
+      call_ended_at: p.call_ended_at ?? null,
+      call_duration_seconds: p.call_duration_seconds ?? null,
+      recording_url: p.recording_url ?? null,
+      transcript_raw: p.transcript_raw ?? null,
+      ai_score: p.ai_score ?? null,
+      ai_recommendation: p.ai_recommendation ?? null,
+      ai_summary: p.ai_summary ?? null,
+      verdict_json: p.verdict_json ?? null,
+      hangup_by: p.hangup_by ?? null,
+      call_hangup_reason: p.call_hangup_reason ?? null,
+      call_disconnect_reason: p.call_disconnect_reason ?? null,
+      call_is_partial: p.call_is_partial ?? null,
+    }
+
+    // Keep latest snapshots (max 2)
+    history.unshift(snapshot)
+    ctx.call_attempt_history = history.slice(0, 2)
+
+    await supabaseAdmin
+      .from("phone_screening_participants")
+      .update({ screening_context: ctx, updated_at: new Date().toISOString() })
+      .eq("id", participantId)
+  } catch (err) {
+    logger.warn("Failed to snapshot previous call attempt", { participantId, error: (err as any)?.message })
   }
 }
 
@@ -429,7 +524,7 @@ export async function handleCompletedExecution(
     const hasClosingLine = /Dhanyavaad|Thank you.*goodbye|goodbye|Aapka bahut shukriya/i.test(transcript)
     const hasRecommendation = !!effectiveVerdict?.recommendation
     const hungUpByCandidate = hangupBy === "user" || hangupBy === "candidate"
-    const unavailablePattern = /unavailable|not available|couldn't speak|immediately terminated|hung up|disconnected/i.test(transcript)
+    const unavailablePattern = /unavailable|not available|couldn't speak|immediately terminated|hung up|disconnected|cannot hear|can't hear|not able to listen|audio issue|voice not audible|inaudible|no audio/i.test(transcript)
 
     // If it's a very short call with minimal engagement, it's not a proper screening
     if (durationSec < 30 || userTurnCount < 2 || (hungUpByCandidate && durationSec < 60) || unavailablePattern && durationSec < 90) {
@@ -456,7 +551,10 @@ export async function handleCompletedExecution(
     call_duration_seconds: rawDuration != null && rawDuration !== '' && !Number.isNaN(Number(rawDuration)) ? Math.round(Number(rawDuration)) : null,
     call_ended_at: now,
     updated_at: now,
-    classification_outcome: classification,
+  }
+  // Flag incomplete screenings for HR follow-up (send call again / WhatsApp)
+  if (classification === "not_screened" || classification === "interrupted") {
+    patch.needs_manual_followup = true
   }
 
   const recordingUrl =
@@ -525,15 +623,16 @@ export async function handleCompletedExecution(
     const segmentsForCountCheck = transcriptToSegments(transcript)
     const userTurnCountCheck = segmentsForCountCheck.filter(s => s.speaker === "candidate").filter(s => s.text && s.text.trim().length > 0).length
     const durationSecCheck = rawDuration ? Number(rawDuration) : 0
-    const unavailablePatternCheck = /unavailable|not available|couldn't speak|immediately terminated|hung up|disconnected/i.test(transcript)
+    const unavailablePatternCheck = /unavailable|not available|couldn't speak|immediately terminated|hung up|disconnected|cannot hear|can't hear|not able to listen|audio issue|voice not audible|inaudible|no audio/i.test(transcript)
     if (typeof effectiveVerdict.score === "number") {
       if (durationSecCheck < 30 || userTurnCountCheck < 2 || (hangupBy === "user" && durationSecCheck < 60) || (unavailablePatternCheck && durationSecCheck < 90)) {
-        // For very short calls, be conservative - mark as not screened
-        patch.classification_outcome = "not_screened"
+        // For very short calls, be conservative - mark as not screened (1st screening incomplete)
+        classification = "not_screened"
         if (patch.status === "completed") patch.status = "failed"
+        patch.needs_manual_followup = true
         patch.ai_score = Math.min(effectiveVerdict.score, 2)
         patch.ai_recommendation = "not_a_fit"
-        patch.verdict_json = { ...(effectiveVerdict as any), score: 2, recommendation: "not_a_fit", notes: "Call not completed - candidate unavailable/immediate hangup. Assessment not based on conversation. HR needs to recall." }
+        patch.verdict_json = { ...(effectiveVerdict as any), score: 2, recommendation: "not_a_fit", notes: "1st screening incomplete (call ended/couldn’t hear/auto-cut or too short). Assessment not based on a completed conversation. HR should review transcript and send call again." }
       } else {
         patch.ai_score = effectiveVerdict.score
         if (effectiveVerdict.recommendation) patch.ai_recommendation = effectiveVerdict.recommendation
@@ -583,9 +682,21 @@ export async function handleCompletedExecution(
 
   // Write the terminal patch first (completed status, transcript, etc.)
   // If classified as not_screened due to minimal engagement, ensure status reflects it
-  if (patch.classification_outcome === "not_screened" && patch.status !== "failed" && patch.status !== "failed_partial") {
+  if (classification === "not_screened" && patch.status !== "failed" && patch.status !== "failed_partial") {
     patch.status = "failed"
   }
+  // Persist classification in verdict_json metadata (classification_outcome column may not exist)
+  try {
+    const vj = patch.verdict_json
+    if (vj && typeof vj === "object" && !Array.isArray(vj)) {
+      ;(vj as any)._classification_outcome = classification
+      ;(vj as any)._hangup_by = hangupBy || null
+      ;(vj as any)._call_hangup_reason = hangupReason || null
+      patch.verdict_json = vj
+    } else if (classification && classification !== "screened") {
+      patch.verdict_json = { _classification_outcome: classification, _hangup_by: hangupBy || null, _call_hangup_reason: hangupReason || null }
+    }
+  } catch {}
   await supabaseAdmin
     .from("phone_screening_participants")
     .update(patch)
@@ -1044,6 +1155,8 @@ export async function handleFailedExecution(
   participant: ParticipantRecord,
   execution: BolnaExecution
 ): Promise<void> {
+  // Snapshot previous call result before overwriting (supports "Call 1 / Call 2" history in UI)
+  await snapshotPreviousCallAttempt(participant.id, (execution as any)?.id || (execution as any)?.execution_id || null)
   const now = new Date().toISOString()
 
   // Detect a partial / mid-conversation drop: candidate (or agent) hung up while a
@@ -1060,6 +1173,10 @@ export async function handleFailedExecution(
   const retryMinutes =
     execution.status === "no-answer" || execution.status === "busy" ? 15 : 60
 
+  const hangupBy = (execution as any)?.hangup_by ?? execution.telephony_data?.hangup_by ?? null
+  const hangupReason = execution.telephony_data?.hangup_reason ?? (execution as any)?.hangup_reason ?? null
+  const classification: "not_screened" | "interrupted" | "retry" = isPartialCall ? "interrupted" : "retry"
+
   const patch: Record<string, unknown> = {
     status: isPartialCall ? "failed_partial" : maxRetriesReached ? "unreachable" : "failed",
     bolna_status: execution.status || "failed",
@@ -1067,6 +1184,10 @@ export async function handleFailedExecution(
     retry_count: currentRetryCount,
     call_is_partial: isPartialCall ? true : null,
     updated_at: now,
+  }
+  // Incomplete/partial screenings and failed attempts need HR attention in /jobs and /today.
+  if (isPartialCall || maxRetriesReached || execution.status === "no-answer" || execution.status === "busy") {
+    patch.needs_manual_followup = true
   }
 
   // Only set next_retry_at if we haven't reached max retries
@@ -1082,9 +1203,10 @@ export async function handleFailedExecution(
   if (typeof execution.total_cost === "number") {
     patch.call_cost_cents = Math.round(execution.total_cost * 100)
   }
-  if (execution.telephony_data?.hangup_reason) {
-    patch.call_hangup_reason = execution.telephony_data.hangup_reason
-    patch.call_disconnect_reason = execution.telephony_data.hangup_reason
+  if (hangupBy) patch.hangup_by = hangupBy
+  if (hangupReason) {
+    patch.call_hangup_reason = hangupReason
+    patch.call_disconnect_reason = hangupReason
   }
   if (execution.context_details?.timezone) {
     patch.candidate_timezone = execution.context_details.timezone
@@ -1127,6 +1249,19 @@ export async function handleFailedExecution(
     }
   }
 
+  // Persist classification/hangup metadata for UI (who ended call, incomplete screening)
+  try {
+    const vj = patch.verdict_json
+    if (vj && typeof vj === "object" && !Array.isArray(vj)) {
+      ;(vj as any)._classification_outcome = classification
+      ;(vj as any)._hangup_by = hangupBy || null
+      ;(vj as any)._call_hangup_reason = hangupReason || null
+      patch.verdict_json = vj
+    } else if (isPartialCall) {
+      patch.verdict_json = { _classification_outcome: classification, _hangup_by: hangupBy || null, _call_hangup_reason: hangupReason || null, summary: "1st screening incomplete (call ended mid-conversation). Review transcript and send call again." }
+      if (!patch.ai_summary) patch.ai_summary = "1st screening incomplete (call ended mid-conversation). Review transcript and send call again."
+    }
+  } catch {}
   await supabaseAdmin
     .from("phone_screening_participants")
     .update(patch)

@@ -262,6 +262,7 @@ const KIND_CONFIG: Record<WorkItemKind, KindConfig> = {
     selectable: true,
     actions: [
       { id: "decide", label: "Review & decide", variant: "primary" },
+      { id: "call", label: "Send call again", variant: "default" },
       { id: "advance", label: "Move forward", variant: "default" },
       { id: "reject", label: "Reject", variant: "danger" },
       { id: "log_call", label: "Log a call", variant: "default" },

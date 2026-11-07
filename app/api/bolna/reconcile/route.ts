@@ -130,12 +130,24 @@ export async function GET(request: NextRequest) {
       if (execution.status === "completed") {
         await handleCompletedExecution(target.id, execution)
       } else {
-        // Resolve the full participant record for retry bookkeeping.
-        const participant = singleTarget
-          ? (await resolveSyncTarget({ executionId: singleExecutionId, phone: singlePhone, email: singleEmail })).participant
-          : null
+        // Resolve the full participant record for retry/failure bookkeeping (bulk + single).
+        let participant: any = null
+        if (singleTarget) {
+          participant = (await resolveSyncTarget({ executionId: singleExecutionId, phone: singlePhone, email: singleEmail })).participant
+        } else {
+          const { data: p } = await supabaseAdmin
+            .from("phone_screening_participants")
+            .select(`id, status, call_attempts, retry_count, whatsapp_missed_nudge_sent, whatsapp_history,
+              candidates: candidate_id (id, name, phone),
+              jobs: job_id (id, title, client_name)`)
+            .eq("id", target.id)
+            .maybeSingle()
+          participant = p
+        }
         if (participant) {
           await handleFailedExecution(participant as any, execution)
+        } else {
+          logger.warn("Reconcile: participant not found for failed execution", { participantId: target.id, executionId: execution.id })
         }
       }
       healed.push({ participantId: target.id, executionId: execution.id || null, status: execution.status })

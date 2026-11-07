@@ -73,6 +73,43 @@ function fmtDuration(seconds?: number | null): string {
   return m > 0 ? `${m}m ${r}s` : `${r}s`
 }
 
+function getClassificationOutcome(p: any): string | null {
+  // Prefer explicit field if present (future-proof), else verdict_json metadata
+  if (p?.classification_outcome) return String(p.classification_outcome)
+  const vj = p?.verdict_json
+  if (!vj) return null
+  try {
+    const obj = typeof vj === "string" ? JSON.parse(vj) : vj
+    return obj?._classification_outcome || obj?.classification_outcome || null
+  } catch {
+    return null
+  }
+}
+
+export function describeCallEnd(p: any): { who: string; reason: string; short: string } {
+  const hangupBy = String(p?.hangup_by || "").toLowerCase()
+  const reason = String(p?.call_hangup_reason || p?.call_disconnect_reason || "").toLowerCase()
+  const cls = getClassificationOutcome(p)
+  let who = "Unknown"
+  if (hangupBy === "user" || hangupBy === "candidate" || hangupBy === "customer" || hangupBy === "callee") who = "Candidate"
+  else if (hangupBy === "agent" || hangupBy === "assistant" || hangupBy === "bot") who = "AI agent"
+  else if (hangupBy === "system" || hangupBy === "provider" || hangupBy === "platform") who = "System"
+  if (!p?.hangup_by && /synthesizer|timeout|network|provider|balance|system|error/i.test(reason)) who = "System/auto"
+  const reasonText =
+    /cannot hear|can't hear|not able to listen|inaudible|no audio|audio/i.test(reason) ? "Audio issue / couldn’t hear" :
+    /synthesizer/.test(reason) ? "AI voice/system error" :
+    /voicemail/.test(reason) ? "Voicemail" :
+    /busy/.test(reason) ? "Line busy" :
+    /no-answer|no_answer/.test(reason) ? "No answer" :
+    /hangup|disconnect/.test(reason) ? "Call disconnected" :
+    reason ? reason.replace(/[_-]+/g, " ") : (cls === "not_screened" ? "Incomplete screening" : "Call ended")
+  const short = who === "Candidate" ? `Candidate ended call · ${reasonText}` :
+    who === "AI agent" ? `AI agent ended call · ${reasonText}` :
+    who === "System/auto" || who === "System" ? `Auto-cut/system ended call · ${reasonText}` :
+    `Call ended · ${reasonText}`
+  return { who, reason: reasonText, short }
+}
+
 function truth(
   state: CallTruthState,
   label: string,
@@ -156,12 +193,24 @@ export function getCallTruth(p: any): CallTruth {
   // ── 1. Provider-confirmed outcomes. Highest priority: these are facts. ──
   if (bolnaStatus === "completed") {
     const dur = fmtDuration(duration)
+    const cls = getClassificationOutcome(p)
+    const endInfo = describeCallEnd(p)
     if (voicemail) {
       return truth(
         "voicemail",
         "Went to voicemail",
         `Call placed · answered by voicemail, not a person${dur ? ` · ${dur}` : ""}`,
         { tone: "warning", bucket: "failed", terminal: true, providerConfirmed: true }
+      )
+    }
+    // Technically completed on provider side, but screening was not completed
+    // properly (couldn't hear, hung up early, auto-cut, too short, etc.)
+    if (cls === "not_screened" || cls === "interrupted" || status === "failed_partial" || p.call_is_partial === true) {
+      return truth(
+        "partial",
+        "1st screening incomplete",
+        `${endInfo.short}${dur ? ` · ${dur}` : ""} · review transcript and retry call`,
+        { tone: "warning", bucket: "review", terminal: true, providerConfirmed: true }
       )
     }
     return truth(
@@ -203,12 +252,11 @@ export function getCallTruth(p: any): CallTruth {
 
   // ── 2. Failed / partial. Distinguish our fault from theirs. ──
   if (bolnaStatus === "stopped" || bolnaStatus === "canceled") {
+    const endInfo = describeCallEnd(p)
     return truth(
       "partial",
-      "Call cut off",
-      hangupReason
-        ? `Hung up mid-conversation (${hangupReason})`
-        : "Call stopped before it finished",
+      "1st screening incomplete",
+      `${endInfo.short}${fmtDuration(duration) ? ` · ${fmtDuration(duration)}` : ""} · review transcript and retry if needed`,
       { tone: "warning", bucket: "review", providerConfirmed: true }
     )
   }
@@ -236,10 +284,11 @@ export function getCallTruth(p: any): CallTruth {
   }
 
   if (status === "failed_partial" || p.call_is_partial === true) {
+    const endInfo = describeCallEnd(p)
     return truth(
       "partial",
-      "Dropped mid-call",
-      "Call ended before the screening finished — transcript is partial",
+      "1st screening incomplete",
+      `${endInfo.short}${fmtDuration(duration) ? ` · ${fmtDuration(duration)}` : ""} · transcript may be partial`,
       { tone: "warning", bucket: "review", providerConfirmed: true }
     )
   }
