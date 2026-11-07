@@ -52,7 +52,34 @@ export async function POST(request: NextRequest) {
     }
 
     if (!BOLNA_TERMINAL_STATUSES.has(status)) {
-      // Intermediate status — keep bolna_status fresh, do nothing else.
+      // Some "non-terminal" webhook statuses (e.g. call-disconnected) can arrive
+      // with completion data, or the true terminal webhook may be missed. If we
+      // have enough data to finalize, do it now to avoid stuck in_progress records.
+      const hasCompletionData = Boolean(
+        execution.transcript ||
+        execution.extracted_data ||
+        execution.telephony_data?.recording_url ||
+        (execution as any).recording_url
+      )
+      const looksDisconnected = /disconnect|ended|hangup/i.test(status || "")
+      if (hasCompletionData || looksDisconnected) {
+        // Prefer treating as completed when we have data; otherwise let the
+        // completed/failed handlers decide based on execution details.
+        if (hasCompletionData) {
+          await handleCompletedExecution(participant.id, execution)
+        } else {
+          // Disconnected without data in payload - check if Bolna has more info
+          // by reusing the resolved execution; if still ambiguous, mark failed.
+          if (execution.transcript || execution.extracted_data || execution.telephony_data?.recording_url) {
+            await handleCompletedExecution(participant.id, execution)
+          } else {
+            await handleFailedExecution(participant as any, execution)
+          }
+        }
+        return NextResponse.json({ status: "ok" })
+      }
+
+      // Intermediate status — keep bolna_status fresh.
       const patch: Record<string, unknown> = {
         bolna_status: status,
         updated_at: new Date().toISOString(),

@@ -453,7 +453,7 @@ export async function handleCompletedExecution(
         ? "failed"
         : "completed",
     bolna_status: execution.status || "completed",
-    call_duration_seconds: rawDuration ? Number(rawDuration) : null,
+    call_duration_seconds: rawDuration != null && rawDuration !== '' && !Number.isNaN(Number(rawDuration)) ? Math.round(Number(rawDuration)) : null,
     call_ended_at: now,
     updated_at: now,
     classification_outcome: classification,
