@@ -32,12 +32,14 @@ export async function GET(request: NextRequest) {
   const executionId = request.nextUrl.searchParams.get("executionId") || ""
   const phone = request.nextUrl.searchParams.get("phone") || ""
   const email = request.nextUrl.searchParams.get("email") || ""
+  const participantId = request.nextUrl.searchParams.get("participantId") || ""
   const shouldSync = request.nextUrl.searchParams.get("sync") === "1"
+  const force = request.nextUrl.searchParams.get("force") === "1"
 
-  if (!executionId && !phone && !email && request.nextUrl.searchParams.get("debug") !== "1") {
+  if (!executionId && !phone && !email && !participantId && request.nextUrl.searchParams.get("debug") !== "1") {
     return NextResponse.json({
-      error: "Provide executionId, phone, or email",
-      usage: "?executionId=<id>[&sync=1] | ?phone=<dial>[&sync=1] | ?email=<addr>[&sync=1]",
+      error: "Provide executionId, phone, email, or participantId",
+      usage: "?executionId=<id>[&sync=1] | ?phone=<dial>[&sync=1] | ?email=<addr>[&sync=1] | ?participantId=<id>[&sync=1&force=1]",
     }, { status: 400 })
   }
 
@@ -56,7 +58,26 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ ok: true, debug: recent || [] })
   }
 
-  const { execution, participant } = await resolveSyncTarget({ executionId, phone, email })
+  let execId = executionId
+  let pId = participantId
+  if (pId && !execId && !phone && !email) {
+    const { data: p } = await supabaseAdmin
+      .from("phone_screening_participants")
+      .select("id, bolna_execution_id, candidates:candidate_id(phone, email)")
+      .eq("id", pId)
+      .maybeSingle()
+    if (p?.bolna_execution_id) {
+      execId = p.bolna_execution_id
+    } else if (p) {
+      // try to resolve by phone/email
+      const c = p.candidates as any
+      if (c?.phone) {
+        const { execution: ex } = await resolveSyncTarget({ phone: c.phone })
+        if (ex?.id) execId = ex.id
+      }
+    }
+  }
+  const { execution, participant } = await resolveSyncTarget({ executionId: execId || executionId, phone, email })
 
   if (!participant) {
     // Deep-probe the exact DB queries so a mismatch is never a black box.
@@ -123,7 +144,7 @@ export async function GET(request: NextRequest) {
     })
   }
 
-  if (alreadySynced) {
+  if (alreadySynced && !force) {
     return NextResponse.json({ ok: true, alreadySynced: true, participant: current })
   }
 

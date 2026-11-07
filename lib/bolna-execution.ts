@@ -459,8 +459,14 @@ export async function handleCompletedExecution(
     classification_outcome: classification,
   }
 
-  if (execution.telephony_data?.recording_url) {
-    patch.recording_url = execution.telephony_data.recording_url
+  const recordingUrl =
+    execution.telephony_data?.recording_url ||
+    (execution as any).recording_url ||
+    (execution as any).conversation_recording_url ||
+    (execution as any).recording?.url ||
+    null
+  if (recordingUrl) {
+    patch.recording_url = recordingUrl
   }
 
   // Store cost, voicemail detection, hangup reason (data we were throwing away)

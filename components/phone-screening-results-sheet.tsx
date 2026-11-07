@@ -237,8 +237,30 @@ export function PhoneScreeningResultsSheet({
   const [audioProgress, setAudioProgress] = useState(0)
   const [audioDuration, setAudioDuration] = useState(0)
   const [audioError, setAudioError] = useState(false)
+  const [refreshingRecording, setRefreshingRecording] = useState(false)
   const audioRef = useRef<HTMLAudioElement>(null)
   const { toast } = useToast()
+
+  const refreshRecording = async () => {
+    if (!participantId) return
+    setRefreshingRecording(true)
+    try {
+      const res = await fetch(`/api/bolna/sync-execution?participantId=${encodeURIComponent(participantId)}&sync=1&force=1`)
+      const json = await res.json()
+      if (!res.ok) throw new Error(json?.error || "Failed to refresh recording")
+      if (json?.synced?.recording_url || json?.participant?.recording_url) {
+        toast({ title: "Recording refreshed" })
+      } else {
+        toast({ title: "Synced", description: "No new recording URL found from Bolna yet." })
+      }
+      setAudioError(false)
+      await loadParticipant()
+    } catch (e: any) {
+      toast({ title: "Refresh failed", description: e.message, variant: "destructive" })
+    } finally {
+      setRefreshingRecording(false)
+    }
+  }
 
   // Extracted so a message sent from the WhatsApp composer can refresh the row
   // in place. Without this the thread only updates when the sheet is reopened,
@@ -1013,11 +1035,16 @@ export function PhoneScreeningResultsSheet({
               {activeTab === "recording" && (
                 <div>
                   {!data.recording_url ? (
-                    <div className="text-center py-8">
-                      <p className="text-sm text-zinc-400 mb-1">No recording available</p>
-                      {(data as any).classification_outcome === "not_screened" && (
-                        <p className="text-xs text-amber-600">Call not completed - candidate unavailable/immediate hangup. Needs to be recalled.</p>
-                      )}
+                    <div className="text-center py-8 space-y-3">
+                      <div>
+                        <p className="text-sm text-zinc-400 mb-1">No recording available</p>
+                        {(data as any).classification_outcome === "not_screened" && (
+                          <p className="text-xs text-amber-600">Call not completed - candidate unavailable/immediate hangup. Needs to be recalled.</p>
+                        )}
+                      </div>
+                      <Button variant="outline" size="sm" className="h-8 text-xs" onClick={refreshRecording} disabled={refreshingRecording}>
+                        {refreshingRecording ? "Refreshing…" : "Refresh from Bolna"}
+                      </Button>
                     </div>
                   ) : (
                     <div className="space-y-4">
@@ -1041,6 +1068,9 @@ export function PhoneScreeningResultsSheet({
                             Bolna stores recordings behind signed, expiring S3 URLs. The transcript
                             and the AI screening summary below are unaffected.
                           </p>
+                          <Button variant="outline" size="sm" className="h-7 text-xs" onClick={refreshRecording} disabled={refreshingRecording}>
+                            {refreshingRecording ? "Refreshing…" : "Refresh recording from Bolna"}
+                          </Button>
                         </div>
                       ) : (
                       /* Player card */
