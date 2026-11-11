@@ -178,12 +178,31 @@ async function api(path: string, init?: RequestInit): Promise<any> {
 }
 
 /**
+ * The real handlers the action modal calls. The modal must do exactly what the
+ * row buttons do — same endpoints, same confirmations, same outcomes.
+ */
+interface TodayModalHandlers {
+  runPrimary: (item: WorkItem) => void
+  openResults: (item: WorkItem) => void
+  openConversation: (item: WorkItem) => void
+  callNow: (item: WorkItem) => void
+  logCall: (item: WorkItem) => void
+  advanceTo: (item: WorkItem, stage: string) => void
+  openProfile: (item: WorkItem) => void
+  remindClient: (item: WorkItem) => void
+  nudge: (item: WorkItem) => void
+  reject: (item: WorkItem) => void
+  close: () => void
+}
+
+/**
  * Category-based action fields — renders different inputs depending on what
  * this case actually needs. This is the "what action needs to take place"
  * part of the modal.
  */
-function renderActionFields(item: WorkItem): React.ReactNode {
+function renderActionFields(item: WorkItem, h: TodayModalHandlers): React.ReactNode {
   const kind = item.kind
+  const hasScreening = (item.callAttempts ?? 0) > 0 || item.aiScore != null
 
   // ── CALL: a screening call happened or needs to happen ──
   if (kind === "call") {
@@ -192,13 +211,13 @@ function renderActionFields(item: WorkItem): React.ReactNode {
         <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Call action</p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <button
-            onClick={() => {}}
-            className="w-full py-2 rounded-lg border border-zinc-200 bg-white text-left text-sm font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+            onClick={() => { h.callNow(item); h.close() }}
+            className="w-full py-2 rounded-lg border border-indigo-200 bg-indigo-50 text-left text-sm font-medium text-indigo-700 hover:bg-indigo-100 dark:border-indigo-900 dark:bg-indigo-950/30 dark:text-indigo-300"
           >
             <PhoneCall className="mr-2 h-4 w-4" /> Place call now
           </button>
           <button
-            onClick={() => {}}
+            onClick={() => { h.logCall(item) }}
             className="w-full py-2 rounded-lg border border-zinc-200 bg-white text-left text-sm font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
             <Phone className="mr-2 h-4 w-4" /> Log call outcome
@@ -219,11 +238,16 @@ function renderActionFields(item: WorkItem): React.ReactNode {
       <div className="space-y-3">
         <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Reply action</p>
         <button
-          onClick={() => {}}
+          onClick={() => { h.openConversation(item); h.close() }}
           className="w-full py-2.5 rounded-lg border border-emerald-200 bg-emerald-50 text-left text-sm font-medium text-emerald-700 hover:bg-emerald-100 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300"
         >
           <MessageCircle className="mr-2 h-4 w-4" /> Reply on WhatsApp
         </button>
+        {item.quote && (
+          <p className="text-xs italic text-zinc-500 dark:text-zinc-400 border-l-2 border-zinc-200 pl-2">
+            “{item.quote}”
+          </p>
+        )}
         <p className="text-xs text-zinc-500">
           The candidate replied — answer their message to move them forward.
         </p>
@@ -236,23 +260,37 @@ function renderActionFields(item: WorkItem): React.ReactNode {
     return (
       <div className="space-y-3">
         <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Review & decision</p>
+        {hasScreening && (
+          <button
+            onClick={() => { h.openResults(item); h.close() }}
+            className="w-full py-2 rounded-lg border border-indigo-200 bg-indigo-50 text-left text-sm font-medium text-indigo-700 hover:bg-indigo-100 dark:border-indigo-900 dark:bg-indigo-950/30 dark:text-indigo-300"
+          >
+            <Eye className="mr-2 h-4 w-4" /> Open transcript &amp; summary
+          </button>
+        )}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <button
-            onClick={() => {}}
+            onClick={() => { h.advanceTo(item, "shortlist"); h.close() }}
             className="w-full py-2 rounded-lg border border-green-200 bg-green-50 text-left text-sm font-medium text-green-700 hover:bg-green-100 dark:border-green-900 dark:bg-green-950/30 dark:text-green-300"
           >
-            <CheckCircle2 className="mr-2 h-4 w-4" /> Approve & shortlist
+            <CheckCircle2 className="mr-2 h-4 w-4" /> Approve &amp; shortlist
           </button>
           <button
-            onClick={() => {}}
+            onClick={() => { h.reject(item); h.close() }}
             className="w-full py-2 rounded-lg border border-red-200 bg-red-50 text-left text-sm font-medium text-red-700 hover:bg-red-100 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300"
           >
             <UserX className="mr-2 h-4 w-4" /> Reject
           </button>
         </div>
-        <p className="text-xs text-zinc-500">
-          Review the screening transcript and summary before deciding.
-        </p>
+        {hasScreening ? (
+          <p className="text-xs text-zinc-500">
+            Review the screening transcript and summary before deciding.
+          </p>
+        ) : (
+          <p className="text-xs text-zinc-500">
+            No screening call happened yet — read the candidate&apos;s details above, then approve or reject.
+          </p>
+        )}
       </div>
     )
   }
@@ -267,16 +305,30 @@ function renderActionFields(item: WorkItem): React.ReactNode {
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <button
-            onClick={() => {}}
+            onClick={() => { h.openProfile(item); h.close() }}
             className="w-full py-2 rounded-lg border border-blue-200 bg-blue-50 text-left text-sm font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-300"
           >
             <Eye className="mr-2 h-4 w-4" /> Review profile
           </button>
           <button
-            onClick={() => {}}
+            onClick={() => { h.callNow(item); h.close() }}
             className="w-full py-2 rounded-lg border border-zinc-200 bg-white text-left text-sm font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
             <PhoneCall className="mr-2 h-4 w-4" /> Call now
+          </button>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <button
+            onClick={() => { h.advanceTo(item, "shortlist"); h.close() }}
+            className="w-full py-2 rounded-lg border border-green-200 bg-green-50 text-left text-sm font-medium text-green-700 hover:bg-green-100 dark:border-green-900 dark:bg-green-950/30 dark:text-green-300"
+          >
+            <CheckCircle2 className="mr-2 h-4 w-4" /> Approve &amp; shortlist
+          </button>
+          <button
+            onClick={() => { h.reject(item); h.close() }}
+            className="w-full py-2 rounded-lg border border-red-200 bg-red-50 text-left text-sm font-medium text-red-700 hover:bg-red-100 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300"
+          >
+            <UserX className="mr-2 h-4 w-4" /> Reject
           </button>
         </div>
       </div>
@@ -292,7 +344,7 @@ function renderActionFields(item: WorkItem): React.ReactNode {
           The candidate declined — mark as rejected and remove from queue.
         </p>
         <button
-          onClick={() => {}}
+          onClick={() => { h.reject(item); h.close() }}
           className="w-full py-2 rounded-lg border border-red-200 bg-red-50 text-left text-sm font-medium text-red-700 hover:bg-red-100 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300"
         >
           <UserX className="mr-2 h-4 w-4" /> Mark rejected
@@ -310,7 +362,7 @@ function renderActionFields(item: WorkItem): React.ReactNode {
           Screening passed — ready to share this candidate with the client.
         </p>
         <button
-          onClick={() => {}}
+          onClick={() => { h.runPrimary(item); h.close() }}
           className="w-full py-2 rounded-lg border border-emerald-200 bg-emerald-50 text-left text-sm font-medium text-emerald-700 hover:bg-emerald-100 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300"
         >
           <Send className="mr-2 h-4 w-4" /> Share shortlist with client
@@ -328,7 +380,7 @@ function renderActionFields(item: WorkItem): React.ReactNode {
           Already sent to the client — waiting on their response.
         </p>
         <button
-          onClick={() => {}}
+          onClick={() => { h.remindClient(item); h.close() }}
           className="w-full py-2 rounded-lg border border-blue-200 bg-blue-50 text-left text-sm font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-300"
         >
           <Phone className="mr-2 h-4 w-4" /> Remind client
@@ -347,13 +399,13 @@ function renderActionFields(item: WorkItem): React.ReactNode {
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           <button
-            onClick={() => {}}
+            onClick={() => { h.nudge(item); h.close() }}
             className="w-full py-2 rounded-lg border border-emerald-200 bg-emerald-50 text-left text-sm font-medium text-emerald-700 hover:bg-emerald-100 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300"
           >
             <MessageCircle className="mr-2 h-4 w-4" /> Nudge on WhatsApp
           </button>
           <button
-            onClick={() => {}}
+            onClick={() => { h.callNow(item); h.close() }}
             className="w-full py-2 rounded-lg border border-zinc-200 bg-white text-left text-sm font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
           >
             <PhoneCall className="mr-2 h-4 w-4" /> Call now
@@ -370,6 +422,20 @@ function renderActionFields(item: WorkItem): React.ReactNode {
       <p className="text-sm text-zinc-700 dark:text-zinc-200">
         Review this candidate and decide next steps.
       </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <button
+          onClick={() => { h.openProfile(item); h.close() }}
+          className="w-full py-2 rounded-lg border border-blue-200 bg-blue-50 text-left text-sm font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-300"
+        >
+          <Eye className="mr-2 h-4 w-4" /> Review profile
+        </button>
+        <button
+          onClick={() => { h.reject(item); h.close() }}
+          className="w-full py-2 rounded-lg border border-red-200 bg-red-50 text-left text-sm font-medium text-red-700 hover:bg-red-100 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300"
+        >
+          <UserX className="mr-2 h-4 w-4" /> Reject
+        </button>
+      </div>
     </div>
   )
 }
@@ -416,69 +482,96 @@ function renderCollectedInfo(item: WorkItem): React.ReactNode {
 /**
  * Primary action button for the modal footer — matches what the case needs.
  */
-function renderPrimaryAction(item: WorkItem): React.ReactNode {
+function renderPrimaryAction(item: WorkItem, h: TodayModalHandlers): React.ReactNode {
   const id = item.primaryAction
+  const hasScreening = (item.callAttempts ?? 0) > 0 || item.aiScore != null
 
   if (id === "call") {
     return (
-      <Button onClick={() => {}} className="bg-indigo-600 hover:bg-indigo-700">
+      <Button onClick={() => { h.callNow(item); h.close() }} className="bg-indigo-600 hover:bg-indigo-700">
         <PhoneCall className="mr-2 h-4 w-4" /> Place call now
       </Button>
     )
   }
   if (id === "reply") {
     return (
-      <Button onClick={() => {}} className="bg-emerald-600 hover:bg-emerald-700">
+      <Button onClick={() => { h.openConversation(item); h.close() }} className="bg-emerald-600 hover:bg-emerald-700">
         <MessageCircle className="mr-2 h-4 w-4" /> Reply on WhatsApp
       </Button>
     )
   }
   if (id === "review" || id === "decide") {
+    // Only offer the screening transcript when there IS one. A case that never
+    // got a call ("no call placed yet") has nothing to review — sending the
+    // recruiter to an empty transcript was the bug being fixed here.
+    if (!hasScreening) {
+      return (
+        <Button onClick={() => { h.openProfile(item); h.close() }} className="bg-blue-600 hover:bg-blue-700">
+          <Eye className="mr-2 h-4 w-4" /> Review profile
+        </Button>
+      )
+    }
     return (
-      <Button onClick={() => {}} className="bg-indigo-600 hover:bg-indigo-700">
+      <Button onClick={() => { h.openResults(item); h.close() }} className="bg-indigo-600 hover:bg-indigo-700">
         <Eye className="mr-2 h-4 w-4" /> Review screening
       </Button>
     )
   }
   if (id === "schedule" || id === "resched") {
     return (
-      <Button onClick={() => {}} className="bg-amber-600 hover:bg-amber-700">
+      <Button onClick={() => { h.runPrimary(item); h.close() }} className="bg-amber-600 hover:bg-amber-700">
         <CalendarCheck className="mr-2 h-4 w-4" /> Schedule interview
       </Button>
     )
   }
   if (id === "share") {
     return (
-      <Button onClick={() => {}} className="bg-emerald-600 hover:bg-emerald-700">
+      <Button onClick={() => { h.runPrimary(item); h.close() }} className="bg-emerald-600 hover:bg-emerald-700">
         <Send className="mr-2 h-4 w-4" /> Share with client
       </Button>
     )
   }
   if (id === "advance") {
     return (
-      <Button onClick={() => {}} className="bg-green-600 hover:bg-green-700">
+      <Button onClick={() => { h.runPrimary(item); h.close() }} className="bg-green-600 hover:bg-green-700">
         <ArrowRight className="mr-2 h-4 w-4" /> Move to next stage
       </Button>
     )
   }
   if (id === "reject" || id === "drop") {
     return (
-      <Button variant="destructive" onClick={() => {}}>
+      <Button variant="destructive" onClick={() => { h.reject(item); h.close() }}>
         <UserX className="mr-2 h-4 w-4" /> Reject
       </Button>
     )
   }
   if (id === "nudge") {
     return (
-      <Button onClick={() => {}} className="bg-blue-600 hover:bg-blue-700">
+      <Button onClick={() => { h.nudge(item); h.close() }} className="bg-blue-600 hover:bg-blue-700">
         <MessageCircle className="mr-2 h-4 w-4" /> Nudge on WhatsApp
       </Button>
     )
   }
+  if (id === "remind") {
+    return (
+      <Button onClick={() => { h.remindClient(item); h.close() }} className="bg-blue-600 hover:bg-blue-700">
+        <Phone className="mr-2 h-4 w-4" /> Remind client
+      </Button>
+    )
+  }
+  if (id === "log_call") {
+    return (
+      <Button onClick={() => { h.logCall(item) }} className="bg-zinc-700 hover:bg-zinc-800">
+        <Phone className="mr-2 h-4 w-4" /> Log a call
+      </Button>
+    )
+  }
 
+  // No specific action — offer the candidate's profile so the recruiter has
+  // something concrete to look at instead of a dead button.
   return (
-    <Button onClick={() => {}} className="bg-zinc-600 hover:bg-zinc-700">
-      {item.cta || "Take action"}
+    <Button onClick={() => { h.openProfile(item); h.close() }} className="bg-zinc-600 hover:bg-zinc-700">
+      <Eye className="mr-2 h-4 w-4" /> Review profile
     </Button>
   )
 }
@@ -1024,6 +1117,50 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
       })
       await load({ quiet: true })
     })
+
+  /**
+   * Handlers the category-based action modal calls. Every button in the modal
+   * must do exactly what the equivalent row button does — same endpoint, same
+   * confirmation, same outcome — otherwise the modal is a dead-end and the
+   * recruiter falls back to guessing.
+   */
+  const modalHandlers = useMemo<TodayModalHandlers>(
+    () => ({
+      runPrimary: (item) => {
+        void runPrimary(item)
+      },
+      openResults: (item) => openResults(item),
+      openConversation: (item) => openConversation(item),
+      callNow: (item) => {
+        void callNow(item)
+      },
+      logCall: (item) => {
+        setActionModalItem(null)
+        openInterview(item, "log")
+      },
+      advanceTo: (item, stage) => {
+        void advanceStage(item, stage)
+      },
+      openProfile: (item) => openProfile(item),
+      remindClient: (item) => {
+        void remindClient(item)
+      },
+      nudge: (item) => {
+        void withPending(`nudge:${item.key}`, async () => {
+          await nudgeOne(item)
+          toast({ title: "Nudge sent", description: `WhatsApp message sent to ${item.candidateName}.` })
+          await load({ quiet: true })
+        })
+      },
+      reject: (item) => {
+        setDropIds([item.applicationId])
+        setDropOpen(true)
+      },
+      close: () => setActionModalItem(null),
+    }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [load, toast]
+  )
 
   const stats = data?.stats
   const viewerName = data?.viewer?.name || (data?.viewer?.email ? data.viewer.email.split("@")[0] : "")
@@ -1614,13 +1751,16 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                 <p className="text-sm text-zinc-800 dark:text-zinc-100">{actionModalItem.detail}</p>
                 <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
                   Stage: {actionModalItem.stage.replace(/_/g, " ")} ·
-                  Waiting {formatAge(actionModalItem.ageHours)} ·
-                  Attempt {actionModalItem.callAttempts ?? 0}
+                  Waiting {formatAge(actionModalItem.ageHours)}
+                  {/* "Attempt 0" reads like a mistake — only show it once a call
+                      has actually been placed. */}
+                  {(actionModalItem.callAttempts ?? 0) > 0 && ` · Attempt ${actionModalItem.callAttempts}`}
+                  {actionModalItem.aiScore != null && ` · AI score ${actionModalItem.aiScore}/10`}
                 </p>
               </div>
 
               {/* Category-specific fields */}
-              {renderActionFields(actionModalItem)}
+              {renderActionFields(actionModalItem, modalHandlers)}
 
               {/* WhatsApp data collected — what we already know vs what's missing */}
               {actionModalItem.participantId && (
@@ -1633,7 +1773,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
 
             <DialogFooter>
               <Button variant="outline" onClick={() => setActionModalItem(null)}>Close</Button>
-              {renderPrimaryAction(actionModalItem)}
+              {renderPrimaryAction(actionModalItem, modalHandlers)}
             </DialogFooter>
           </DialogContent>
         </Dialog>
