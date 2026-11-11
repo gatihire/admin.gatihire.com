@@ -12,12 +12,24 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
   const { id: jobId } = await params
   try {
+    // Explicit candidate columns on purpose. `candidates (*)` used to pull
+    // resume_text, the 768-dim embedding and search_vector for every applicant
+    // on the job — tens of KB per row. On a busy job that single query could
+    // serialise hundreds of MB and pin Postgres CPU. The profile sidebar fetches
+    // the full record from /api/candidates/[id] when opened, so the pipeline only
+    // needs the card fields.
     const [applicationsRes, participantsRes, fitScoresRes, sharesRes] = await Promise.all([
       supabaseAdmin
         .from("applications")
         .select(`
           *,
-          candidates:candidate_id (*),
+          candidates:candidate_id (
+            id, name, email, phone, phone_e164, current_role, current_company,
+            total_experience, location, preferred_location, technical_skills,
+            current_salary, expected_salary, notice_period, highest_qualification,
+            degree, specialization, summary, tags, status, source, file_url,
+            file_name, linkedin_profile
+          ),
           jobs:job_id (title, industry, sub_category)
         `)
         .eq("job_id", jobId)

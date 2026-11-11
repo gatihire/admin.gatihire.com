@@ -44,6 +44,19 @@ const STUCK_STATUSES = [
   "call_disconnected",
 ]
 
+// Keep a single cron run bounded so a large backlog cannot pin the database.
+// The next run (5 minutes later) picks up the rest.
+const MAX_TARGETS_PER_RUN = 60
+const RUN_BUDGET_MS = 45_000
+
+type ReconcileTarget = {
+  id: string
+  bolna_execution_id: string | null
+  updated_at?: string | null
+  last_attempt_at?: string | null
+  call_started_at?: string | null
+}
+
 export const dynamic = "force-dynamic"
 export const maxDuration = 60
 
@@ -75,7 +88,7 @@ export async function GET(request: NextRequest) {
     const now = new Date().toISOString()
 
     // Resolve to a list of { participantId, bolnaExecutionId } to heal.
-    let targets: { id: string; bolna_execution_id: string | null }[] = []
+    let targets: ReconcileTarget[] = []
 
     if (singleTarget) {
       const { execution, participant } = await resolveSyncTarget({
@@ -95,7 +108,13 @@ export async function GET(request: NextRequest) {
           },
         }, { status: 404 })
       }
-      targets.push({ id: participant.id, bolna_execution_id: execution?.id || null })
+      targets.push({
+        id: participant.id,
+        bolna_execution_id: execution?.id || null,
+        updated_at: (participant as any).updated_at ?? null,
+        last_attempt_at: (participant as any).last_attempt_at ?? null,
+        call_started_at: (participant as any).call_started_at ?? null,
+      })
     } else {
       const threshold = new Date(Date.now() - STUCK_AFTER_MINUTES * 60 * 1000).toISOString()
       // `updated_at` (not `last_attempt_at`) is the reliable staleness clock:
@@ -109,6 +128,9 @@ export async function GET(request: NextRequest) {
       targets = (stuck || []).map((s: any) => ({
         id: s.id,
         bolna_execution_id: s.bolna_execution_id || null,
+        updated_at: s.updated_at || null,
+        last_attempt_at: s.last_attempt_at || null,
+        call_started_at: s.call_started_at || null,
       }))
     }
 
@@ -116,21 +138,33 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ checked: 0, updated: 0, healed: [], result: "ok" })
     }
 
+    const runStartedAt = Date.now()
+    const batch = targets.slice(0, MAX_TARGETS_PER_RUN)
+    let budgetExhausted = false
     const healed: any[] = []
 
-    for (const target of targets) {
+    for (const target of batch) {
+      if (Date.now() - runStartedAt > RUN_BUDGET_MS) {
+        budgetExhausted = true
+        break
+      }
+
       const execution = target.bolna_execution_id
         ? await getBolnaExecution(target.bolna_execution_id)
         : null
 
       // Staleness clock: last_attempt_at can be null, so fall back to when the
-      // call started (or when the row was last touched).
-      const { data: timing } = await supabaseAdmin
-        .from("phone_screening_participants")
-        .select("updated_at, last_attempt_at, call_started_at")
-        .eq("id", target.id)
-        .maybeSingle()
-      const startedRef = timing?.call_started_at || timing?.last_attempt_at || timing?.updated_at
+      // call started (or when the row was last touched). The timing fields come
+      // from the target query above, so there is no per-row extra SELECT.
+      let startedRef = target.call_started_at || target.last_attempt_at || target.updated_at
+      if (!startedRef) {
+        const { data: timing } = await supabaseAdmin
+          .from("phone_screening_participants")
+          .select("updated_at, last_attempt_at, call_started_at")
+          .eq("id", target.id)
+          .maybeSingle()
+        startedRef = timing?.call_started_at || timing?.last_attempt_at || timing?.updated_at
+      }
       const startedMs = startedRef ? new Date(startedRef).getTime() : NaN
       const ageMinutes = Number.isFinite(startedMs) ? (Date.now() - startedMs) / 60000 : 0
 
@@ -258,7 +292,13 @@ export async function GET(request: NextRequest) {
       healed.push({ participantId: target.id, executionId: execution.id || null, status: execution.status })
     }
 
-    return NextResponse.json({ checked: targets.length, healed, result: dry ? "dry-run" : "ok" })
+    return NextResponse.json({
+      checked: targets.length,
+      processed: healed.length,
+      truncated: budgetExhausted || targets.length > batch.length,
+      healed,
+      result: dry ? "dry-run" : "ok",
+    })
   } catch (error: any) {
     logger.error("Bolna reconcile failed", { error: error.message })
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 })

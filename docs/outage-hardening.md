@@ -46,6 +46,33 @@ the incident, so it was project/origin instability, not an announced platform ou
 | `contexts/candidate-context.tsx` | A failed `/api/super-admin/me` no longer wipes loaded permissions; retries with backoff (up to ~5 min). |
 | `app/login/page.tsx` | Shows "system temporarily unavailable" for 503, rate-limit text for 429, and a network message for fetch failures. Disables the button while submitting. |
 
+## Compute saturation (the 11 Nov cause)
+
+The Supabase dashboard showed **CPU ≈95%, Memory ≈95%, Compute ≈95%** across the
+incident. At that point Postgres cannot accept new sessions, so:
+
+- the dashboard table editor fails with `Connection terminated due to connection timeout`
+- Storage returns `544 DatabaseTimeout`
+- PostgREST/REST returns Cloudflare `522`
+- your app's login/queries fail even though Auth itself is up
+
+A restart clears hung sessions, but **at 95% sustained CPU it will re-saturate**.
+The durable fix is a compute upgrade (at least one tier up) plus reducing the
+queries that drive CPU. After upgrading, watch **Reports → Database** for a day.
+
+### Load reductions shipped with this change
+
+- `GET /api/jobs/[id]/pipeline` no longer embeds `candidates (*)`. That pulled
+  `resume_text`, the 768-dim `embedding` and `search_vector` for every applicant
+  — tens of KB per row. It now selects only the card fields; the profile sidebar
+  already fetches the full record from `/api/candidates/[id]`.
+- `GET /api/bolna/reconcile` no longer runs an extra timing `SELECT` per stuck
+  call (timing comes from the target query), and each run is capped at 60 calls
+  or 45 seconds so a backlog cannot pin the database. The rest is picked up on
+  the next 5-minute run.
+- `supabase/migrations/20261111_pipeline_perf_indexes.sql` adds the indexes used
+  by the pipeline and reconcile paths. **Run it after the database is healthy.**
+
 ## Configuration
 
 Optional env vars (defaults in parentheses):
