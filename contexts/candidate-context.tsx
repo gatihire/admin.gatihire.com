@@ -126,19 +126,45 @@ function CandidateProviderInner({ children }: { children: ReactNode }) {
       })
       const perms = Array.isArray(data?.permissions) ? data.permissions : []
       setPermissionKeys(perms.map((p: any) => String(p)))
+      setError(null)
       return perms
     } catch (e: any) {
-      setPermissionKeys(null)
+      // Keep any permissions loaded earlier in the session. Clearing them here
+      // made a brief Supabase hiccup look like "you have no access".
       throw e
     }
   }, [])
 
   useEffect(() => {
-    loadPermissions().catch((e: any) => {
-      setError(String(e?.message || "Failed to load permissions"))
-      setPermissionKeys([])
-    })
-  }, [])
+    let cancelled = false
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
+    let attempts = 0
+
+    const attempt = () => {
+      loadPermissions({ force: attempts > 0 })
+        .then(() => {
+          attempts = 0
+        })
+        .catch((e: any) => {
+          if (cancelled) return
+          setError(String(e?.message || "Failed to load permissions"))
+          // Supabase can be briefly unreachable. Retry with backoff instead of
+          // dropping the session/permissions and forcing a manual reload.
+          if (attempts < 12) {
+            attempts += 1
+            retryTimer = setTimeout(attempt, Math.min(30_000, 5_000 * attempts))
+          } else {
+            setPermissionKeys((prev) => prev ?? [])
+          }
+        })
+    }
+
+    attempt()
+    return () => {
+      cancelled = true
+      if (retryTimer) clearTimeout(retryTimer)
+    }
+  }, [loadPermissions])
 
   const fetchCandidates = useCallback(async (page = currentPage, perPage = pageSize, opts?: { force?: boolean }) => {
     if (permissionKeys === null) return

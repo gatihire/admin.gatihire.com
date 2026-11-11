@@ -1,6 +1,13 @@
 import { createClient } from "@supabase/supabase-js"
 import type { NextRequest } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
+import {
+  SupabaseUnavailableError,
+  isUnavailableError,
+  supabaseFetch,
+  throwIfUnavailable,
+  withTimeout,
+} from "@/lib/fetch-with-timeout"
 
 type FieldRule = {
   permission_key: string
@@ -17,6 +24,8 @@ export type InternalAuthContext = {
   fieldRules: FieldRule[]
   refreshedSession?: { access_token: string; refresh_token: string; expires_in: number }
 }
+
+const AUTH_TIMEOUT_MS = 8000
 
 function getAccessTokenFromRequest(request: NextRequest) {
   const cookieToken = request.cookies.get("sb-access-token")?.value
@@ -37,21 +46,36 @@ function createAuthedClient(accessToken: string) {
   if (!supabaseUrl || !supabaseAnonKey) return null
   return createClient(supabaseUrl, supabaseAnonKey, {
     auth: { persistSession: false, autoRefreshToken: false },
-    global: { headers: { Authorization: `Bearer ${accessToken}` } },
+    global: { headers: { Authorization: `Bearer ${accessToken}` }, fetch: supabaseFetch },
   })
 }
 
-async function getUserWithTimeout(accessToken: string, timeoutMs = 3500) {
-  const timeout = new Promise<{ data: any; error: any }>((resolve) =>
-    setTimeout(() => resolve({ data: null, error: new Error("timeout") }), timeoutMs)
-  )
+type GetUserResult = { data: any; error: any; unavailable: boolean }
+
+async function getUserWithTimeout(accessToken: string, timeoutMs = AUTH_TIMEOUT_MS): Promise<GetUserResult> {
   try {
-    return await Promise.race([supabaseAdmin.auth.getUser(accessToken), timeout])
+    const result = await withTimeout(
+      supabaseAdmin.auth.getUser(accessToken),
+      timeoutMs,
+      "supabase.auth.getUser",
+    )
+    return {
+      data: result?.data ?? null,
+      error: result?.error ?? null,
+      unavailable: isUnavailableError(result?.error),
+    }
   } catch (error) {
-    return { data: null, error }
+    return { data: null, error, unavailable: isUnavailableError(error) }
   }
 }
 
+/**
+ * Resolve the caller's identity and permissions.
+ *
+ * Returns `null` only when the credentials are genuinely invalid. If Supabase is
+ * unreachable or slow, throws `SupabaseUnavailableError` so routes can answer
+ * 503 and the client keeps its session instead of being logged out.
+ */
 export async function getInternalAuthContext(request: NextRequest): Promise<InternalAuthContext | null> {
   const initialAccessToken = getAccessTokenFromRequest(request)
   if (!initialAccessToken) return null
@@ -59,10 +83,11 @@ export async function getInternalAuthContext(request: NextRequest): Promise<Inte
 
   let refreshedSession: { access_token: string; refresh_token: string; expires_in: number } | undefined
 
-  let { data, error } = await getUserWithTimeout(accessToken)
-  let user = data?.user
+  let authResult = await getUserWithTimeout(accessToken)
+  let user = authResult.data?.user
+  let unavailable = authResult.unavailable
 
-  if (error || !user) {
+  if (!user) {
     const refreshToken = getRefreshTokenFromRequest(request)
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
     const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
@@ -70,9 +95,16 @@ export async function getInternalAuthContext(request: NextRequest): Promise<Inte
       try {
         const refreshClient = createClient(supabaseUrl, supabaseAnonKey, {
           auth: { persistSession: false, autoRefreshToken: false },
+          global: { fetch: supabaseFetch },
         })
-        const refreshed = await refreshClient.auth.refreshSession({ refresh_token: refreshToken })
+        const refreshed = await withTimeout(
+          refreshClient.auth.refreshSession({ refresh_token: refreshToken }),
+          AUTH_TIMEOUT_MS,
+          "supabase.auth.refreshSession",
+        )
         const session = (refreshed as any)?.data?.session
+        const refreshError = (refreshed as any)?.error
+        if (refreshError && isUnavailableError(refreshError)) unavailable = true
         if (session?.access_token && session?.refresh_token) {
           refreshedSession = {
             access_token: session.access_token,
@@ -80,25 +112,46 @@ export async function getInternalAuthContext(request: NextRequest): Promise<Inte
             expires_in: session.expires_in || 3600,
           }
           accessToken = session.access_token
-          ;({ data, error } = await getUserWithTimeout(accessToken))
-          user = data?.user
+          authResult = await getUserWithTimeout(accessToken)
+          user = authResult.data?.user
+          unavailable = unavailable || authResult.unavailable
         }
-      } catch {
-        // ignore
+      } catch (error) {
+        if (isUnavailableError(error)) unavailable = true
+        // Otherwise the refresh token itself is invalid: fall through to null.
       }
     }
   }
 
-  if (error || !user) return null
+  if (!user) {
+    if (unavailable) {
+      throw new SupabaseUnavailableError("Unable to verify session: Supabase is unreachable")
+    }
+    return null
+  }
 
   const authedClient = createAuthedClient(accessToken)
-  if (!authedClient) return null
+  if (!authedClient) {
+    throw new SupabaseUnavailableError("Supabase client is not configured")
+  }
 
-  const [{ data: perms }, { data: rules }, { data: isSuperAdmin }] = await Promise.all([
-    authedClient.rpc("current_user_permission_keys"),
-    authedClient.rpc("current_user_field_rules"),
-    authedClient.rpc("is_super_admin"),
-  ])
+  const [permsResult, rulesResult, superAdminResult] = await Promise.all([
+    withTimeout(authedClient.rpc("current_user_permission_keys"), AUTH_TIMEOUT_MS, "current_user_permission_keys"),
+    withTimeout(authedClient.rpc("current_user_field_rules"), AUTH_TIMEOUT_MS, "current_user_field_rules"),
+    withTimeout(authedClient.rpc("is_super_admin"), AUTH_TIMEOUT_MS, "is_super_admin"),
+  ]).catch((error) => {
+    throw new SupabaseUnavailableError(
+      `Unable to load permissions: ${error instanceof Error ? error.message : "unknown error"}`,
+    )
+  })
+
+  const perms = (permsResult as any)?.data
+  const rules = (rulesResult as any)?.data
+  const isSuperAdmin = (superAdminResult as any)?.data
+
+  throwIfUnavailable(permsResult as any, "current_user_permission_keys")
+  throwIfUnavailable(rulesResult as any, "current_user_field_rules")
+  throwIfUnavailable(superAdminResult as any, "is_super_admin")
 
   const superAdmin = Boolean(isSuperAdmin)
 
@@ -110,25 +163,33 @@ export async function getInternalAuthContext(request: NextRequest): Promise<Inte
 
   let overridePermissionKeys: string[] = []
   if (!superAdmin) {
-    const { data: userPerms } = await supabaseAdmin
+    const userPermsResult = await supabaseAdmin
       .from("user_permissions")
       .select("permissions(key)")
       .eq("auth_user_id", user.id)
+    throwIfUnavailable(userPermsResult, "user_permissions")
+    const userPerms = userPermsResult.data
     overridePermissionKeys =
       (userPerms ?? [])
         .map((p: any) => String(p?.permissions?.key || "").trim())
         .filter(Boolean) ?? []
   }
 
-  const permissionKeys = superAdmin
-    ? new Set<string>(
-        (
-          (
-            await supabaseAdmin.from("permissions").select("key").order("key", { ascending: true })
-          ).data?.map((p: any) => String(p?.key || "").trim()).filter(Boolean) ?? []
-        )
-      )
-    : new Set<string>([...rolePermissionKeys, ...overridePermissionKeys])
+  let permissionKeys: Set<string>
+  if (superAdmin) {
+    const allPermissions = await supabaseAdmin
+      .from("permissions")
+      .select("key")
+      .order("key", { ascending: true })
+    throwIfUnavailable(allPermissions, "permissions")
+    permissionKeys = new Set<string>(
+      (allPermissions.data ?? [])
+        .map((p: any) => String(p?.key || "").trim())
+        .filter(Boolean),
+    )
+  } else {
+    permissionKeys = new Set<string>([...rolePermissionKeys, ...overridePermissionKeys])
+  }
 
   const fieldRules: FieldRule[] = superAdmin
     ? []
@@ -149,6 +210,27 @@ export async function getInternalAuthContext(request: NextRequest): Promise<Inte
     fieldRules,
     refreshedSession,
   }
+}
+
+/**
+ * Build the correct response when auth lookup fails: 503 for infra outages
+ * (keeps the user signed in), 401 only for genuinely invalid credentials.
+ */
+export function authContextErrorResponse(error: unknown) {
+  if (error instanceof SupabaseUnavailableError || isUnavailableError(error)) {
+    return {
+      status: 503 as const,
+      body: {
+        error: "Service temporarily unavailable. Please retry in a moment.",
+        code: "SERVICE_UNAVAILABLE",
+      },
+    }
+  }
+  return { status: 401 as const, body: { error: "Unauthorized" } }
+}
+
+export function isAuthUnavailableError(error: unknown) {
+  return error instanceof SupabaseUnavailableError || isUnavailableError(error)
 }
 
 export function hasPermission(ctx: InternalAuthContext, permissionKey: string) {

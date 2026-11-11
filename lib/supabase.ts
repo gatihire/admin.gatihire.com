@@ -5,6 +5,7 @@ import {
   RESUME_BUCKET_ALLOWED_MIME_TYPES,
   RESUME_BUCKET_NAME,
 } from "@/lib/constants/storage"
+import { supabaseFetch } from "@/lib/fetch-with-timeout"
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
@@ -16,7 +17,8 @@ function requireKey(key: string | undefined, name: string): string {
 
 export const supabase = createClient(
   supabaseUrl,
-  requireKey(supabaseAnonKey, "NEXT_PUBLIC_SUPABASE_ANON_KEY")
+  requireKey(supabaseAnonKey, "NEXT_PUBLIC_SUPABASE_ANON_KEY"),
+  { global: { fetch: supabaseFetch } }
 )
 
 /**
@@ -43,7 +45,8 @@ function getAdminClient(): SupabaseAdmin {
   if (!adminClient) {
     adminClient = createClient(
       supabaseUrl,
-      requireKey(process.env.SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
+      requireKey(process.env.SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY"),
+      { global: { fetch: supabaseFetch } }
     )
   }
   return adminClient

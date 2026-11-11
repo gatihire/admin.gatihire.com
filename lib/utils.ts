@@ -140,7 +140,10 @@ export async function cachedFetchJson<T>(
       const data = await res.json().catch(() => null)
       if (!res.ok) {
         const msg = (data as any)?.error || (data as any)?.message || "Request failed"
-        throw new Error(msg)
+        const error = new Error(msg) as Error & { status?: number; code?: string }
+        error.status = res.status
+        if (typeof (data as any)?.code === "string") error.code = (data as any).code
+        throw error
       }
       return data as T
     },

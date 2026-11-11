@@ -2,6 +2,7 @@ import { cookies } from "next/headers"
 import { InternalShell } from "@/components/internal-shell"
 import { createClient } from "@supabase/supabase-js"
 import { supabaseAdmin } from "@/lib/supabase"
+import { supabaseFetch, withTimeout } from "@/lib/fetch-with-timeout"
 
 export default async function InternalLayout({ children }: { children: React.ReactNode }) {
   const cookieStore = await cookies()
@@ -12,23 +13,33 @@ export default async function InternalLayout({ children }: { children: React.Rea
   let permissionKeys: string[] = []
   let isSuperAdmin = false
   if (accessToken && supabaseUrl && supabaseAnonKey) {
-    const authedClient = createClient(supabaseUrl, supabaseAnonKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
-      global: { headers: { Authorization: `Bearer ${accessToken}` } },
-    })
-    const [{ data }, { data: isSuperAdminData }] = await Promise.all([
-      authedClient.rpc("current_user_permission_keys"),
-      authedClient.rpc("is_super_admin"),
-    ])
+    try {
+      const authedClient = createClient(supabaseUrl, supabaseAnonKey, {
+        auth: { persistSession: false, autoRefreshToken: false },
+        global: { headers: { Authorization: `Bearer ${accessToken}` }, fetch: supabaseFetch },
+      })
+      const [{ data }, { data: isSuperAdminData }] = await Promise.all([
+        withTimeout(authedClient.rpc("current_user_permission_keys"), 8000, "current_user_permission_keys"),
+        withTimeout(authedClient.rpc("is_super_admin"), 8000, "is_super_admin"),
+      ])
 
-    isSuperAdmin = Boolean(isSuperAdminData)
-    if (isSuperAdmin) {
-      const { data: all } = await supabaseAdmin.from("permissions").select("key").order("key", { ascending: true })
-      permissionKeys = (all ?? []).map((p: any) => String(p?.key || "").trim()).filter(Boolean)
-    } else {
-      permissionKeys = Array.isArray(data)
-        ? data.map((p: any) => String(p?.permission_key || "").trim()).filter(Boolean)
-        : []
+      isSuperAdmin = Boolean(isSuperAdminData)
+      if (isSuperAdmin) {
+        const { data: all } = await withTimeout(
+          supabaseAdmin.from("permissions").select("key").order("key", { ascending: true }),
+          8000,
+          "permissions",
+        )
+        permissionKeys = (all ?? []).map((p: any) => String(p?.key || "").trim()).filter(Boolean)
+      } else {
+        permissionKeys = Array.isArray(data)
+          ? data.map((p: any) => String(p?.permission_key || "").trim()).filter(Boolean)
+          : []
+      }
+    } catch (error) {
+      // Supabase outage: render the shell with no permissions instead of
+      // hanging the whole page until the platform timeout.
+      console.warn("Internal layout permission lookup failed:", error)
     }
   }
 

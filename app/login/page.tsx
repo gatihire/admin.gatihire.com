@@ -8,11 +8,13 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const router = useRouter();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setIsSubmitting(true);
 
     try {
       const res = await fetch("/api/auth/login", {
@@ -21,15 +23,28 @@ export default function LoginPage() {
         body: JSON.stringify({ email, password }),
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => null);
 
-      if (res.ok && data.success) {
+      if (res.ok && data?.success) {
         router.push("/");
-      } else {
-        setError(data.error || "Invalid credentials");
+        return;
       }
-    } catch (err) {
-      setError("An error occurred during login");
+
+      if (res.status === 503) {
+        setError(
+          data?.error ||
+            "The system is temporarily unavailable. Please wait a minute and try again.",
+        );
+      } else if (res.status === 429) {
+        setError(data?.error || "Too many attempts. Please wait a moment and try again.");
+      } else {
+        setError(data?.error || "Invalid credentials");
+      }
+    } catch {
+      // Never leave the user guessing: a failed request is not a failed password.
+      setError("Could not reach the server. Check your connection and try again.");
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -54,8 +69,14 @@ export default function LoginPage() {
           required
           style={{ padding: 10, borderRadius: 6, border: "1px solid #ddd", width: "100%" }}
         />
-        <button type="submit" style={{ padding: "10px 24px", borderRadius: 6, border: "none", background: "#333", color: "#fff", fontWeight: 600, cursor: "pointer", width: "100%" }}>Login</button>
-        {error && <div style={{ color: "red", marginTop: 8 }}>{error}</div>}
+        <button
+          type="submit"
+          disabled={isSubmitting}
+          style={{ padding: "10px 24px", borderRadius: 6, border: "none", background: "#333", color: "#fff", fontWeight: 600, cursor: isSubmitting ? "not-allowed" : "pointer", width: "100%", opacity: isSubmitting ? 0.7 : 1 }}
+        >
+          {isSubmitting ? "Signing in…" : "Login"}
+        </button>
+        {error && <div style={{ color: "red", marginTop: 8, textAlign: "center" }}>{error}</div>}
       </form>
     </div>
   );

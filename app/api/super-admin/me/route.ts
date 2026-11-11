@@ -1,25 +1,48 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getInternalAuthContext } from "@/lib/internal-auth"
+import {
+  authContextErrorResponse,
+  getInternalAuthContext,
+  isAuthUnavailableError,
+} from "@/lib/internal-auth"
 import { supabaseAdmin } from "@/lib/supabase"
 
 export async function GET(request: NextRequest) {
-  const ctx = await getInternalAuthContext(request)
+  let ctx
+  try {
+    ctx = await getInternalAuthContext(request)
+  } catch (error) {
+    console.error("super-admin/me auth failed:", error)
+    const { status, body } = authContextErrorResponse(error)
+    return NextResponse.json(body, { status })
+  }
+
   if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
 
-  const { data: profile } = await supabaseAdmin
-    .from("internal_users")
-    .select("*")
-    .eq("auth_user_id", ctx.authUser.id)
-    .maybeSingle()
+  // Profile/touch are best-effort: an outage must not sign the user out.
+  let profile: any = null
+  try {
+    const { data } = await supabaseAdmin
+      .from("internal_users")
+      .select("*")
+      .eq("auth_user_id", ctx.authUser.id)
+      .maybeSingle()
+    profile = data ?? null
 
-  await supabaseAdmin
-    .from("internal_users")
-    .update({ last_active_at: new Date().toISOString() })
-    .eq("auth_user_id", ctx.authUser.id)
+    await supabaseAdmin
+      .from("internal_users")
+      .update({ last_active_at: new Date().toISOString() })
+      .eq("auth_user_id", ctx.authUser.id)
+  } catch (error) {
+    if (isAuthUnavailableError(error)) {
+      console.warn("super-admin/me profile lookup unavailable, returning session only")
+    } else {
+      console.warn("super-admin/me profile lookup failed:", error)
+    }
+  }
 
   const response = NextResponse.json({
     user: ctx.authUser,
-    profile: profile ?? null,
+    profile,
     permissions: Array.from(ctx.permissionKeys).sort(),
     fieldRules: ctx.fieldRules,
   })
