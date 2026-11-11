@@ -33,6 +33,60 @@ export type WorkItemKind =
   | "offer" // an open offer needs confirming
   | "shortlist" // ready to send to the client
 
+/**
+ * The four things a recruiter actually does with their day.
+ *
+ * The board used to show eleven kind chips ("Needs a human", "No reply",
+ * "Reply", "Declined", "AI flagged", "Calls to review", "Reschedule",
+ * "Client", "Overdue", "Offer", "Shortlist"). None of those names told a
+ * recruiter what to DO, so the chips were decoration — and eleven of them
+ * made the queue look like a filing cabinet rather than a to-do list.
+ *
+ * These groups are the actions, so a recruiter can read the board as
+ * "call these, answer these, decide these, send these".
+ */
+export type ActionGroup = "call" | "reply" | "decide" | "client"
+
+export const ACTION_GROUPS: Array<{
+  id: ActionGroup
+  label: string
+  hint: string
+  kinds: WorkItemKind[]
+}> = [
+  {
+    id: "call",
+    label: "Call them",
+    hint: "A call needs placing, or nobody picked up",
+    kinds: ["call", "ghosted"],
+  },
+  {
+    id: "reply",
+    label: "Reply",
+    hint: "The candidate replied and is waiting for an answer",
+    kinds: ["reply"],
+  },
+  {
+    id: "decide",
+    label: "Decide",
+    hint: "Approve, reject, or move someone forward",
+    kinds: ["human", "hold", "declined", "offer", "resched"],
+  },
+  {
+    id: "client",
+    label: "Client",
+    hint: "Shortlists to send and client decisions to chase",
+    kinds: ["shortlist", "client", "overdue"],
+  },
+]
+
+/** Which action group a kind belongs to. */
+export function actionGroupFor(kind: WorkItemKind): ActionGroup {
+  for (const g of ACTION_GROUPS) {
+    if (g.kinds.includes(kind)) return g.id
+  }
+  return "decide"
+}
+
 export type SlaState = "ok" | "warn" | "late"
 
 export interface DispatchApplication {
@@ -176,6 +230,8 @@ export interface WorkItem {
   key: string
   kind: WorkItemKind
   kindLabel: string
+  /** The action group this case belongs to — what the recruiter has to DO. */
+  actionGroup: ActionGroup
   applicationId: string
   jobId: string
   candidateId: string
@@ -817,6 +873,7 @@ function deriveOne(input: WorkItemInput, now: Date): WorkItem | null {
     key: `${input.application.id}:${kind}`,
     kind,
     kindLabel: cfg.label,
+    actionGroup: actionGroupFor(kind),
     applicationId: input.application.id,
     jobId: input.job.id,
     candidateId: input.candidate.id,

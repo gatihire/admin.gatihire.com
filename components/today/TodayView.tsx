@@ -56,10 +56,10 @@ import { useToast } from "@/hooks/use-toast"
 import { useInternalPermissions } from "@/hooks/use-internal-permissions"
 import {
   formatAge,
-  kindLabel,
   nextStageFor,
   stageLabel,
-  WORK_ITEM_KINDS,
+  ACTION_GROUPS,
+  type ActionGroup,
   type WorkItem,
   type WorkItemKind,
   type DispatchStats,
@@ -137,11 +137,23 @@ const KIND_ICON: Record<WorkItemKind, React.ComponentType<{ className?: string }
   shortlist: Send,
 }
 
-const PILL_STYLE: Record<string, string> = {
-  default: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300",
-  hot: "bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-300",
-  info: "bg-indigo-50 text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300",
-  good: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300",
+/**
+ * The badge on each row says what the recruiter must DO, not what the system
+ * detected. "Call them" is an instruction; "Needs a human" is a state the
+ * recruiter already knows about and cannot act on.
+ */
+const ACTION_LABEL: Record<ActionGroup, string> = {
+  call: "Call them",
+  reply: "Reply",
+  decide: "Decide",
+  client: "Client",
+}
+
+const ACTION_STYLE: Record<ActionGroup, string> = {
+  call: "bg-indigo-50 text-indigo-700 border-indigo-200 dark:bg-indigo-950/40 dark:text-indigo-300 dark:border-indigo-900",
+  reply: "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-900",
+  decide: "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900",
+  client: "bg-cyan-50 text-cyan-700 border-cyan-200 dark:bg-cyan-950/40 dark:text-cyan-300 dark:border-cyan-900",
 }
 
 function slaClasses(slaState: WorkItem["slaState"]): string {
@@ -716,7 +728,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [scope, setScope] = useState<Scope>(defaultScope)
-  const [kindFilter, setKindFilter] = useState<"all" | WorkItemKind>("all")
+  const [kindFilter, setKindFilter] = useState<"all" | ActionGroup>("all")
   const [subfilter, setSubfilter] = useState<"default" | "newest" | "urgent">("default")
   const [selectedCompany, setSelectedCompany] = useState<string | null>(null)
   const [selectedRole, setSelectedRole] = useState<string | null>(null)
@@ -794,20 +806,26 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
   }, [selectedCompany])
 
   const items = useMemo(() => data?.items ?? [], [data])
-  const counts = useMemo(() => data?.counts ?? {}, [data])
   const rail = data?.rail
 
   const filtered = useMemo(() => {
-    let list = kindFilter === "all" ? items : items.filter((i) => i.kind === kindFilter)
+    let list = kindFilter === "all" ? items : items.filter((i) => i.actionGroup === kindFilter)
     // ageHours = time waiting, so the newest items have the SMALLEST age.
     if (subfilter === "newest") {
       list = [...list].sort((a, b) => a.ageHours - b.ageHours || a.key.localeCompare(b.key))
-    } else if (subfilter === "urgent") {
-      // priority is higher = more urgent (same direction as the engine's default sort).
-      list = [...list].sort((a, b) => b.priority - a.priority || b.ageHours - a.ageHours)
     }
+    // The board is sorted by urgency by default (the engine's own order), so
+    // "default" needs no extra branch — one less thing to explain.
     return list
   }, [items, kindFilter, subfilter])
+
+  /** How many waiting items each action group holds. */
+  const groupCounts = useMemo(() => {
+    const out: Record<string, number> = { all: items.length }
+    for (const g of ACTION_GROUPS) out[g.id] = 0
+    for (const i of items) out[i.actionGroup] = (out[i.actionGroup] || 0) + 1
+    return out
+  }, [items])
 
   // Paginate so a 150+ item queue never renders as one endless page.
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE)
@@ -1246,7 +1264,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
 
   return (
     <div className="mx-auto w-full max-w-7xl space-y-6">
-      {/* Header */}
+      {/* Header — one number, one question: how many things need me today */}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
@@ -1255,8 +1273,8 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
           </h1>
           <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
             {stats?.waiting
-              ? `${stats.waiting} item${stats.waiting === 1 ? "" : "s"} need you across ${stats.open_jobs} open job${stats.open_jobs === 1 ? "" : "s"}.`
-              : "Nothing is waiting on you right now."}
+              ? `${stats.waiting} ${stats.waiting === 1 ? "candidate needs" : "candidates need"} you`
+              : "Nothing needs you right now."}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -1296,42 +1314,45 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
         <div className="rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-100 px-5 py-4 dark:border-zinc-800">
             <div>
-              <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">Candidates waiting on you</h2>
+              <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-50">
+                {kindFilter === "all" ? "Your to-do list" : `${ACTION_LABEL[kindFilter]} — ${filtered.length}`}
+              </h2>
               <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                Every candidate the pipeline says needs a human decision, most urgent first.
+                {kindFilter === "all"
+                  ? "Most urgent first. Every row shows what is needed and the button to do it."
+                  : ACTION_GROUPS.find((g) => g.id === kindFilter)?.hint}
               </p>
             </div>
             <div className="flex items-center gap-3">
             </div>
           </div>
 
-          {/* Company / role cascading filter */}
-          <div className="flex flex-wrap items-center gap-3 border-b border-zinc-100 px-5 py-3 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-800/40">
-            <span className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Filter by</span>
-            <div className="flex items-center gap-2 min-w-[200px]">
-              <label className="text-xs font-medium text-zinc-600 dark:text-zinc-300 shrink-0">Company</label>
-              <select
-                value={selectedCompany || ""}
-                onChange={(e) => setSelectedCompany(e.target.value || null)}
-                className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
-              >
-                <option value="">All companies</option>
-                {data?.companies?.map((c) => (
-                  <option key={c.name} value={c.name}>
-                    {c.name} ({c.count})
-                  </option>
-                ))}
-              </select>
-            </div>
+          {/* Company / role filter — one row, one purpose: narrow the queue to
+              the accounts you are working on today. */}
+          <div className="flex flex-wrap items-center gap-2 border-b border-zinc-100 px-5 py-2.5 dark:border-zinc-800">
+            <Building2 className="h-3.5 w-3.5 text-zinc-400 shrink-0" />
+            <select
+              value={selectedCompany || ""}
+              onChange={(e) => setSelectedCompany(e.target.value || null)}
+              aria-label="Filter by company"
+              className="rounded-md border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium text-zinc-700 focus:ring-2 focus:ring-blue-500 outline-none max-w-[220px] dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+            >
+              <option value="">All companies</option>
+              {data?.companies?.map((c) => (
+                <option key={c.name} value={c.name}>
+                  {c.name} ({c.count})
+                </option>
+              ))}
+            </select>
             {selectedCompany && (
-              <div className="flex items-center gap-2 min-w-[220px]">
-                <label className="text-xs font-medium text-zinc-600 dark:text-zinc-300 shrink-0">Role</label>
+              <>
                 <select
                   value={selectedRole || ""}
                   onChange={(e) => setSelectedRole(e.target.value || null)}
-                  className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                  aria-label="Filter by role"
+                  className="rounded-md border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium text-zinc-700 focus:ring-2 focus:ring-blue-500 outline-none max-w-[240px] dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
                 >
-                  <option value="">All roles in {selectedCompany}</option>
+                  <option value="">All roles</option>
                   {data?.roles?.map((r) => (
                     <option key={r.title} value={r.title}>
                       {r.title} ({r.count})
@@ -1341,59 +1362,48 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                 <button
                   type="button"
                   onClick={() => { setSelectedRole(null); setSelectedCompany(null) }}
-                  className="rounded-md p-1 text-zinc-400 hover:text-red-500 dark:text-zinc-500 dark:hover:text-red-400"
-                  title="Clear filters"
+                  className="rounded-full border border-zinc-200 bg-white px-2 py-0.5 text-[11px] font-medium text-zinc-500 hover:text-red-600 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400"
                 >
-                  <span className="sr-only">Clear filters</span>
-                  <span className="text-[10px]">×</span>
+                  Clear
                 </button>
-              </div>
-            )}
-            {!selectedCompany && (
-              <span className="text-xs text-zinc-400 dark:text-zinc-500 italic">
-                {data?.companies?.length ?? 0} company{data?.companies?.length === 1 ? "" : "s"} with waiting items
-              </span>
+              </>
             )}
           </div>
 
-          {/* Filter chips */}
+          {/* Action chips — the four things a recruiter does with their day.
+              The board used to show eleven kind chips whose names described
+              internal states ("AI flagged", "Overdue", "Calls to review")
+              rather than actions, so a recruiter could not read the board as a
+              to-do list. These four are the actions. */}
           <div className="flex flex-wrap items-center gap-2 border-b border-zinc-100 px-5 py-3 dark:border-zinc-800">
-            <Chip active={kindFilter === "all"} onClick={() => setKindFilter("all")} label="All" count={items.length} />
-            {/* Every kind renders even at zero — a tab that only appears when
-                something is waiting looks like a broken filter otherwise. */}
-            {WORK_ITEM_KINDS.map((k) => (
+            <Chip active={kindFilter === "all"} onClick={() => setKindFilter("all")} label="Everything" count={groupCounts.all ?? 0} />
+            {ACTION_GROUPS.map((g) => (
               <Chip
-                key={k}
-                active={kindFilter === k}
-                onClick={() => setKindFilter(k)}
-                label={kindLabel(k)}
-                count={counts[k] || 0}
+                key={g.id}
+                active={kindFilter === g.id}
+                onClick={() => setKindFilter(g.id)}
+                label={g.label}
+                count={groupCounts[g.id] || 0}
+                hint={g.hint}
               />
             ))}
             <div className="ml-auto flex items-center gap-2">
+              <span className="text-[11px] text-zinc-400 dark:text-zinc-500">Sort</span>
               <button
                 type="button"
                 aria-pressed={subfilter === "default"}
                 onClick={() => setSubfilter("default")}
-                className={`rounded-full border px-2 py-0.5 text-[11px] transition-colors ${subfilter === "default" ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300" : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"}`}
+                className={`rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition-colors ${subfilter === "default" ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300" : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"}`}
               >
-                Default
+                Most urgent
               </button>
               <button
                 type="button"
                 aria-pressed={subfilter === "newest"}
                 onClick={() => setSubfilter("newest")}
-                className={`rounded-full border px-2 py-0.5 text-[11px] transition-colors ${subfilter === "newest" ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300" : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"}`}
+                className={`rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition-colors ${subfilter === "newest" ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300" : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"}`}
               >
                 Newest
-              </button>
-              <button
-                type="button"
-                aria-pressed={subfilter === "urgent"}
-                onClick={() => setSubfilter("urgent")}
-                className={`rounded-full border px-2 py-0.5 text-[11px] transition-colors ${subfilter === "urgent" ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300" : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"}`}
-              >
-                Urgent
               </button>
             </div>
             {selected.size > 0 && filtered.length > 0 && (
@@ -1409,7 +1419,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                 }}
                 className="text-xs text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200"
               >
-                Select all on this filter
+                Select all shown
               </button>
             )}
           </div>
@@ -1511,19 +1521,12 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                   pending.has(`callback:${item.key}`) ||
                   pending.has(`done:${item.key}`) ||
                   pending.has(`undo:${item.applicationId}`)
-                const secondary = item.actions
-                  .filter((a) => a.id === "advance" || a.id === "reject")
-                  .filter(() => canManage)
+                // Everything that is not the primary CTA lives in the ⋯ menu.
+                // The row carries ONE button so a recruiter can see at a glance
+                // what to press; everything else is one click away but never
+                // competes for attention.
                 const menuExtras = item.actions
-                  .filter(
-                    (a) =>
-                      a.id !== item.primaryAction &&
-                      a.id !== "advance" &&
-                      a.id !== "reject" &&
-                      a.id !== "log_call" &&
-                      a.id !== "snooze" &&
-                      a.id !== "done"
-                  )
+                  .filter((a) => a.id !== item.primaryAction && a.id !== "log_call" && a.id !== "snooze" && a.id !== "done")
                   .map((a) => ({ label: a.label, onSelect: () => runActionById(item, a.id) }))
                 return (
                   <div
@@ -1549,9 +1552,10 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                       <Icon className="h-3.5 w-3.5" />
                     </span>
 
-                    {/* Left column: who + what stage + why they are here */}
+                    {/* Left column: who + where + why they are here */}
                     <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2 mb-1">
+                      {/* Name + the one badge that matters: the action needed */}
+                      <div className="flex flex-wrap items-center gap-2">
                         <span
                           className={`text-sm font-semibold text-zinc-900 dark:text-zinc-50 truncate`}
                           title={item.candidateName}
@@ -1561,25 +1565,20 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                         <button
                           type="button"
                           onClick={() => openActionModal(item)}
-                          className="shrink-0 p-1 text-zinc-400 hover:text-blue-600 dark:text-zinc-500 dark:hover:text-blue-400"
-                          title="View details & take action"
-                          aria-label="View details & take action"
+                          className="shrink-0 p-0.5 text-zinc-300 hover:text-blue-600 dark:text-zinc-600 dark:hover:text-blue-400"
+                          title="See full details"
+                          aria-label="See full details"
                         >
                           <Eye className="h-3.5 w-3.5" />
                         </button>
                         <span
-                          className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${KIND_STYLE[item.kind]}`}
+                          className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${ACTION_STYLE[item.actionGroup]}`}
                         >
-                          {item.kindLabel}
+                          {ACTION_LABEL[item.actionGroup]}
                         </span>
-                        {item.stage && (
-                          <span className="rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[10px] font-medium text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
-                            {item.stage.replace(/_/g, " ")}
-                          </span>
-                        )}
                         <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${slaClasses(item.slaState)}`}>
                           <AlarmClock className="mr-1 inline h-3 w-3 align-[-2px]" />
-                          Waiting {formatAge(item.ageHours)}
+                          {formatAge(item.ageHours)}
                         </span>
                         {item.snoozed && (
                           <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
@@ -1588,14 +1587,16 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                         )}
                       </div>
 
-                      {/* Company / opening line */}
-                      <p className="text-xs text-zinc-500 dark:text-zinc-400 truncate">
-                        {item.clientName || ""}{item.jobTitle ? ` · ${item.jobTitle}` : ""}
+                      {/* Company + opening + the pipeline stage it sits in */}
+                      <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400 truncate">
+                        {item.clientName || "—"}
+                        {item.jobTitle ? ` · ${item.jobTitle}` : ""}
+                        {item.stage ? ` · ${item.stage.replace(/_/g, " ")}` : ""}
                       </p>
 
                       {/* Why this case needs attention — the single most important line */}
                       {item.detail && (
-                        <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-200 font-medium">
+                        <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-200">
                           {item.detail}
                         </p>
                       )}
@@ -1606,7 +1607,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                       )}
                     </div>
 
-                    {/* Right column: actions — everything on the row, nothing hidden */}
+                    {/* Right column: the action, right there */}
                     <div className="flex shrink-0 flex-wrap items-center gap-2">
                       <Button
                         size="sm"
@@ -1618,23 +1619,6 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                         {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
                         {item.cta}
                       </Button>
-                      {secondary.map((a) => (
-                        <Button
-                          key={a.id}
-                          variant="outline"
-                          size="sm"
-                          disabled={busy}
-                          className={a.variant === "danger" ? "text-red-600 hover:text-red-700 dark:text-red-400" : undefined}
-                          title={
-                            a.id === "advance"
-                              ? `Move the candidate to the next stage (${stageLabel(nextStageFor(item.stage))})`
-                              : "Reject this application and remove it from the queue"
-                          }
-                          onClick={() => runActionById(item, a.id)}
-                        >
-                          {a.id === "advance" ? `Move to ${stageLabel(nextStageFor(item.stage))}` : a.label}
-                        </Button>
-                      ))}
                       {!grouped && (
                         <RowMenu
                           disabled={busy}
@@ -2145,13 +2129,15 @@ function Chip({
   onClick,
   label,
   count,
+  hint,
 }: {
   active: boolean
   onClick: () => void
   label: string
   count: number
+  hint?: string
 }) {
-  // Every kind always renders, even at zero — a tab that disappears looks
+  // Every group always renders, even at zero — a chip that disappears looks
   // like a broken filter. Zero-count chips are dimmed but still clickable.
   const empty = count === 0 && !active
   return (
@@ -2159,6 +2145,7 @@ function Chip({
       type="button"
       aria-pressed={active}
       onClick={onClick}
+      title={hint}
       className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
         active
           ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300"
