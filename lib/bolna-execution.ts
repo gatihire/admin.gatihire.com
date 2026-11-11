@@ -937,7 +937,7 @@ async function enrichTranscriptAsync(
   const { data: participant } = await supabaseAdmin
     .from("phone_screening_participants")
     .select(`
-      candidate_id, job_id, ai_score, ai_recommendation,
+      candidate_id, job_id, ai_score, ai_recommendation, status, call_is_partial, bolna_status, call_duration_seconds,
       candidates: candidate_id (id, name, current_role, current_company, total_experience, location, technical_skills, resume_text),
       jobs: job_id (id, title, client_name, city, location, experience_min_years, experience_max_years, salary_min, salary_max, salary_type, skills_must_have, skills_good_to_have, description)
     `)
@@ -950,6 +950,13 @@ async function enrichTranscriptAsync(
   const job = participant.jobs
   if (!candidate || !job) return
 
+  // Never assign a default score to a call that didn't complete a proper
+  // screening (wife picked up, auto-cut, too short, couldn't hear, etc.).
+  // A 6/10 "further_review" default on an incomplete call misleads HR into
+  // thinking a real screening happened — it shows "View Results" instead of
+  // "Send Call Again".
+  const status = String(participant.status || "")
+  const isIncompleteCall = !!(participant.call_is_partial || status === "failed_partial" || status === "failed")
   const enriched = await enrichTranscript(transcript, candidate, job, bolnaVerdict)
   if (!enriched) return
 
@@ -963,8 +970,12 @@ async function enrichTranscriptAsync(
   // Derive an internally consistent score from the verdict band (not the model's
   // confidence, which is a separate measure): advance ~8, further_review ~6,
   // not_a_fit ~2. Keeps "8/10 advance" style labels coherent on the card.
+  //
+  // For incomplete calls (wife picked up, auto-cut, too short) never assign a
+  // default score — a 6/10 "further_review" implies a real screening happened.
   const derivedScore = { advance: 8, further_review: 6, not_a_fit: 2 }[recommendation]
   const hasScore = typeof participant.ai_score === "number" || typeof participant.ai_recommendation === "string"
+  const shouldScore = hasScore || !isIncompleteCall
 
   // Store enriched summary
   await supabaseAdmin
@@ -972,7 +983,7 @@ async function enrichTranscriptAsync(
     .update({
       enriched_summary: enriched,
       ai_summary: enriched.comprehensive_summary,
-      ...(hasScore ? {} : {
+      ...(shouldScore ? {} : {
         ai_score: derivedScore,
         ai_recommendation: recommendation,
       }),
@@ -984,6 +995,7 @@ async function enrichTranscriptAsync(
     verdict: enriched.overall_verdict,
     confidence: enriched.confidence_score,
     derivedScore: !hasScore ? derivedScore : undefined,
+    skippedDefaultScore: isIncompleteCall && !hasScore,
   })
 }
 

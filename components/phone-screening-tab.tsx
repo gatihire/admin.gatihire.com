@@ -369,7 +369,11 @@ export function PhoneScreeningTab({ jobId }: { jobId: string }) {
                                     View
                                   </Button>
                                 )}
-                                {p.ai_score && (
+                                // Only show a score when the call actually completed a proper
+                                // screening. A default 6/10 "further_review" on an incomplete
+                                // call (wife picked up, auto-cut, too short) misleads HR into
+                                // thinking a real screening happened.
+                                {p.status === "completed" && p.ai_score && (
                                   <span className={`text-sm font-black ${
                                     (p.ai_score || 0) >= 7 ? "text-green-600" : (p.ai_score || 0) >= 4 ? "text-amber-600" : "text-red-600"
                                   }`}>

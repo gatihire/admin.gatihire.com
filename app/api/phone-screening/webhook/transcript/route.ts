@@ -18,7 +18,7 @@ export async function POST(request: NextRequest) {
 
     const { data: participants } = await supabaseAdmin
       .from("phone_screening_participants")
-      .select("id")
+      .select("id, call_attempts, status")
       .eq("plivo_call_uuid", callUuid)
 
     if (!participants || participants.length === 0) {
@@ -121,14 +121,17 @@ export async function POST(request: NextRequest) {
       }
 
       // If the candidate asked to be called back later, queue an automatic retry
-      // so the delayed trigger places the next call on its own.
+      // so the delayed trigger places the next call on its own. Increment
+      // call_attempts (never reset to 1) so the shared attempt budget is real:
+      // MAX_TOTAL_CALL_ATTEMPTS (3) caps every placement path.
       if (parsed.callback_requested || parsed.callback_preference) {
         try {
+          const currentAttempts = Number(participants[0]?.call_attempts || 0)
           await supabaseAdmin
             .from("phone_screening_participants")
             .update({
               status: "failed",
-              call_attempts: 1,
+              call_attempts: currentAttempts + 1,
               next_retry_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
               updated_at: new Date().toISOString(),
             })
