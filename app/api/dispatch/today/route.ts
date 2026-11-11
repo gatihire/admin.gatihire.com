@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { supabaseAdmin } from "@/lib/supabase"
 import { getCallTruth } from "@/lib/call-truth"
+import { maybeSweepJourney } from "@/lib/journey-watchdog"
 import {
   deriveWorkItems,
   countsByKind,
@@ -538,6 +539,19 @@ export async function GET(request: NextRequest) {
     .select("name, email")
     .eq("auth_user_id", me)
     .maybeSingle()
+
+  // Rescue stuck journeys opportunistically.
+  //
+  // The recruiter opening Today is the one thing that happens every working
+  // hour, so it is the right place to look for journeys that went quiet — a
+  // call that was booked but never placed, a retry that never fired, a
+  // candidate who ignored our WhatsApp and was never called.
+  //
+  // This used to depend on a Vercel cron, which never ran: `CRON_SECRET` was
+  // never set so every cron request 401'd, and on the Hobby plan a cron runs
+  // at most once a day regardless of the `*/5` schedule. The sweep is throttled
+  // (one per minute across all instances) and never blocks this response.
+  void maybeSweepJourney().catch(() => {})
 
   return NextResponse.json({
     scope,

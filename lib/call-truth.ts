@@ -173,6 +173,67 @@ function normalizeStatus(raw: unknown): string {
  * Derive the real call state. `p` is a `phone_screening_participants` row
  * (joined candidate data optional). Pure — safe to call from render.
  */
+/**
+ * Why is there no call?
+ *
+ * The generic "Screening was flagged for a human — no call placed yet" was
+ * printed on 295 different candidates, so reading any one of them taught a
+ * recruiter nothing. Every stuck row looked identical even though the actual
+ * causes were completely different: a call was booked and never placed, a
+ * WhatsApp went out and was ignored, a retry never fired.
+ *
+ * This names the real reason, so the board can be triaged by reading it.
+ */
+function describeWhyNoCall(p: any): { label: string; detail: string } {
+  const attempts = Number(p?.call_attempts || 0)
+  const sentAt = p?.whatsapp_sent_at ? new Date(p.whatsapp_sent_at).getTime() : null
+  const scheduledAt = p?.scheduled_call_at ? new Date(p.scheduled_call_at).getTime() : null
+  const now = Date.now()
+
+  // A call was booked for a time that has passed, and no call happened.
+  if (attempts === 0 && scheduledAt && scheduledAt <= now) {
+    return {
+      label: "Call never placed",
+      detail: `A call was booked for ${fmtTime(p.scheduled_call_at)} but it was never placed. Send the call again.`,
+    }
+  }
+
+  // A retry was booked and never fired.
+  if (attempts > 0 && p?.next_retry_at && new Date(p.next_retry_at).getTime() <= now) {
+    return {
+      label: "Retry never fired",
+      detail: `Attempt ${attempts} failed and the retry was never placed. Send the call again.`,
+    }
+  }
+
+  // We asked on WhatsApp and they never answered — and no call was ever made.
+  if (attempts === 0 && sentAt) {
+    const hours = Math.max(0, Math.floor((now - sentAt) / 3600000))
+    if (hours >= 48) {
+      return {
+        label: "Gone cold",
+        detail: `WhatsApp sent ${hours}h ago, no reply, and no screening call was ever placed. Too late to call cold — close this out or try once.`,
+      }
+    }
+    return {
+      label: "No reply yet",
+      detail: `WhatsApp sent ${hours}h ago with no reply, and no screening call has been placed yet.`,
+    }
+  }
+
+  if (attempts === 0) {
+    return {
+      label: "No call placed",
+      detail: "No screening call has been placed for this candidate yet.",
+    }
+  }
+
+  return {
+    label: "Flagged for a human",
+    detail: `The AI screening was flagged for a human after ${attempts} attempt${attempts > 1 ? "s" : ""}.`,
+  }
+}
+
 export function getCallTruth(p: any): CallTruth {
   if (!p) {
     return truth("not_placed", "No call placed", "Not started yet", { tone: "neutral", bucket: "pending" })
@@ -366,10 +427,11 @@ export function getCallTruth(p: any): CallTruth {
   }
 
   if (status === "needs_review" || status === "needs_manual_followup" || p.needs_manual_followup) {
+    const why = describeWhyNoCall(p)
     return truth(
       "not_placed",
-      "No call placed",
-      "Screening was flagged for a human — no call placed yet",
+      why.label,
+      why.detail,
       { tone: "warning", bucket: "review" }
     )
   }
@@ -377,20 +439,27 @@ export function getCallTruth(p: any): CallTruth {
   // ── 5. Still waiting on the candidate. No call is due yet — that is correct,
   // not broken, and the UI must not imply a call is imminent. ──
   if (status === "whatsapp_sent" || status === "whatsapp_delivered" || status === "whatsapp_read") {
+    const hours = p?.whatsapp_sent_at
+      ? Math.max(0, Math.floor((Date.now() - new Date(p.whatsapp_sent_at).getTime()) / 3600000))
+      : null
+    const age = hours === null ? "" : ` · ${hours}h ago`
     return truth(
       "not_placed",
-      "Waiting for reply",
-      `WhatsApp sent ${fmtTime(p.whatsapp_sent_at) || ""} · no reply yet, so no call`.trim(),
-      { tone: "neutral", bucket: "waiting" }
+      hours !== null && hours >= 48 ? "Gone cold" : "Waiting for reply",
+      `WhatsApp sent${age} · no reply yet, so no call`.trim(),
+      { tone: hours !== null && hours >= 48 ? "danger" : "neutral", bucket: "waiting" }
     )
   }
 
   if (status === "info_requested") {
+    const hours = p?.whatsapp_sent_at
+      ? Math.max(0, Math.floor((Date.now() - new Date(p.whatsapp_sent_at).getTime()) / 3600000))
+      : null
     return truth(
       "not_placed",
-      "Waiting for details",
-      "Sent a details request on WhatsApp · no call until they respond",
-      { tone: "neutral", bucket: "waiting" }
+      hours !== null && hours >= 48 ? "Gone cold" : "Waiting for details",
+      `Sent a details request on WhatsApp${hours !== null ? ` · ${hours}h ago` : ""} · no call until they respond`,
+      { tone: hours !== null && hours >= 48 ? "danger" : "neutral", bucket: "waiting" }
     )
   }
 

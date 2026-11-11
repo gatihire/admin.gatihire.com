@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { verifySignatureAppRouter } from "@upstash/qstash/nextjs"
 import { supabaseAdmin } from "@/lib/supabase"
 import { getWhatsAppService } from "@/lib/whatsapp"
+import { placeCallImmediately, MAX_TOTAL_CALL_ATTEMPTS } from "@/lib/scheduled-call"
 import { logger } from "@/lib/logger"
 
 export const runtime = "nodejs"
@@ -23,7 +24,7 @@ async function handler(request: NextRequest) {
     const { data: participant, error: partError } = await supabaseAdmin
       .from("phone_screening_participants")
       .select(`
-        id, status, outreach_nudge_count, campaign_id,
+        id, status, outreach_nudge_count, campaign_id, call_attempts,
         candidates: candidate_id (id, name, phone),
         jobs: job_id (id, title, city)
       `)
@@ -39,6 +40,7 @@ async function handler(request: NextRequest) {
       status: string
       outreach_nudge_count: number
       campaign_id: string
+      call_attempts: number
       candidates?: { id: string; name?: string | null; phone?: string | null } | null
       jobs?: { id: string; title?: string | null; city?: string | null } | null
     }
@@ -67,7 +69,19 @@ async function handler(request: NextRequest) {
     if (action === "nudge") {
       // Respect per-job max nudge count
       if ((row.outreach_nudge_count || 0) >= maxNudgeCount) {
-        // Already sent max nudges — escalate instead
+        // Already sent max nudges — escalate instead.
+        //
+        // Escalation must not be a dead end: if we can still call, call.
+        // Otherwise this branch just parks the candidate for a human, which is
+        // what left 295 of them sitting untouched for 19 days.
+        const canCall = Boolean(candidate?.phone) && (row.call_attempts || 0) < MAX_TOTAL_CALL_ATTEMPTS
+        if (canCall) {
+          const placed = await placeCallImmediately(participantId)
+          if (placed.success) {
+            logger.info("Max nudges reached — escalated to an AI screening call", { participantId })
+            return NextResponse.json({ success: true, escalated: true, callPlaced: true })
+          }
+        }
         await supabaseAdmin
           .from("phone_screening_participants")
           .update({
@@ -77,7 +91,7 @@ async function handler(request: NextRequest) {
           })
           .eq("id", participantId)
         logger.info("Max nudges reached, auto-escalating", { participantId, nudgeCount: row.outreach_nudge_count })
-        return NextResponse.json({ success: true, escalated: true, reason: "max_nudges_reached" })
+        return NextResponse.json({ success: true, escalated: true, callPlaced: false, reason: "max_nudges_reached" })
       }
 
       if (!candidate?.phone) {
@@ -108,7 +122,31 @@ async function handler(request: NextRequest) {
       return NextResponse.json({ success: true, nudgeSent: true })
     }
 
-    // escalate → human recruiter queue.
+    // escalate → the candidate never answered our WhatsApp.
+    //
+    // This used to only set `needs_manual_followup`, which meant "escalate"
+    // actually meant "sit here forever". The data showed it: 295 candidates
+    // flagged for manual follow-up with ZERO call attempts, averaging 19 days
+    // old. The WhatsApp message was the soft ask; the screening call is the
+    // real one. If they ignored the message, we call them — that is what the
+    // AI screener is for, and it is why they gave us a number.
+    //
+    // Only when there is no number (or the call is refused) does this become a
+    // genuine hand-off to a recruiter.
+    const canCall = Boolean(candidate?.phone) && (row as any).call_attempts < MAX_TOTAL_CALL_ATTEMPTS
+
+    if (canCall) {
+      const placed = await placeCallImmediately(participantId)
+      if (placed.success) {
+        logger.info("Outreach escalated to an AI screening call", { participantId })
+        return NextResponse.json({ success: true, escalated: true, callPlaced: true })
+      }
+      logger.warn("Escalation could not place a call — falling back to a human", {
+        participantId,
+        reason: placed.error || placed.reason,
+      })
+    }
+
     await supabaseAdmin
       .from("phone_screening_participants")
       .update({
@@ -120,7 +158,7 @@ async function handler(request: NextRequest) {
 
     logger.info("Outreach escalated to human recruiter", { participantId })
 
-    return NextResponse.json({ success: true, escalated: true })
+    return NextResponse.json({ success: true, escalated: true, callPlaced: false })
   } catch (error: any) {
     logger.error("Outreach follow-up failed", { error: error?.message })
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 })

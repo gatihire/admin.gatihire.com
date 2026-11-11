@@ -3,6 +3,10 @@
     {
       "path": "/api/bolna/reconcile",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/journey/watchdog",
+      "schedule": "*/10 * * * *"
     }
   ]
 }
