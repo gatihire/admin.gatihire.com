@@ -692,14 +692,6 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
         </div>
       </div>
 
-      {/* Stat strip */}
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <StatCard icon={<Inbox className="h-4 w-4" />} label="Waiting on you" value={stats?.waiting ?? 0} accent />
-        <StatCard icon={<Users className="h-4 w-4" />} label="Candidates" value={stats?.candidates ?? 0} />
-        <StatCard icon={<CheckCircle2 className="h-4 w-4" />} label="Shortlisted or later" value={stats?.shortlisted_or_later ?? 0} />
-        <StatCard icon={<FileText className="h-4 w-4" />} label="Hired" value={stats?.hired ?? 0} />
-      </div>
-
       {error && (
         <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300">
           {error}
@@ -927,14 +919,8 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                   pending.has(`done:${item.key}`) ||
                   pending.has(`undo:${item.applicationId}`)
                 const secondary = item.actions
-                  // Only the two judgment buttons sit next to the primary CTA.
-                  // Everything else — open chat, call, review, done — lives in
-                  // the ⋯ menu so a row never shows more than three buttons.
                   .filter((a) => a.id === "advance" || a.id === "reject")
-                  // Stage movement needs the manage permission.
                   .filter(() => canManage)
-                // Leftover actions for the ⋯ menu (log_call / snooze / done are
-                // already native menu entries).
                 const menuExtras = item.actions
                   .filter(
                     (a) =>
@@ -949,7 +935,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                 return (
                   <div
                     key={item.key}
-                    className="flex flex-wrap items-start gap-4 px-5 py-4 transition-colors hover:bg-zinc-50/70 dark:hover:bg-zinc-800/30"
+                    className="flex items-start gap-4 px-5 py-4 border-b border-zinc-100 dark:border-zinc-800 hover:bg-zinc-50/70 dark:hover:bg-zinc-800/30 transition-colors"
                   >
                     {item.selectable ? (
                       <div className="pt-1">
@@ -962,63 +948,71 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                       <div className="w-4 pt-1" />
                     )}
 
+                    {/* Kind icon */}
                     <span
-                      className={`mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border ${KIND_STYLE[item.kind]}`}
+                      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full border ${KIND_STYLE[item.kind]}`}
                       title={item.kindLabel}
                     >
                       <Icon className="h-3.5 w-3.5" />
                     </span>
 
+                    {/* Left column: who + what stage + why they are here */}
                     <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => openProfile(item)}
-                          className="truncate text-sm font-semibold text-zinc-900 hover:underline dark:text-zinc-50"
+                      <div className="flex flex-wrap items-center gap-2 mb-1">
+                        <span
+                          className={`text-sm font-semibold text-zinc-900 dark:text-zinc-50 truncate`}
+                          title={item.candidateName}
                         >
                           {item.candidateName}
-                        </button>
-                        <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${KIND_STYLE[item.kind]}`}>
+                        </span>
+                        <span
+                          className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${KIND_STYLE[item.kind]}`}
+                        >
                           {item.kindLabel}
                         </span>
                         {item.stage && (
-                          <span className="rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[11px] font-medium text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                          <span className="rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[10px] font-medium text-zinc-600 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
                             {item.stage.replace(/_/g, " ")}
                           </span>
                         )}
-                        <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${slaClasses(item.slaState)}`}>
+                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${slaClasses(item.slaState)}`}>
                           <AlarmClock className="mr-1 inline h-3 w-3 align-[-2px]" />
                           Waiting {formatAge(item.ageHours)}
                         </span>
                         {item.snoozed && (
-                          <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                          <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
                             Snoozed
                           </span>
                         )}
-                        {item.pills.map((p) => (
-                          <span
-                            key={p.label}
-                            className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${PILL_STYLE[p.tone || "default"]}`}
-                          >
-                            {p.label}
-                          </span>
-                        ))}
                       </div>
 
-                      <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-200">{item.title}</p>
-                      <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-                        {item.clientName || ""}
+                      {/* Company / opening line */}
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 truncate">
+                        {item.clientName || ""}{item.jobTitle ? ` · ${item.jobTitle}` : ""}
                       </p>
-                      {item.detail && <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{item.detail}</p>}
+
+                      {/* Why this case needs attention — the single most important line */}
+                      {item.detail && (
+                        <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-200 font-medium">
+                          {item.detail}
+                        </p>
+                      )}
                       {item.quote && (
-                        <p className="mt-1.5 border-l-2 border-zinc-200 pl-2 text-xs italic text-zinc-500 dark:border-zinc-700 dark:text-zinc-400">
+                        <p className="mt-1 text-xs italic text-zinc-500 dark:text-zinc-400 border-l-2 border-zinc-200 pl-2">
                           “{item.quote}”
                         </p>
                       )}
                     </div>
 
+                    {/* Right column: actions — everything on the row, nothing hidden */}
                     <div className="flex shrink-0 flex-wrap items-center gap-2">
-                      <Button size="sm" onClick={() => runPrimary(item)} disabled={busy} title={item.detail || item.cta}>
+                      <Button
+                        size="sm"
+                        onClick={() => runPrimary(item)}
+                        disabled={busy}
+                        className="font-medium text-zinc-900 dark:text-zinc-100"
+                        title={item.detail || item.cta}
+                      >
                         {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
                         {item.cta}
                       </Button>
