@@ -175,6 +175,11 @@ across instances.
 | `cacheDeleteNamespace(ns)` | SCAN + DEL for write invalidation (never `KEYS`) |
 | `CacheNamespace` / `CacheTtl` | single source of truth for names and TTLs |
 
+Two tiers: a 10-second in-process mirror (L1) sits in front of Redis (L2). The
+mirror is cleared on every invalidation, so it only absorbs repeated reads on a
+warm lambda — which keeps Upstash command usage low — and never holds a value
+long enough to show stale data after a write.
+
 Guarantees:
 
 - **No Redis → no-op.** Without `UPSTASH_REDIS_REST_URL` /

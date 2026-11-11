@@ -23,6 +23,44 @@ const REDIS_OP_TIMEOUT_MS = 1200
 /** In-process single-flight: collapses concurrent identical loads. */
 const inFlight = new Map<string, Promise<unknown>>()
 
+/**
+ * L1 memory cache in front of Redis.
+ *
+ * Every API request reads permissions, so a pure Redis cache costs one command
+ * per request. A short in-process mirror collapses bursts on the same warm
+ * lambda into zero Redis commands, which keeps usage well inside a small
+ * Upstash plan. It is deliberately short-lived and is dropped wholesale on any
+ * invalidation.
+ */
+const memory = new Map<string, { value: unknown; expiresAt: number }>()
+const MEMORY_MAX_ENTRIES = 500
+const MEMORY_MAX_TTL_MS = 10_000
+
+function memoryGet<T>(fullKey: string): T | null {
+  const hit = memory.get(fullKey)
+  if (!hit) return null
+  if (hit.expiresAt <= Date.now()) {
+    memory.delete(fullKey)
+    return null
+  }
+  return hit.value as T
+}
+
+function memorySet(fullKey: string, value: unknown, ttlSeconds: number) {
+  if (memory.size >= MEMORY_MAX_ENTRIES) {
+    // Cheap eviction: drop the oldest insertion (Map preserves order).
+    const oldest = memory.keys().next()
+    if (!oldest.done) memory.delete(oldest.value)
+  }
+  const ttlMs = Math.min(ttlSeconds * 1000, MEMORY_MAX_TTL_MS)
+  if (ttlMs <= 0) return
+  memory.set(fullKey, { value, expiresAt: Date.now() + ttlMs })
+}
+
+function memoryClear() {
+  memory.clear()
+}
+
 /** Rate-limit error logging so a Redis outage does not spam the logs. */
 let lastErrorLogAt = 0
 const ERROR_LOG_INTERVAL_MS = 30_000
@@ -80,14 +118,14 @@ export async function cacheSet<T>(
   value: T,
   ttlSeconds: number,
 ): Promise<void> {
+  const fullKey = cacheKey(namespace, key)
+  memorySet(fullKey, value, ttlSeconds)
   if (!redis) return
-  await withRedisTimeout(
-    redis.set(cacheKey(namespace, key), value, { ex: withJitter(ttlSeconds) }),
-    `set ${namespace}`,
-  )
+  await withRedisTimeout(redis.set(fullKey, value, { ex: withJitter(ttlSeconds) }), `set ${namespace}`)
 }
 
 export async function cacheDelete(namespace: string, key: string): Promise<void> {
+  memory.delete(cacheKey(namespace, key))
   if (!redis) return
   await withRedisTimeout(redis.del(cacheKey(namespace, key)), `del ${namespace}`)
 }
@@ -99,6 +137,8 @@ export async function cacheDelete(namespace: string, key: string): Promise<void>
  * small and this runs only on writes (role change, job edit, …).
  */
 export async function cacheDeleteNamespace(namespace: string): Promise<void> {
+  // Over-invalidate the local mirror: correctness over a few extra Redis reads.
+  memoryClear()
   if (!redis) return
   const match = `${KEY_PREFIX}:${namespace}:*`
   let cursor = "0"
@@ -142,12 +182,18 @@ export async function cached<T>(
 
   const fullKey = cacheKey(namespace, key)
 
+  const memHit = memoryGet<T>(fullKey)
+  if (memHit !== null) return memHit
+
   const existing = inFlight.get(fullKey) as Promise<T> | undefined
   if (existing) return existing
 
   const task = (async () => {
     const hit = await cacheGet<T>(namespace, key)
-    if (hit !== null && hit !== undefined) return hit
+    if (hit !== null && hit !== undefined) {
+      memorySet(fullKey, hit, ttlSeconds)
+      return hit
+    }
 
     const value = await load()
     // Do not cache empty/falsey results: a transient DB blip would otherwise
