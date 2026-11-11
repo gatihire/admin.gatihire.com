@@ -202,7 +202,7 @@ interface TodayModalHandlers {
  */
 function renderActionFields(item: WorkItem, h: TodayModalHandlers): React.ReactNode {
   const kind = item.kind
-  const hasScreening = (item.callAttempts ?? 0) > 0 || item.aiScore != null
+  const hasScreening = item.hasScreening
 
   // ── CALL: a screening call happened or needs to happen ──
   if (kind === "call") {
@@ -555,7 +555,7 @@ function renderCollectedInfo(item: WorkItem): React.ReactNode {
  */
 function renderPrimaryAction(item: WorkItem, h: TodayModalHandlers): React.ReactNode {
   const id = item.primaryAction
-  const hasScreening = (item.callAttempts ?? 0) > 0 || item.aiScore != null
+  const hasScreening = item.hasScreening
 
   if (id === "call") {
     return (
@@ -1053,8 +1053,16 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
       case "reply":
         return openConversation(item)
       case "review":
-      case "decide":
+        // A call finished and there IS a screening to read — the results sheet
+        // is the right place for the transcript, summary and verdict.
         return openResults(item)
+      case "decide":
+        // "Review & decide" means: read what we have, then approve or reject.
+        // When the AI never screened this candidate there is no transcript, no
+        // summary and no verdict to read — the results sheet opened empty and
+        // the button looked broken. Those land on the action modal instead,
+        // which shows the details we DO have plus approve/reject/call-now.
+        return item.hasScreening ? openResults(item) : openActionModal(item)
       case "call":
         return callNow(item)
       case "remind":

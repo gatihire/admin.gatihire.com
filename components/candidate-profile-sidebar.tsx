@@ -4,7 +4,7 @@ import { useState, useEffect, useMemo } from "react"
 import { Badge } from "@/components/ui/badge"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { ScrollArea } from "@/components/ui/scroll-area"
+
 import { Sheet, SheetContent } from "@/components/ui/sheet"
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -184,6 +184,7 @@ export function CandidateProfileSidebar({
   const [fitAnalysis, setFitAnalysis] = useState<any>(null)
   const [fitLoading, setFitLoading] = useState(false)
   const [jobDescExpanded, setJobDescExpanded] = useState(false)
+  const [reasonExpanded, setReasonExpanded] = useState(false)
   const [callBusy, setCallBusy] = useState(false)
   const [nudgeBusy, setNudgeBusy] = useState(false)
 
@@ -437,11 +438,21 @@ export function CandidateProfileSidebar({
   return (
     <>
     <Sheet open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <SheetContent className="w-full sm:max-w-[520px] p-0 overflow-hidden flex flex-col">
+      <SheetContent className="w-full sm:max-w-[560px] p-0 overflow-hidden flex flex-col">
+        {/* ═══════════════════════════════════════════════════════════════
+            ONE SCROLL CONTAINER
+            The header used to be a fixed, non-scrolling block above a
+            separately-scrolling tab body. A long job description then grew the
+            header until the tab bar and every tab pushed off the bottom of the
+            sheet — the recruiter saw a name and a wall of JD text and nothing
+            else. Now the whole sheet scrolls as one column with a sticky tab
+            bar, so nothing can ever be pushed out of reach.
+            ═══════════════════════════════════════════════════════════════ */}
+        <div className="flex-1 min-h-0 overflow-y-auto">
         {/* ═══════════════════════════════════════════════════════════════
             HEADER
             ═══════════════════════════════════════════════════════════════ */}
-        <div className="px-7 pt-7 pb-5 border-b border-zinc-100 bg-white">
+        <div className="px-5 pt-5 pb-3 border-b border-zinc-100 bg-white">
           <div className="flex items-start gap-4">
             {/* Avatar */}
             <Avatar className="h-16 w-16 border-2 border-zinc-100 shadow-sm shrink-0">
@@ -545,12 +556,15 @@ export function CandidateProfileSidebar({
             )}
           </div>
 
-          {/* Where is this candidate + what to do next */}
-          {(stageLabel || jobOpening?.title || nextStep?.reason) && (
-            <div className="mt-4 rounded-xl border border-indigo-200 bg-indigo-50/40 p-3 space-y-3">
+          {/* Where is this candidate + what to do next.
+              The job description used to live here, but the header does NOT
+              scroll — expanding a long JD pushed the tabs and all content off
+              the bottom of the sheet. The JD now has its own tab. */}
+          {(stageLabel || nextStep?.reason) && (
+            <div className="mt-3 rounded-xl border border-indigo-200 bg-indigo-50/40 p-3 space-y-2.5">
               {stageLabel && (
                 <div>
-                  <p className="text-[10px] font-bold uppercase tracking-wider text-indigo-500 mb-2">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-indigo-500 mb-1.5">
                     Where they are in the pipeline
                   </p>
                   <PipelineStepper current={stageLabel} />
@@ -562,48 +576,23 @@ export function CandidateProfileSidebar({
                   <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
                     Why they&apos;re on your desk
                   </p>
-                  <p className="text-sm text-zinc-800 leading-snug">{nextStep.reason}</p>
+                  <p
+                    className={`text-sm text-zinc-800 leading-snug ${reasonExpanded ? "" : "line-clamp-2"}`}
+                  >
+                    {nextStep.reason}
+                  </p>
+                  {nextStep.reason.length > 120 && (
+                    <button
+                      onClick={() => setReasonExpanded(!reasonExpanded)}
+                      className="text-[11px] font-semibold text-indigo-600 hover:underline mt-1"
+                    >
+                      {reasonExpanded ? "Show less" : "Show more"}
+                    </button>
+                  )}
                   {nextStep.cta && (
                     <p className="mt-1.5 flex items-center gap-1 text-xs font-semibold text-indigo-700">
                       <ArrowRight className="h-3 w-3" /> Next: {nextStep.cta}
                     </p>
-                  )}
-                </div>
-              )}
-
-              {jobOpening?.title && (
-                <div className="rounded-lg bg-white border border-zinc-200 p-2.5">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Job opening</span>
-                    {jobId && (
-                      <a
-                        href={`/jobs/${jobId}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 hover:underline"
-                      >
-                        View job <ExternalLink className="h-3 w-3" />
-                      </a>
-                    )}
-                  </div>
-                  <p className="text-sm font-bold text-zinc-800 mt-0.5">{jobOpening.title}</p>
-                  {jobOpening.clientName && (
-                    <p className="text-xs text-zinc-500">{jobOpening.clientName}</p>
-                  )}
-                  {jobOpening.description && (
-                    <>
-                      <p className={`text-xs text-zinc-600 mt-1 leading-relaxed whitespace-pre-line ${jobDescExpanded ? "" : "line-clamp-2"}`}>
-                        {jobOpening.description}
-                      </p>
-                      {jobOpening.description.length > 200 && (
-                        <button
-                          onClick={() => setJobDescExpanded(!jobDescExpanded)}
-                          className="text-[11px] font-semibold text-indigo-600 hover:underline mt-0.5"
-                        >
-                          {jobDescExpanded ? "Show less" : "Show full job description"}
-                        </button>
-                      )}
-                    </>
                   )}
                 </div>
               )}
@@ -671,20 +660,23 @@ export function CandidateProfileSidebar({
         {/* ═══════════════════════════════════════════════════════════════
             TABS
             ═══════════════════════════════════════════════════════════════ */}
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col overflow-hidden">
-          <div className="px-7 border-b border-zinc-100 bg-white flex-shrink-0">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="flex flex-col">
+          {/* Sticky tab bar — it must never be pushed off screen by the header
+              or the content above it. */}
+          <div className="px-5 border-b border-zinc-100 bg-white/95 backdrop-blur flex-shrink-0 sticky top-0 z-10 overflow-x-auto">
             <TabsList className="h-10 bg-transparent gap-0 p-0">
               {([
                 { id: "screening", label: "Screening" },
-                { id: "ai_context", label: "AI Context" },
                 { id: "profile", label: "Profile" },
+                { id: "job", label: "Job" },
                 { id: "resume", label: "Resume" },
                 { id: "activity", label: "Activity" },
+                { id: "ai_context", label: "AI Context" },
               ]).map((tab) => (
                 <TabsTrigger
                   key={tab.id}
                   value={tab.id}
-                  className="text-xs font-semibold capitalize data-[state=active]:text-zinc-900 data-[state=active]:border-b-2 data-[state=active]:border-zinc-900 data-[state=active]:font-bold rounded-none h-10 px-4 text-zinc-400 border-b-2 border-transparent"
+                  className="text-xs font-semibold capitalize whitespace-nowrap data-[state=active]:text-zinc-900 data-[state=active]:border-b-2 data-[state=active]:border-zinc-900 data-[state=active]:font-bold rounded-none h-10 px-3 text-zinc-400 border-b-2 border-transparent"
                 >
                   {tab.label}
                 </TabsTrigger>
@@ -692,9 +684,8 @@ export function CandidateProfileSidebar({
             </TabsList>
           </div>
 
-          <ScrollArea className="flex-1">
             {/* ── Screening Tab ── */}
-            <TabsContent value="screening" className="px-7 py-5 space-y-5 mt-0">
+            <TabsContent value="screening" className="px-5 py-5 space-y-5 mt-0">
               {aiInfo?.score != null || aiInfo?.recommendation ? (
                 <>
                   <div className="grid grid-cols-3 gap-3">
@@ -858,7 +849,7 @@ export function CandidateProfileSidebar({
             </TabsContent>
 
             {/* ── AI Context Tab ── */}
-            <TabsContent value="ai_context" className="px-7 py-5 space-y-5 mt-0">
+            <TabsContent value="ai_context" className="px-5 py-5 space-y-5 mt-0">
               {/* Screening Context (Job Context sent to AI) */}
               {participant?.screening_context && (
                 <div>
@@ -983,7 +974,7 @@ export function CandidateProfileSidebar({
             </TabsContent>
 
             {/* ── Profile Tab ── */}
-            <TabsContent value="profile" className="px-7 py-5 space-y-5 mt-0">
+            <TabsContent value="profile" className="px-5 py-5 space-y-5 mt-0">
               {enrichedLoading && (
                 <div className="space-y-4">
                   {[1, 2, 3].map((i) => (
@@ -1147,7 +1138,7 @@ export function CandidateProfileSidebar({
             </TabsContent>
 
             {/* ── Resume Tab ── */}
-            <TabsContent value="resume" className="px-7 py-5 mt-0">
+            <TabsContent value="resume" className="px-5 py-5 mt-0">
               {c.file_url ? (
                 <div className="space-y-4">
                   <div className="flex items-center gap-3 p-3 rounded-xl border border-zinc-200 bg-white">
@@ -1195,7 +1186,64 @@ export function CandidateProfileSidebar({
             </TabsContent>
 
             {/* ── Activity Tab ── */}
-            <TabsContent value="activity" className="px-7 py-5 space-y-5 mt-0">
+            {/* ── Job Tab ──
+                The job description used to sit in the (non-scrolling) header,
+                where a long JD pushed the tabs and the whole content area off
+                the bottom of the sheet. It gets its own tab now. */}
+            <TabsContent value="job" className="px-5 py-5 space-y-4 mt-0">
+              {!jobOpening?.title ? (
+                <p className="text-sm text-zinc-400 text-center py-8">No job opening linked.</p>
+              ) : (
+                <>
+                  <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Job opening</span>
+                      {jobId && (
+                        <a
+                          href={`/jobs/${jobId}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-600 hover:underline"
+                        >
+                          Open in pipeline <ExternalLink className="h-3 w-3" />
+                        </a>
+                      )}
+                    </div>
+                    <p className="text-base font-bold text-zinc-900 mt-0.5">{jobOpening.title}</p>
+                    {jobOpening.clientName && (
+                      <p className="text-xs text-zinc-500">{jobOpening.clientName}</p>
+                    )}
+                  </div>
+
+                  {jobOpening.description ? (
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <SectionLabel text="Job description" />
+                        {jobOpening.description.length > 400 && (
+                          <button
+                            onClick={() => setJobDescExpanded(!jobDescExpanded)}
+                            className="text-[11px] font-semibold text-indigo-600 hover:underline"
+                          >
+                            {jobDescExpanded ? "Show less" : "Show full description"}
+                          </button>
+                        )}
+                      </div>
+                      <p
+                        className={`text-xs text-zinc-600 leading-relaxed whitespace-pre-line ${
+                          jobDescExpanded ? "" : "line-clamp-6"
+                        }`}
+                      >
+                        {jobOpening.description}
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="text-sm text-zinc-400">No description saved for this opening.</p>
+                  )}
+                </>
+              )}
+            </TabsContent>
+
+            <TabsContent value="activity" className="px-5 py-5 space-y-5 mt-0">
               {jobId && (
                 <CandidateActivityTimeline jobId={jobId} candidateId={c.id || c._id} />
               )}
@@ -1218,8 +1266,8 @@ export function CandidateProfileSidebar({
                 </div>
               )}
             </TabsContent>
-          </ScrollArea>
         </Tabs>
+        </div>
       </SheetContent>
     </Sheet>
 

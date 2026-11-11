@@ -214,6 +214,16 @@ export interface WorkItem {
   callAttempts: number | null
   /** The details the candidate gave over WhatsApp (CTC, notice, location…). */
   infoData: Record<string, unknown> | null
+  /**
+   * Is there anything a recruiter can actually READ for this candidate?
+   *
+   * A "Review & decide" button that opens an empty results sheet reads as a
+   * broken button: the AI never screened the candidate, so there is no
+   * transcript, no summary and no verdict — only the fact that a human is
+   * needed. The Today action modal shows the details we DO have plus the
+   * approve/reject/call actions, which is the right landing spot for those.
+   */
+  hasScreening: boolean
   /** Whether this row can be bulk-selected (submitted to bulk actions). */
   selectable: boolean
   /** Small chips shown on the row (WhatsApp nudges, calls, AI score…). */
@@ -847,6 +857,13 @@ function deriveOne(input: WorkItemInput, now: Date): WorkItem | null {
     infoData: (p?.info_data && typeof p.info_data === "object" && !Array.isArray(p.info_data))
       ? (p.info_data as Record<string, unknown>)
       : null,
+    hasScreening: Boolean(
+      p?.ai_score != null ||
+      p?.ai_summary ||
+      p?.verdict_json ||
+      p?.call_duration_seconds ||
+      (p?.call_attempts ?? 0) > 0
+    ),
     selectable: cfg.selectable,
     pills: pillsFor(kind, p),
     aiFlagged: p?.ai_suggests_rejection === true,

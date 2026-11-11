@@ -556,6 +556,22 @@ export function PhoneScreeningResultsSheet({
   // Determine if we have any summary/verdict data
   const hasSummaryData = verd || enriched || d.ai_summary || d.verdict_json
 
+  /**
+   * Is there ANY read-able screening output for this candidate — a transcript,
+   * a recording, a summary, a score? If not, the sheet has nothing to show and
+   * must say so plainly rather than rendering an empty page.
+   */
+  const hasAnyScreening = Boolean(
+    hasSummaryData ||
+      d.ai_score != null ||
+      d.ai_recommendation ||
+      d.recording_url ||
+      d.transcript_raw ||
+      (d.transcripts && d.transcripts.length > 0) ||
+      (d.answers && d.answers.length > 0) ||
+      d.call_duration_seconds
+  )
+
   // Determine call outcome for action buttons — driven by the same truth
   // derivation the cards use, so the sheet never contradicts the pipeline.
   const callTruth = getCallTruth(d)
@@ -855,6 +871,32 @@ export function PhoneScreeningResultsSheet({
                         </ul>
                       </div>
                     )}
+                  </div>
+                </div>
+              )}
+
+              {/* Nothing was ever screened — say so plainly instead of leaving
+                  a blank panel. The old fallback only fired for terminal rows,
+                  so a candidate who never got a call opened a sheet with
+                  nothing in it, which read as a broken page. */}
+              {!hasAnyScreening && (
+                <div className="px-4 pb-3">
+                  <div className="p-4 rounded-xl border border-amber-200 bg-amber-50/60 space-y-2">
+                    <div className="flex items-start gap-2">
+                      <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="text-sm font-semibold text-amber-900">No screening recorded yet</p>
+                        <p className="text-xs text-amber-800 mt-0.5">
+                          This candidate has not had an AI screening call — there is no transcript,
+                          summary or score to review.
+                        </p>
+                        <p className="text-xs text-amber-700 mt-1.5">
+                          Close this and use <span className="font-semibold">Send Call Again</span> or
+                          <span className="font-semibold"> WhatsApp</span> to collect their details and
+                          screen them.
+                        </p>
+                      </div>
+                    </div>
                   </div>
                 </div>
               )}
