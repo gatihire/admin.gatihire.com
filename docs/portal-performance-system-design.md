@@ -207,6 +207,16 @@ UPSTASH_REDIS_REST_TOKEN=...
 `@upstash/redis` speaks the REST protocol only. A `redis://` / `rediss://` TCP
 URL will **not** work — that needs `ioredis`, which is not installed.
 
+Verify the layer is live after deploying:
+
+```
+GET /api/debug/cache     (signed in as super admin or analytics.view)
+→ { redisConfigured: true, roundTrip: true, latencyMs: 12 }
+```
+
+`redisConfigured: false` means the env vars are missing and the whole cache is
+a no-op — the app still works, just without the speed-up.
+
 ## 8. Real-time without hammering Postgres
 
 Replace full-row polling with a **status-only** endpoint:
@@ -399,6 +409,20 @@ Rules of thumb: `cache_hit_pct < 99%` means the hot set does not fit in RAM
 (upgrade or shrink the working set). A statement with high
 `blks_per_call × calls` is worth optimising; a statement with high total but
 `1` call is noise.
+
+### 11.4 Triage: Performance Advisor findings
+
+| Advisor finding | Applies to the admin portal? | Action |
+| --- | --- | --- |
+| RLS re-evaluates `auth.uid()` — 65 | **Mostly no.** 141 files read via `supabaseAdmin` (service role), which bypasses RLS. Only `/api/auth/login`, `lib/internal-auth.ts` (RPC), `lib/server-internal-permissions.ts` use an authed client. | Fix only on tables the public/anon board reads. Do not rewrite admin policies for performance. |
+| Multiple permissive policies — 147 | Not an admin-portal cost. | Review only when touching public policies; never delete to clear a lint. |
+| Unused indexes — 141 | **Unreliable right now.** `idx_scan` counters reset with `pg_stat_statements` at 14:31, so "unused" currently means "unused in 26 minutes". | Re-check after 7–30 days of real traffic, then drop only large indexes on hot write tables. |
+| Duplicate indexes — 3 on `jobs` | **Yes.** Two b-trees per column are maintained on every job insert/update. | Fixed in `20261111_drop_duplicate_jobs_indexes.sql`. |
+| Unindexed foreign keys — 29 | Partly. Matters for parent deletes/updates and FK-checked joins. | Add only for FKs the app actually filters/joins on; each one adds write cost. |
+| Auth capped at 10 connections | Low. Two HR users, PostgREST pools separately. | Revisit only with more concurrent staff. |
+| `last_analyze` null, `n_live_tup` = 0 | **Yes, but not stale stats.** `n_live_tup` 0 with a populated `reltuples` means the statistics *collector* was reset (restart), not that ANALYZE is broken. | Run `ANALYZE` on hot tables once; check again after a business day. |
+| Low heap cache-hit on `candidates` (650 read / 651 hit) | **Cold cache artefact.** The instance restarted at 14:31 and two users were idle. | Re-measure after a business day; 99%+ is the target. |
+
 
 
 ## 12. Roadmap

@@ -378,7 +378,7 @@ function getActionForCard(application: Application, callStatus?: string, partici
     if (callStatus === "failed") {
       const bolnaStatus = participant?.bolna_status
       const retryCount = participant?.retry_count || 0
-      const hasCallData = !!(participant?.transcript_raw || participant?.recording_url || participant?.call_ended_at || participant?.bolna_execution_id)
+      const hasCallData = !!(participant?.recording_url || participant?.call_ended_at || participant?.bolna_execution_id)
       if (participant?.call_is_partial) return { label: "1st screening incomplete (call disconnected mid-conversation). Review transcript and send call again.", cta: "View 1st uncompleted screening", icon: AlertCircle, color: "bg-orange-50 border-orange-200 text-orange-800", action: "view_results" }
       // If we have call data but screening wasn't completed properly, let HR review and retry
       if (hasCallData) return { label: "1st screening incomplete (call ended before proper screening). Review and send call again.", cta: "View 1st uncompleted screening", icon: AlertCircle, color: "bg-orange-50 border-orange-200 text-orange-800", action: "view_results" }
@@ -449,7 +449,7 @@ function getActionForCard(application: Application, callStatus?: string, partici
       const isIncompleteCall = !!(
         participant?.call_is_partial ||
         cls === "not_screened" || cls === "interrupted" ||
-        ((participant?.bolna_execution_id || participant?.call_ended_at || participant?.transcript_raw || participant?.recording_url) &&
+        ((participant?.bolna_execution_id || participant?.call_ended_at || participant?.recording_url) &&
           (participant?.status === "failed_partial" || participant?.status === "failed" || participant?.bolna_status === "stopped" || participant?.bolna_status === "canceled"))
       )
       if (isIncompleteCall) {
@@ -597,7 +597,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
   // Lightweight polling for participants during active calls only
   const fetchParticipants = useCallback(async () => {
     try {
-      const res = await fetch(`/api/phone-screening/participants?jobId=${jobId}`)
+      const res = await fetch(`/api/phone-screening/participants?jobId=${jobId}&fields=pipeline`)
       if (!res.ok) {
         // This used to be swallowed. The cost was visible in production: the
         // endpoint 500'd on a bad column in its select, so the pipeline quietly
