@@ -77,6 +77,10 @@ interface TodayResponse {
   counts: Record<string, number>
   /** Items on other recruiters' desks when scope=mine (0 otherwise). */
   teamHidden?: number
+  /** Companies with waiting-item counts, for the cascading company filter. */
+  companies: Array<{ name: string; count: number }>
+  /** Roles (job titles) with waiting-item counts, filtered by selected company. */
+  roles: Array<{ title: string; count: number }>
   items: WorkItem[]
   rail: {
     interviews: RailInterview[]
@@ -184,6 +188,8 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
   const [scope, setScope] = useState<Scope>(defaultScope)
   const [kindFilter, setKindFilter] = useState<"all" | WorkItemKind>("all")
   const [subfilter, setSubfilter] = useState<"default" | "newest" | "urgent">("default")
+  const [selectedCompany, setSelectedCompany] = useState<string | null>(null)
+  const [selectedRole, setSelectedRole] = useState<string | null>(null)
   const [includeSnoozed, setIncludeSnoozed] = useState(false)
   const [includeDone, setIncludeDone] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -224,6 +230,8 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
         const qs = new URLSearchParams({ scope: nextScope })
         if (nextSnoozed) qs.set("includeSnoozed", "true")
         if (nextDone) qs.set("includeDone", "true")
+        if (selectedCompany) qs.set("company", selectedCompany)
+        if (selectedRole) qs.set("role", selectedRole)
         const res = await fetch(`/api/dispatch/today?${qs.toString()}`, { credentials: "include", cache: "no-store" })
         const json = await res.json().catch(() => null)
         if (!res.ok) throw new Error((json as any)?.error || "Could not load your queue")
@@ -245,6 +253,12 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // When the company changes, clear the role selection so the role dropdown
+  // re-populates for the new company.
+  useEffect(() => {
+    setSelectedRole(null)
+  }, [selectedCompany])
+
   const items = useMemo(() => data?.items ?? [], [data])
   const counts = useMemo(() => data?.counts ?? {}, [data])
   const rail = data?.rail
@@ -263,7 +277,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
 
   // Paginate so a 150+ item queue never renders as one endless page.
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE)
-  useEffect(() => setVisibleCount(PAGE_SIZE), [kindFilter, subfilter, scope, includeSnoozed, includeDone])
+  useEffect(() => setVisibleCount(PAGE_SIZE), [kindFilter, subfilter, scope, includeSnoozed, includeDone, selectedCompany, selectedRole])
   const visible = useMemo(() => filtered.slice(0, visibleCount), [filtered, visibleCount])
 
   const teamHidden = data?.teamHidden ?? 0
@@ -704,6 +718,57 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
             </div>
             <div className="flex items-center gap-3">
             </div>
+          </div>
+
+          {/* Company / role cascading filter */}
+          <div className="flex flex-wrap items-center gap-3 border-b border-zinc-100 px-5 py-3 dark:border-zinc-800 bg-zinc-50/50 dark:bg-zinc-800/40">
+            <span className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">Filter by</span>
+            <div className="flex items-center gap-2 min-w-[200px]">
+              <label className="text-xs font-medium text-zinc-600 dark:text-zinc-300 shrink-0">Company</label>
+              <select
+                value={selectedCompany || ""}
+                onChange={(e) => setSelectedCompany(e.target.value || null)}
+                className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+              >
+                <option value="">All companies</option>
+                {data?.companies?.map((c) => (
+                  <option key={c.name} value={c.name}>
+                    {c.name} ({c.count})
+                  </option>
+                ))}
+              </select>
+            </div>
+            {selectedCompany && (
+              <div className="flex items-center gap-2 min-w-[220px]">
+                <label className="text-xs font-medium text-zinc-600 dark:text-zinc-300 shrink-0">Role</label>
+                <select
+                  value={selectedRole || ""}
+                  onChange={(e) => setSelectedRole(e.target.value || null)}
+                  className="rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-900 focus:ring-2 focus:ring-blue-500 outline-none dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100"
+                >
+                  <option value="">All roles in {selectedCompany}</option>
+                  {data?.roles?.map((r) => (
+                    <option key={r.title} value={r.title}>
+                      {r.title} ({r.count})
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => { setSelectedRole(null); setSelectedCompany(null) }}
+                  className="rounded-md p-1 text-zinc-400 hover:text-red-500 dark:text-zinc-500 dark:hover:text-red-400"
+                  title="Clear filters"
+                >
+                  <span className="sr-only">Clear filters</span>
+                  <span className="text-[10px]">×</span>
+                </button>
+              </div>
+            )}
+            {!selectedCompany && (
+              <span className="text-xs text-zinc-400 dark:text-zinc-500 italic">
+                {data?.companies?.length ?? 0} company{data?.companies?.length === 1 ? "" : "s"} with waiting items
+              </span>
+            )}
           </div>
 
           {/* Filter chips */}
