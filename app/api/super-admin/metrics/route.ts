@@ -6,6 +6,12 @@ function toIso(d: Date) {
   return d.toISOString()
 }
 
+// This endpoint fans out to ~48 COUNT(*) queries (4 ranges × tables/statuses).
+// Multiple admins opening the dashboard used to re-run all of them each time.
+// A short shared cache collapses that burst without making the numbers visibly stale.
+let metricsCache: { at: number; payload: any } | null = null
+const METRICS_CACHE_MS = 60_000
+
 function startOfUtcDay(d: Date) {
   const x = new Date(d)
   x.setUTCHours(0, 0, 0, 0)
@@ -60,6 +66,10 @@ export async function GET(request: NextRequest) {
   if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   if (!hasPermission(ctx, "analytics.view")) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
 
+  if (metricsCache && Date.now() - metricsCache.at < METRICS_CACHE_MS) {
+    return NextResponse.json(metricsCache.payload, { headers: { "x-metrics-cache": "hit" } })
+  }
+
   const now = new Date()
   const ranges = {
     day: { start: startOfUtcDay(now), end: now },
@@ -110,7 +120,7 @@ export async function GET(request: NextRequest) {
       ),
     ])
 
-  return NextResponse.json({
+  const payload = {
     ranges: Object.fromEntries(
       Object.entries(ranges).map(([k, r]) => [k, { start: toIso(r.start), end: toIso(r.end) }])
     ),
@@ -130,6 +140,9 @@ export async function GET(request: NextRequest) {
         by_status: Object.fromEntries(outreachByStatus),
       },
     },
-  })
+  }
+
+  metricsCache = { at: Date.now(), payload }
+  return NextResponse.json(payload)
 }
 

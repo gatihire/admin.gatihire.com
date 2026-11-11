@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -99,6 +99,11 @@ export function PhoneScreeningTab({ jobId }: { jobId: string }) {
   const [selectedParticipantId, setSelectedParticipantId] = useState<string | null>(null)
   const [resultsOpen, setResultsOpen] = useState(false)
   const [allCampaignParticipants, setAllCampaignParticipants] = useState<Record<string, Participant[]>>({})
+  const participantsRef = useRef<Participant[]>([])
+
+  useEffect(() => {
+    participantsRef.current = participants
+  }, [participants])
 
   const fetchCampaigns = useCallback(async () => {
     setLoading(true)
@@ -129,7 +134,10 @@ export function PhoneScreeningTab({ jobId }: { jobId: string }) {
       await Promise.all(
         campaigns.map(async (c) => {
           try {
-            const res = await fetch(`/api/phone-screening/participants?campaignId=${c.id}`)
+            // Status only: the campaign cards need counts, not full rows.
+            // Fetching every campaign's participants with `*` read the whole
+            // participant table (including transcripts) on every page visit.
+            const res = await fetch(`/api/phone-screening/participants?campaignId=${c.id}&fields=status`)
             if (res.ok) map[c.id] = await res.json()
           } catch { /* noop */ }
         })
@@ -142,7 +150,7 @@ export function PhoneScreeningTab({ jobId }: { jobId: string }) {
   const fetchParticipants = useCallback(async (campaignId: string) => {
     setParticipantsLoading(true)
     try {
-      const res = await fetch(`/api/phone-screening/participants?campaignId=${campaignId}`)
+      const res = await fetch(`/api/phone-screening/participants?campaignId=${campaignId}&fields=card`)
       if (res.ok) {
         setParticipants(await res.json())
       }
@@ -152,6 +160,32 @@ export function PhoneScreeningTab({ jobId }: { jobId: string }) {
       setParticipantsLoading(false)
     }
   }, [])
+
+  // Cheap poll: ids + statuses only. When a live call reaches a terminal status
+  // the full row is fetched once, so score/summary/recording appear without
+  // re-reading every transcript every 15 seconds.
+  const refreshStatuses = useCallback(async (campaignId: string) => {
+    try {
+      const res = await fetch(`/api/phone-screening/participants?campaignId=${campaignId}&fields=status`)
+      if (!res.ok) return
+      const rows = (await res.json()) as Array<{ id: string; status: string }>
+      const byId = new Map(rows.map((r) => [r.id, r.status]))
+      const previous = participantsRef.current
+      const finished = previous.some((p) => {
+        const next = byId.get(p.id)
+        return next && ["calling", "in_progress"].includes(p.status) && !["calling", "in_progress"].includes(next)
+      })
+      setParticipants((prev) =>
+        prev.map((p) => {
+          const next = byId.get(p.id)
+          return next && next !== p.status ? { ...p, status: next } : p
+        })
+      )
+      if (finished) await fetchParticipants(campaignId)
+    } catch {
+      /* noop */
+    }
+  }, [fetchParticipants])
 
   useEffect(() => {
     if (activeCampaignId) {
@@ -164,15 +198,22 @@ export function PhoneScreeningTab({ jobId }: { jobId: string }) {
     setResultsOpen(true)
   }
 
+  // Only poll while a call genuinely can move. `failed` used to be in this list,
+  // so one failed participant kept the whole campaign polling forever — every 5s,
+  // re-reading the full participant rows (including transcripts) from Postgres.
+  // Failed rows are terminal; they are refreshed on demand or by reconcile.
   const pollInterval = activeCampaignId && participants.some(
-    (p) => ["scheduled", "call_scheduled", "calling", "in_progress", "failed"].includes(p.status)
+    (p) => ["scheduled", "call_scheduled", "calling", "in_progress"].includes(p.status)
   )
 
   useEffect(() => {
     if (!pollInterval || !activeCampaignId) return
-    const interval = setInterval(() => fetchParticipants(activeCampaignId), 5000)
+    const interval = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return
+      refreshStatuses(activeCampaignId)
+    }, 15000)
     return () => clearInterval(interval)
-  }, [pollInterval, activeCampaignId, fetchParticipants])
+  }, [pollInterval, activeCampaignId, refreshStatuses])
 
   const campaignStats = (campaignId: string) => {
     const campParticipants = campaignId === activeCampaignId ? participants : (allCampaignParticipants[campaignId] || [])

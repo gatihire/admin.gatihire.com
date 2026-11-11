@@ -452,9 +452,12 @@ export function SuperAdminAnalytics() {
   }, [loadTab])
 
   useEffect(() => {
+    // Was force-refreshing every minute, bypassing the 60s client cache and
+    // re-running the heavy aggregate queries. Analytics do not change that fast.
     const id = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return
       loadTab({ force: true })
-    }, 60_000)
+    }, 5 * 60_000)
     return () => clearInterval(id)
   }, [loadTab])
 

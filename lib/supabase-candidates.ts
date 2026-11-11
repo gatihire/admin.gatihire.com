@@ -7,6 +7,30 @@ type CandidateRow = Database['public']['Tables']['candidates']['Row']
 type CandidateInsert = Database['public']['Tables']['candidates']['Insert']
 type CandidateUpdate = Database['public']['Tables']['candidates']['Update']
 
+// Columns returned by the paginated dashboard list.
+//
+// Deliberately excludes the three disk-heavy columns:
+//   resume_text  ~5-20 KB of text (TOASTed)
+//   embedding    768-d vector (~15 KB as JSON)
+//   search_vector full-text index payload
+//
+// They are never rendered in the list. The preview dialog and profile sidebar
+// fetch the full record from /api/candidates/[id] when a candidate is opened,
+// so keeping them here only multiplied disk reads on every page load.
+const CANDIDATE_LIST_COLUMNS = [
+  'id', 'name', 'email', 'phone', 'date_of_birth', 'gender', 'marital_status',
+  'current_role', 'desired_role', 'current_company', 'location', 'preferred_location',
+  'total_experience', 'current_salary', 'expected_salary', 'notice_period',
+  'highest_qualification', 'degree', 'specialization', 'university', 'education_year',
+  'education_percentage', 'additional_qualifications', 'technical_skills', 'soft_skills',
+  'languages_known', 'certifications', 'previous_companies', 'job_titles', 'work_duration',
+  'key_achievements', 'projects', 'awards', 'publications', 'references',
+  'linkedin_profile', 'portfolio_url', 'github_profile', 'summary', 'file_name', 'file_url',
+  'file_hash', 'file_size', 'file_type', 'status', 'tags', 'rating', 'notes',
+  'uploaded_at', 'updated_at', 'last_contacted', 'interview_status', 'feedback',
+  'parsing_method', 'parsing_confidence', 'uploaded_by', 'source', 'source_profile_id',
+].join(', ')
+
 // Words that indicate a query is about a role/skill rather than a company, so a
 // company-like query ("Delhivery") can be ranked company-first instead of being
 // drowned in the general text pool.
@@ -563,9 +587,12 @@ export class SupabaseCandidateService {
 
     try {
       const filters = await this.getInternalUserFilters()
+      // Searching is far more expensive than browsing, so use PostgREST's
+      // `estimated` count there (exact for small results, planner estimate for
+      // large ones) instead of a full COUNT(*) on every keystroke.
       let query = supabaseAdmin
         .from('candidates')
-        .select('*', { count: 'exact' })
+        .select(CANDIDATE_LIST_COLUMNS, { count: search ? 'estimated' : 'exact' })
         .order(sortBy, { ascending: sortOrder === 'asc' })
         .or('source.is.null,source.neq.juicebox')
         // Re-uploaded duplicates are parked with status='duplicate' (see the
@@ -619,7 +646,7 @@ export class SupabaseCandidateService {
         throw error
       }
 
-      const candidates = (data || []).map((row: CandidateRow) => this.mapRowToCandidate(row))
+      const candidates = ((data || []) as unknown as CandidateRow[]).map((row: CandidateRow) => this.mapRowToCandidate(row))
 
       // Attach detailed work experience and education for the paginated set
       const candidateIds = candidates.map((c: ComprehensiveCandidateData) => c.id).filter(Boolean)
