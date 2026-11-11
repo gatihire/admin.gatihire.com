@@ -245,13 +245,13 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
         setRefreshing(false)
       }
     },
-    [scope, includeSnoozed, includeDone]
+    [scope, includeSnoozed, includeDone, selectedCompany, selectedRole]
   )
 
   useEffect(() => {
     void load({ scope: defaultScope, includeSnoozed: false })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [scope, defaultScope, selectedCompany, selectedRole])
 
   // When the company changes, clear the role selection so the role dropdown
   // re-populates for the new company.
