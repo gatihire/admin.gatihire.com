@@ -1,5 +1,5 @@
 import { logger } from "@/lib/logger"
-import { supabaseAdmin } from "@/lib/supabase"
+import { updateParticipantSafely } from "@/lib/participant-update"
 
 export interface FallbackSummary {
   comprehensive_summary: string
@@ -239,20 +239,20 @@ export async function storeFallbackSummary(
     ratingAlias[String(summary.overall_verdict).toLowerCase()] ?? "further_review"
   // Derive score from recommendation for consistency (not from confidence)
   const score = recommendation === "advance" ? 8 : recommendation === "further_review" ? 6 : 2
-  const { error } = await supabaseAdmin
-    .from("phone_screening_participants")
-    .update({
+  // `fallback_summary_used` lives inside verdict_json: there is no such column,
+  // and writing it top-level made PostgREST reject the entire update
+  // (PGRST204), silently dropping the summary. The safe writer also strips any
+  // future unknown column instead of losing the whole patch.
+  await updateParticipantSafely(
+    participantId,
+    {
       ai_summary: summary.comprehensive_summary,
       ai_recommendation: recommendation,
       ai_score: score,
-      verdict_json: summary,
+      verdict_json: { ...(summary as any), _fallback_summary_used: true },
       enriched_summary: summary,
-      fallback_summary_used: true,
       updated_at: now,
-    })
-    .eq("id", participantId)
-
-  if (error) {
-    logger.error("Failed to store fallback summary", { participantId, error: error.message })
-  }
+    },
+    { source: "storeFallbackSummary" }
+  )
 }

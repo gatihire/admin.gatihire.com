@@ -75,3 +75,73 @@ export async function updateParticipant(
   logger.error("Participant update failed", { participantId, error: error.message, code: error.code })
   throw new Error(`Participant update failed: ${error.message}`)
 }
+
+export type ParticipantUpdateResult = {
+  ok: boolean
+  droppedColumns: string[]
+  error?: string
+}
+
+const MISSING_NAMED_COLUMN_RE = /Could not find the '([^']+)' column/i
+
+/**
+ * Same safe-write intent as `updateParticipant`, but resolves instead of throws
+ * and tolerates ANY unknown column, not just `info_sources`.
+ *
+ * Terminal Bolna handling needs this: PostgREST rejects the whole UPDATE on a
+ * single unknown key (PGRST204). That is how finished calls silently stayed
+ * "calling now" and how summaries went missing — the status, transcript,
+ * recording and verdict were discarded together with `fallback_summary_used`,
+ * a column that does not exist. On PGRST204 we drop the named column, remember
+ * it, and retry, so a future schema drift degrades to a logged warning instead
+ * of a lost call result.
+ */
+export async function updateParticipantSafely(
+  participantId: string,
+  patch: Record<string, unknown>,
+  context?: Record<string, unknown>
+): Promise<ParticipantUpdateResult> {
+  const working: Record<string, unknown> = { ...patch }
+  const droppedColumns: string[] = []
+
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const { error } = await supabaseAdmin
+      .from("phone_screening_participants")
+      .update(working)
+      .eq("id", participantId)
+
+    if (!error) {
+      if (droppedColumns.length > 0) {
+        logger.warn("Participant update dropped unknown columns", {
+          participantId,
+          droppedColumns,
+          ...context,
+        })
+      }
+      return { ok: true, droppedColumns }
+    }
+
+    const missing = error.message?.match(MISSING_NAMED_COLUMN_RE)?.[1]
+    if (missing && Object.prototype.hasOwnProperty.call(working, missing)) {
+      delete working[missing]
+      droppedColumns.push(missing)
+      continue
+    }
+
+    logger.error("Participant update failed", {
+      participantId,
+      error: error.message,
+      code: (error as any).code,
+      droppedColumns,
+      ...context,
+    })
+    return { ok: false, droppedColumns, error: error.message }
+  }
+
+  logger.error("Participant update gave up after dropping too many columns", {
+    participantId,
+    droppedColumns,
+    ...context,
+  })
+  return { ok: false, droppedColumns, error: "too many unknown columns" }
+}

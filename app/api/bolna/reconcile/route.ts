@@ -11,6 +11,7 @@ import {
   handleCompletedExecution,
   handleFailedExecution,
 } from "@/lib/bolna-execution"
+import { updateParticipantSafely } from "@/lib/participant-update"
 
 // Auto-heal calls whose terminal webhook never arrived: find participants stuck
 // in "calling"/"in_progress" past a threshold, re-fetch the execution from Bolna,
@@ -23,12 +24,45 @@ import {
 //  GET /api/bolna/reconcile?phone=<dial>&sync=1     -> heal by phone
 //  GET /api/bolna/reconcile?email=<addr>&sync=1     -> heal by email
 
+// A call row counts as stuck when it is still non-terminal after this long.
 const STUCK_AFTER_MINUTES = 3
+// A provider call cannot legitimately stay "in progress" this long. If Bolna
+// still says so after this, treat it as a stalled call instead of showing
+// "on the call now" forever.
+const MAX_CALL_MINUTES = 90
+// If Bolna has no record of the execution at all after this long, stop waiting.
+const UNKNOWN_EXECUTION_MINUTES = 60
+
+const STUCK_STATUSES = [
+  "calling",
+  "in_progress",
+  "in-progress",
+  "initiated",
+  "queued",
+  "ringing",
+  "call-disconnected",
+  "call_disconnected",
+]
+
+export const dynamic = "force-dynamic"
+export const maxDuration = 60
 
 export async function GET(request: NextRequest) {
-  const ctx = await getInternalAuthContext(request)
-  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-  if (!hasPermission(ctx, "candidates.view")) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  // Vercel Cron sends `Authorization: Bearer ${CRON_SECRET}`. Accept that (and
+  // an x-cron-secret header for external schedulers) so the healing job can run
+  // without a human session. Everyone else still goes through internal auth.
+  const cronSecret = process.env.CRON_SECRET || ""
+  const authHeader = request.headers.get("authorization") || ""
+  const cronHeader = request.headers.get("x-cron-secret") || ""
+  const isCron =
+    !!cronSecret &&
+    (authHeader === `Bearer ${cronSecret}` || cronHeader === cronSecret)
+
+  if (!isCron) {
+    const ctx = await getInternalAuthContext(request)
+    if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    if (!hasPermission(ctx, "candidates.view")) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  }
 
   const dry = request.nextUrl.searchParams.get("dry") === "1"
   const singleExecutionId = request.nextUrl.searchParams.get("executionId") || ""
@@ -64,12 +98,14 @@ export async function GET(request: NextRequest) {
       targets.push({ id: participant.id, bolna_execution_id: execution?.id || null })
     } else {
       const threshold = new Date(Date.now() - STUCK_AFTER_MINUTES * 60 * 1000).toISOString()
+      // `updated_at` (not `last_attempt_at`) is the reliable staleness clock:
+      // `last_attempt_at` can be null, which used to make rows invisible here.
       const { data: stuck } = await supabaseAdmin
         .from("phone_screening_participants")
-        .select("id, bolna_execution_id, status, bolna_status")
+        .select("id, bolna_execution_id, status, bolna_status, updated_at, last_attempt_at, call_started_at")
         .not("bolna_execution_id", "is", null)
-        .in("status", ["calling", "in_progress"])
-        .lt("last_attempt_at", threshold)
+        .in("status", STUCK_STATUSES)
+        .lt("updated_at", threshold)
       targets = (stuck || []).map((s: any) => ({
         id: s.id,
         bolna_execution_id: s.bolna_execution_id || null,
@@ -86,11 +122,80 @@ export async function GET(request: NextRequest) {
       const execution = target.bolna_execution_id
         ? await getBolnaExecution(target.bolna_execution_id)
         : null
-      if (!execution || !execution.status) continue
+
+      // Staleness clock: last_attempt_at can be null, so fall back to when the
+      // call started (or when the row was last touched).
+      const { data: timing } = await supabaseAdmin
+        .from("phone_screening_participants")
+        .select("updated_at, last_attempt_at, call_started_at")
+        .eq("id", target.id)
+        .maybeSingle()
+      const startedRef = timing?.call_started_at || timing?.last_attempt_at || timing?.updated_at
+      const startedMs = startedRef ? new Date(startedRef).getTime() : NaN
+      const ageMinutes = Number.isFinite(startedMs) ? (Date.now() - startedMs) / 60000 : 0
+
+      // Provider has no record of this execution. Waiting forever is what leaves
+      // a card on "On the call now"; after a grace period, surface it for HR.
+      if (!execution || !execution.status) {
+        if (ageMinutes > UNKNOWN_EXECUTION_MINUTES) {
+          const nowIso = new Date().toISOString()
+          if (dry) {
+            healed.push({ participantId: target.id, executionId: target.bolna_execution_id, result: "would_mark_unknown" })
+          } else {
+            await updateParticipantSafely(
+              target.id,
+              {
+                status: "failed",
+                bolna_status: "unknown",
+                needs_manual_followup: true,
+                call_ended_at: nowIso,
+                ai_summary:
+                  "Call status could not be confirmed with the calling provider. No recording or transcript was received. HR should send the call again.",
+                verdict_json: {
+                  summary: "Call status could not be confirmed with the calling provider.",
+                  _classification_outcome: "not_screened",
+                  _repair: "reconcile_unknown_execution",
+                },
+                updated_at: nowIso,
+              },
+              { source: "reconcile_unknown_execution", executionId: target.bolna_execution_id }
+            )
+            healed.push({ participantId: target.id, executionId: target.bolna_execution_id, result: "marked_unknown" })
+          }
+        }
+        continue
+      }
 
       if (!BOLNA_TERMINAL_STATUSES.has(execution.status)) {
-        // Still in progress on Bolna's side — keep bolna_status fresh, no healing.
-        if (!dry) {
+        // A real call cannot run for 90+ minutes. If the provider still reports
+        // in-progress after that, mark it stalled so HR gets an actionable card
+        // instead of an endless "On the call now".
+        if (ageMinutes > MAX_CALL_MINUTES) {
+          const nowIso = new Date().toISOString()
+          if (dry) {
+            healed.push({ participantId: target.id, executionId: execution.id || null, result: "would_mark_stalled" })
+          } else {
+            await updateParticipantSafely(
+              target.id,
+              {
+                status: "failed",
+                bolna_status: execution.status,
+                needs_manual_followup: true,
+                call_ended_at: nowIso,
+                ai_summary: `The call stayed "${execution.status}" at the provider for over ${MAX_CALL_MINUTES} minutes and never produced an outcome. HR should review and send the call again.`,
+                verdict_json: {
+                  summary: "Call stalled at the provider with no outcome.",
+                  _classification_outcome: "not_screened",
+                  _repair: "reconcile_stalled_call",
+                },
+                updated_at: nowIso,
+              },
+              { source: "reconcile_stalled_call", executionId: execution.id }
+            )
+            healed.push({ participantId: target.id, executionId: execution.id || null, result: "marked_stalled" })
+          }
+        } else if (!dry) {
+          // Still genuinely in progress — keep bolna_status fresh, no healing.
           await supabaseAdmin
             .from("phone_screening_participants")
             .update({ bolna_status: execution.status, updated_at: now })

@@ -16,7 +16,7 @@ When an AI screening call is attempted but **not completed as a valid screening*
 | `call_hangup_reason` / `call_disconnect_reason` | Bolna telephony | Why ended (audio, synthesizer, timeout, network, etc.) |
 | `call_duration_seconds`, transcript/turn count | Execution | Too short / no engagement → not a valid screening |
 | Transcript patterns | Derived | “cannot hear / not able to listen / audio issue / inaudible”, immediate hangup, unavailable |
-| `status` / `call_is_partial` | Our DB | `failed_partial` = disconnected mid-conversation; `failed` + incomplete classification = not screened |
+| `status` / `call_is_partial` | Our DB | `failed` + `call_is_partial=true` = disconnected mid-conversation; `failed` + incomplete classification = not screened. (`failed_partial` is **not** an allowed status in the DB check constraint and must never be written.) |
 | `classification_outcome` (logical) | Persisted in `verdict_json._classification_outcome` (and future-proof field if column added) | `screened` \| `not_screened` \| `interrupted` \| `retry` \| `voicemail` |
 | `needs_manual_followup` | Participant flag | Surfaces in dispatch/today and ops views |
 
@@ -70,11 +70,32 @@ When an AI screening call is attempted but **not completed as a valid screening*
 | Duplicate/stuck webhooks or missed terminal sync | webhook idempotency gaps / ordering | Webhook finalize + `reconcile` heals; `sync-execution?force=1` refreshes signed recording URLs |
 | Signed recording URL expired | playback/403/expiry | UI “Refresh from Bolna” (`sync-execution?participantId=&force=1`) |
 
+## Root causes found on 2026-11-11 (calls "stuck on the call now" + missing summaries)
+
+1. **Unknown column rejected the whole terminal write (PGRST204).**
+   `buildFallbackVerdictPatch` and `storeFallbackSummary` included `fallback_summary_used`, which is not a column. PostgREST rejects the entire `UPDATE` when one key is unknown, so status, transcript, recording, verdict and summary were all discarded. The provider call was finished, the webhook fired, but the row stayed `in_progress` — "On the call now" for hours.
+   - Fixed by storing the flag inside `verdict_json._fallback_summary_used` and adding `updateParticipantSafely()` (`lib/participant-update.ts`), which drops a reported unknown column and retries, logging every drop.
+
+2. **A fallback patch overwrote the terminal status with `undefined`.**
+   `buildFallbackVerdictPatch` returned `{ status: undefined }` for normal-length calls and callers merged it with `Object.assign`, erasing the `status: "completed"` set moments earlier. Even after (1) was fixed, the row could not leave `in_progress`.
+   - Fixed by only including `status` when it must change, and by merging fallback keys with undefined values skipped.
+
+3. **`failed_partial` violates the status CHECK constraint.**
+   Interrupted/partial calls tried to write `failed_partial`, which is not allowed, so the entire patch was rejected — partial calls never persisted at all. The status column allows `failed`; `call_is_partial` already carries the distinction.
+   - Fixed: write `failed` + `call_is_partial=true`; never write `failed_partial`.
+
+Also fixed while here: transcript segments and screening answers are replaced (not appended) on re-handling so webhook retries/reconcile do not duplicate rows; post-call WhatsApp is idempotent per execution; `call_ended_at` uses the provider's terminal timestamp instead of repair time.
+
 ## Operational safeguards
 - **Webhook**: finalize when terminal evidence exists; keep idempotent processing.
-- **Reconcile cron**: run `/api/bolna/reconcile` periodically to heal stuck `in_progress/calling/call-disconnected` rows.
-- **Observability (recommended)**: log/metric counters for `not_screened`, `interrupted`, `auto_cut`, `audio_issue`, `stuck_reconciled`; alert on spikes.
-- **Data migration (optional, recommended)**: add `classification_outcome`, `call_hangup_reason`/normalize fields if missing in some envs, backfill from `verdict_json._meta` and Bolna sync for historical rows.
+- **Reconcile cron**: `vercel.json` now schedules `GET /api/bolna/reconcile` every 5 minutes. The route accepts `Authorization: Bearer $CRON_SECRET` (or `x-cron-secret`) so Vercel Cron can run without a user session — **`CRON_SECRET` must be set in the deployment environment**, otherwise the schedule gets a 401 (logged in Vercel).
+  - Heals `calling`, `in_progress`, `in-progress`, `initiated`, `queued`, `ringing`, `call-disconnected` older than 3 minutes.
+  - After 90 minutes with the provider still reporting in-progress, marks the call `failed` + follow-up instead of showing it as live forever.
+  - After 60 minutes with no provider record of the execution, marks it `failed` + follow-up with an explicit "outcome could not be confirmed" summary.
+- **On-view healing**: opening a participant sheet (`GET /api/phone-screening/participants/[id]`) re-checks Bolna when the row is non-terminal and older than 2 minutes, so HR sees the truth even if cron is not configured.
+- **Manual refresh**: results sheet **Refresh from Bolna** / **Generate summary** (`sync-execution?participantId=&sync=1&force=1`).
+- **Observability (recommended)**: log/metric counters for `not_screened`, `interrupted`, `auto_cut`, `audio_issue`, `stuck_reconciled`, `participant_update_dropped_columns`; alert on spikes.
+- **Data migration (optional, recommended)**: add `classification_outcome`; keep `fallback_summary_used` inside `verdict_json` unless a real column is added.
 
 ## Files touched (this change set)
 - `lib/bolna-execution.ts` — classification in verdict metadata, audio patterns, `needs_manual_followup`, hangup metadata persistence

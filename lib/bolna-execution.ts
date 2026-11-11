@@ -15,6 +15,7 @@ import {
   type BolnaExecution,
 } from "@/lib/bolna"
 import { generateFallbackSummary } from "@/lib/fallback-summary"
+import { updateParticipantSafely } from "@/lib/participant-update"
 
 // Terminal-execution handling shared by the live webhook and the manual
 // sync/reconcile recovery routes. Everything here must be idempotent enough to
@@ -296,6 +297,15 @@ async function writeScreeningAnswers(
   }
 
   if (rows.length > 0) {
+    // Same rerun-safety as transcripts: replace instead of stacking duplicates.
+    const { error: clearError } = await supabaseAdmin
+      .from("screening_answers")
+      .delete()
+      .eq("participant_id", participantId)
+    if (clearError) {
+      logger.warn("Failed to replace Bolna screening answers", { participantId, error: clearError.message })
+    }
+
     const { error } = await supabaseAdmin.from("screening_answers").insert(rows)
     if (error) {
       logger.warn("Failed to write Bolna screening answers", { participantId, error: error.message })
@@ -315,6 +325,17 @@ export async function writeTranscriptSegments(
     speaker: s.speaker,
     text: s.text,
   }))
+
+  // Replace, don't append: handleCompletedExecution is intentionally re-runnable
+  // (webhook retry, reconcile, on-view heal). Blind inserts stacked the same
+  // transcript several times in the sheet.
+  const { error: clearError } = await supabaseAdmin
+    .from("call_transcripts")
+    .delete()
+    .eq("participant_id", participantId)
+  if (clearError) {
+    logger.warn("Failed to replace Bolna transcript", { participantId, error: clearError.message })
+  }
 
   const { error } = await supabaseAdmin.from("call_transcripts").insert(rows)
   if (error) {
@@ -372,14 +393,23 @@ async function buildFallbackVerdictPatch(
     const cls = (wordCount < 50 || unavailablePattern) ? "not_screened" : undefined
     const vj: any = { ...(fallback as any) }
     if (cls) vj._classification_outcome = cls
-    return {
+    // NOTE: `fallback_summary_used` is deliberately stored INSIDE verdict_json.
+    // phone_screening_participants has no such column, and writing it top-level
+    // made PostgREST reject the whole update (PGRST204) — which silently left
+    // finished calls stuck as "calling now" and summaries unwritten.
+    vj._fallback_summary_used = true
+    const result: Record<string, unknown> = {
       verdict_json: vj,
       ai_summary: fallback.comprehensive_summary,
       ai_recommendation: (wordCount < 50 || unavailablePattern) ? "not_a_fit" : recommendation,
       ai_score: score,
-      status: (wordCount < 50 || unavailablePattern) ? "failed" : undefined,
-      fallback_summary_used: true,
     }
+    // Only include `status` when it must change. Returning `status: undefined`
+    // and merging it with Object.assign used to overwrite the terminal
+    // "completed" status set by the caller, leaving finished calls stuck as
+    // "in_progress"/"on the call now" even though every other field saved.
+    if (wordCount < 50 || unavailablePattern) result.status = "failed"
+    return result
   } catch (err: any) {
     logger.warn("Fallback summary generation failed", { participantId, error: err.message })
     return null
@@ -481,8 +511,13 @@ async function snapshotPreviousCallAttempt(participantId: string, incomingExecut
 
 export async function handleCompletedExecution(
   participantId: string,
-  execution: BolnaExecution
+  execution: BolnaExecution,
+  options?: { suppressSideEffects?: boolean }
 ): Promise<void> {
+  // Backfills/repairs re-apply terminal handling to calls that already went
+  // through the webhook. They must not text the candidate again, re-schedule a
+  // callback, or duplicate timelime/quality entries.
+  const sideEffects = options?.suppressSideEffects !== true
   const transcript = execution.transcript || ""
   const verdict = extractVerdictFromTranscript(transcript)
   const extracted = (execution.extracted_data as Record<string, unknown> | null) || (execution as any).custom_extractions || null
@@ -541,19 +576,33 @@ export async function handleCompletedExecution(
   }
 
   const patch: Record<string, unknown> = {
+    // `failed_partial` is NOT in the status CHECK constraint, so writing it made
+    // Postgres reject the entire patch (partial calls never persisted at all).
+    // `failed` + call_is_partial carries the same meaning and always saves.
     status:
-      classification === "interrupted"
-        ? "failed_partial"
-        : classification === "not_screened" || classification === "retry" || classification === "voicemail"
+      classification === "interrupted" ||
+      classification === "not_screened" ||
+      classification === "retry" ||
+      classification === "voicemail"
         ? "failed"
         : "completed",
+    call_is_partial: classification === "interrupted" ? true : undefined,
     bolna_status: execution.status || "completed",
     call_duration_seconds: rawDuration != null && rawDuration !== '' && !Number.isNaN(Number(rawDuration)) ? Math.round(Number(rawDuration)) : null,
-    call_ended_at: now,
+    // Prefer the provider's own terminal timestamp: a repaired call must not
+    // look like it ended at repair time (that made old calls look "recent").
+    call_ended_at: execution.updated_at || now,
     updated_at: now,
   }
-  // Flag incomplete screenings for HR follow-up (send call again / WhatsApp)
-  if (classification === "not_screened" || classification === "interrupted") {
+  // Flag incomplete screenings for HR follow-up (send call again / WhatsApp).
+  // Voicemail and provider-retry outcomes never screened the candidate either,
+  // so they must surface in /jobs and /today just like other incomplete calls.
+  if (
+    classification === "not_screened" ||
+    classification === "interrupted" ||
+    classification === "voicemail" ||
+    classification === "retry"
+  ) {
     patch.needs_manual_followup = true
   }
 
@@ -663,7 +712,13 @@ export async function handleCompletedExecution(
 
   } else if (transcript) {
     const fallbackPatch = await buildFallbackVerdictPatch(participantId, transcript)
-    if (fallbackPatch) Object.assign(patch, fallbackPatch)
+    // Never let an undefined value in the fallback blob erase a field the
+    // terminal handler already set (notably `status: "completed"`).
+    if (fallbackPatch) {
+      for (const [key, value] of Object.entries(fallbackPatch)) {
+        if (value !== undefined) patch[key] = value
+      }
+    }
   }
 
   // Log call completed event
@@ -697,28 +752,32 @@ export async function handleCompletedExecution(
       patch.verdict_json = { _classification_outcome: classification, _hangup_by: hangupBy || null, _call_hangup_reason: hangupReason || null }
     }
   } catch {}
-  await supabaseAdmin
-    .from("phone_screening_participants")
-    .update(patch)
-    .eq("id", participantId)
+  // Never swallow this: a failed write here is exactly what leaves a finished
+  // call stuck as "calling now" in the portal.
+  await updateParticipantSafely(participantId, patch, {
+    executionId: execution.id,
+    source: "handleCompletedExecution",
+  })
 
   // Close the loop in the thread: "Call Now" was tapped, the call happened, and
   // here is what came of it — without this the chat ends on a booking that never
   // resolves.
-  await appendWhatsappHistory(participantId, {
-    at: now,
-    kind: "call_completed",
-    direction: "internal",
-    text:
-      effectiveVerdict?.score != null
-        ? `Call completed — screening score ${Math.round(effectiveVerdict.score)}/100 is ready to review.`
-        : "Call completed — transcript and summary recorded.",
-    status: "completed",
-  })
+  if (sideEffects) {
+    await appendWhatsappHistory(participantId, {
+      at: now,
+      kind: "call_completed",
+      direction: "internal",
+      text:
+        effectiveVerdict?.score != null
+          ? `Call completed — screening score ${Math.round(effectiveVerdict.score)}/100 is ready to review.`
+          : "Call completed — transcript and summary recorded.",
+      status: "completed",
+    })
+  }
 
   // If the candidate requested a callback, override the status to call_scheduled
   // and schedule the re-dial via QStash.
-  if (effectiveVerdict?.callback_requested || effectiveVerdict?.callback_preference_text) {
+  if (sideEffects && (effectiveVerdict?.callback_requested || effectiveVerdict?.callback_preference_text)) {
     const timezone = (execution.context_details?.timezone as string) || undefined
     const callbackAt = parseCallbackTime(
       effectiveVerdict.callback_time,
@@ -769,26 +828,28 @@ export async function handleCompletedExecution(
     })
   }
 
-  evaluateCallQuality(participantId).then(() => {}).catch((err: any) => {
-    logger.error("Async call quality evaluation failed", { participantId, error: err?.message })
-  })
+  if (sideEffects) {
+    evaluateCallQuality(participantId).then(() => {}).catch((err: any) => {
+      logger.error("Async call quality evaluation failed", { participantId, error: err?.message })
+    })
 
-  // Enrich transcript with Gemini: resume + JD + transcript → detailed summary
-  enrichTranscriptAsync(participantId, transcript, effectiveVerdict).catch((err: any) => {
-    logger.error("Async transcript enrichment failed", { participantId, error: err?.message })
-  })
+    // Enrich transcript with Gemini: resume + JD + transcript → detailed summary
+    enrichTranscriptAsync(participantId, transcript, effectiveVerdict).catch((err: any) => {
+      logger.error("Async transcript enrichment failed", { participantId, error: err?.message })
+    })
 
-  // Send post-call WhatsApp confirmation to candidate
-  sendPostCallWhatsApp(participantId).catch((err: any) => {
-    logger.error("Async post-call WhatsApp failed", { participantId, error: err?.message })
-  })
+    // Send post-call WhatsApp confirmation to candidate
+    sendPostCallWhatsApp(participantId, execution.id).catch((err: any) => {
+      logger.error("Async post-call WhatsApp failed", { participantId, error: err?.message })
+    })
+  }
 }
 
-async function sendPostCallWhatsApp(participantId: string): Promise<void> {
+async function sendPostCallWhatsApp(participantId: string, executionId?: string | null): Promise<void> {
   const { data: participant } = await supabaseAdmin
     .from("phone_screening_participants")
     .select(`
-      candidate_id, job_id,
+      candidate_id, job_id, whatsapp_history, call_started_at, call_attempts,
       candidates: candidate_id (id, name, phone),
       jobs: job_id (id, title, client_name)
     `)
@@ -799,6 +860,32 @@ async function sendPostCallWhatsApp(participantId: string): Promise<void> {
   const candidate = participant.candidates as any
   const job = participant.jobs as any
   if (!candidate?.phone) return
+
+  // Re-healing the same execution (webhook retried, reconcile, on-view heal)
+  // must not text the candidate twice. Execution ids are recorded going
+  // forward; for older entries fall back to a short recency window.
+  const history = Array.isArray((participant as any).whatsapp_history)
+    ? ((participant as any).whatsapp_history as any[])
+    : []
+  const callStartedMs = (participant as any).call_started_at
+    ? new Date((participant as any).call_started_at).getTime()
+    : 0
+  const alreadySent = history.some((h) => {
+    if (!h || h.kind !== "post_call_message") return false
+    if (executionId && h.executionId === executionId) return true
+    // Older entries have no execution id: if the message was sent after this
+    // attempt started, it belongs to this call.
+    if (!h.executionId && h.at) {
+      const at = new Date(h.at).getTime()
+      if (!Number.isFinite(at)) return false
+      return callStartedMs ? at >= callStartedMs - 5 * 60 * 1000 : Date.now() - at < 15 * 60 * 1000
+    }
+    return false
+  })
+  if (alreadySent) {
+    logger.info("Skipping duplicate post-call WhatsApp", { participantId, executionId })
+    return
+  }
 
   const whatsapp = getWhatsAppService()
   const result = await whatsapp.sendCallCompleted({
@@ -823,6 +910,7 @@ async function sendPostCallWhatsApp(participantId: string): Promise<void> {
     at: new Date().toISOString(),
     kind: "post_call_message",
     direction: "out",
+    executionId: executionId ?? null,
     template: postCallTemplate,
     text: result.renderedBody
       ?? (result.success ? describeTemplate(postCallTemplate) : "Post-call message was not sent."),
@@ -1178,9 +1266,11 @@ export async function handleFailedExecution(
   const classification: "not_screened" | "interrupted" | "retry" = isPartialCall ? "interrupted" : "retry"
 
   const patch: Record<string, unknown> = {
-    status: isPartialCall ? "failed_partial" : maxRetriesReached ? "unreachable" : "failed",
+    // Same constraint note as above: never write `failed_partial`, which is not
+    // an allowed status. call_is_partial identifies a mid-conversation drop.
+    status: maxRetriesReached ? "unreachable" : "failed",
     bolna_status: execution.status || "failed",
-    call_ended_at: now,
+    call_ended_at: execution.updated_at || now,
     retry_count: currentRetryCount,
     call_is_partial: isPartialCall ? true : null,
     updated_at: now,
@@ -1245,7 +1335,11 @@ export async function handleFailedExecution(
       // still gets a summary; without this the candidate showed up in review
       // with a transcript and no score, indistinguishable from a no-op call.
       const fallbackPatch = await buildFallbackVerdictPatch(participant.id, execution.transcript)
-      if (fallbackPatch) Object.assign(patch, fallbackPatch)
+      if (fallbackPatch) {
+        for (const [key, value] of Object.entries(fallbackPatch)) {
+          if (value !== undefined) patch[key] = value
+        }
+      }
     }
   }
 
@@ -1262,10 +1356,10 @@ export async function handleFailedExecution(
       if (!patch.ai_summary) patch.ai_summary = "1st screening incomplete (call ended mid-conversation). Review transcript and send call again."
     }
   } catch {}
-  await supabaseAdmin
-    .from("phone_screening_participants")
-    .update(patch)
-    .eq("id", participant.id)
+  await updateParticipantSafely(participant.id, patch, {
+    executionId: execution.id,
+    source: "handleFailedExecution",
+  })
 
   // Log call failed event
   logCandidateActivity({
