@@ -5,6 +5,7 @@ import { SupabaseCandidateService } from "@/lib/supabase-candidates"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { attachAssignments } from "@/lib/jobs/assignments"
 import { bumpJobsSearchRevision } from "@/lib/jobsCacheRevision"
+import { CacheNamespace, CacheTtl, cached } from "@/lib/cache"
 
 export async function GET(request: NextRequest) {
   const ctx = await getInternalAuthContext(request)
@@ -25,56 +26,58 @@ export async function GET(request: NextRequest) {
     const clientId = searchParams.get("clientId")
     const owner = (searchParams.get("owner") || "").trim()
     const q = (searchParams.get("search") || "").trim()
+    // Resolve "me" before building the cache key, otherwise every user would
+    // share the first caller's personal list.
+    const ownerKey = owner === "me" ? ctx.authUser.id : owner
 
-    let query = supabaseAdmin.from("jobs").select("*", { count: paginate ? "exact" : undefined as any })
-    // Newest first (client also sorts, but this ensures consistent base order)
-    query = query.order("created_at", { ascending: false })
+    const cacheKey = [paginate, page, perPage, status || "", source || "", clientId || "", ownerKey, q].join("|")
 
-    if (status && status !== "all") {
-      query = query.eq("status", status)
-    }
-    if (source && source !== "all") {
-      query = query.eq("source", source)
-    }
-    if (clientId && clientId !== "all") {
-      query = query.eq("client_id", clientId)
-    }
-    // Ownership filter. `unassigned` powers the Unassigned pool; `me` narrows to
-    // the caller; anything else is treated as an auth user id.
-    if (owner === "unassigned") {
-      query = query.is("owner_auth_user_id", null)
-    } else if (owner && owner !== "all") {
-      query = query.eq("owner_auth_user_id", owner === "me" ? ctx.authUser.id : owner)
-    }
-    if (q) {
-      const term = `%${q.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`
-      query = query.or(`title.ilike.${term},location.ilike.${term},industry.ilike.${term},client_name.ilike.${term}`)
-    }
+    const payload = await cached(CacheNamespace.jobs, cacheKey, CacheTtl.jobs, async () => {
+      let query = supabaseAdmin.from("jobs").select("*", { count: paginate ? "exact" : undefined as any })
+      // Newest first (client also sorts, but this ensures consistent base order)
+      query = query.order("created_at", { ascending: false })
 
-    if (paginate) {
-      const from = (page - 1) * perPage
-      const to = from + perPage - 1
-      const { data, error, count } = await query.range(from, to)
-
-      if (error) {
-        console.error("Error fetching jobs:", error)
-        return NextResponse.json({ error: error.message }, { status: 500 })
+      if (status && status !== "all") {
+        query = query.eq("status", status)
+      }
+      if (source && source !== "all") {
+        query = query.eq("source", source)
+      }
+      if (clientId && clientId !== "all") {
+        query = query.eq("client_id", clientId)
+      }
+      // Ownership filter. `unassigned` powers the Unassigned pool; anything else
+      // is treated as an auth user id (resolved above so "me" is cache-safe).
+      if (ownerKey === "unassigned") {
+        query = query.is("owner_auth_user_id", null)
+      } else if (ownerKey && ownerKey !== "all") {
+        query = query.eq("owner_auth_user_id", ownerKey)
+      }
+      if (q) {
+        const term = `%${q.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`
+        query = query.or(`title.ilike.${term},location.ilike.${term},industry.ilike.${term},client_name.ilike.${term}`)
       }
 
-      return NextResponse.json({ items: await attachAssignments(data || []), page, perPage, total: count ?? 0 })
-    }
+      if (paginate) {
+        const from = (page - 1) * perPage
+        const to = from + perPage - 1
+        const { data, error, count } = await query.range(from, to)
+        if (error) throw error
+        return { items: await attachAssignments(data || []), page, perPage, total: count ?? 0 }
+      }
 
-    const { data, error } = await query
+      const { data, error } = await query
+      if (error) throw error
+      return await attachAssignments(data || [])
+    })
 
-    if (error) {
-      console.error("Error fetching jobs:", error)
-      return NextResponse.json({ error: error.message }, { status: 500 })
-    }
-
-    return NextResponse.json(await attachAssignments(data || []))
+    return NextResponse.json(payload)
   } catch (error) {
-    console.error("Internal error:", error)
-    return NextResponse.json({ error: "Internal Server Error" }, { status: 500 })
+    console.error("Error fetching jobs:", error)
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Internal Server Error" },
+      { status: 500 },
+    )
   }
 }
 

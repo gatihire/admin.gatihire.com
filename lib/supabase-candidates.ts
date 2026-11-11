@@ -587,12 +587,16 @@ export class SupabaseCandidateService {
 
     try {
       const filters = await this.getInternalUserFilters()
-      // Searching is far more expensive than browsing, so use PostgREST's
-      // `estimated` count there (exact for small results, planner estimate for
-      // large ones) instead of a full COUNT(*) on every keystroke.
+      // Never run COUNT(*) on this endpoint.
+      //
+      // pg_stat_statements showed the exact count on `candidates` as the single
+      // largest block reader in the dashboard hot path. `estimated` is exact for
+      // small result sets and uses the planner's row estimate for large ones, so
+      // the page counter can be off by a row or two on big filtered lists — a
+      // fair trade for removing a full index/table scan on every page view.
       let query = supabaseAdmin
         .from('candidates')
-        .select(CANDIDATE_LIST_COLUMNS, { count: search ? 'estimated' : 'exact' })
+        .select(CANDIDATE_LIST_COLUMNS, { count: 'estimated' })
         .order(sortBy, { ascending: sortOrder === 'asc' })
         .or('source.is.null,source.neq.juicebox')
         // Re-uploaded duplicates are parked with status='duplicate' (see the

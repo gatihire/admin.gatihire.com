@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
+import { getInternalAuthContext, hasPermission, invalidatePermissionCache } from "@/lib/internal-auth"
 import { supabaseAdmin } from "@/lib/supabase"
 
 export async function PATCH(request: NextRequest, { params }: { params: Promise<{ roleId: string }> }) {
@@ -17,6 +17,7 @@ export async function PATCH(request: NextRequest, { params }: { params: Promise<
   const { data, error } = await supabaseAdmin.from("roles").update(patch).eq("id", roleId).select("*").maybeSingle()
   if (error) return NextResponse.json({ error: "Failed to update role" }, { status: 500 })
   if (!data) return NextResponse.json({ error: "Role not found" }, { status: 404 })
+  await invalidatePermissionCache()
   return NextResponse.json({ role: data })
 }
 
@@ -28,5 +29,6 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
   const { roleId } = await params
   const { error } = await supabaseAdmin.from("roles").delete().eq("id", roleId)
   if (error) return NextResponse.json({ error: "Failed to delete role" }, { status: 500 })
+  await invalidatePermissionCache()
   return NextResponse.json({ success: true })
 }

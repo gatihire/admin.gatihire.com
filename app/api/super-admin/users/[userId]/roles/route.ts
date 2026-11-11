@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
+import { getInternalAuthContext, hasPermission, invalidatePermissionCache } from "@/lib/internal-auth"
 import { supabaseAdmin } from "@/lib/supabase"
 
 export async function PUT(request: NextRequest, { params }: { params: Promise<{ userId: string }> }) {
@@ -22,6 +22,8 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
     const { error } = await supabaseAdmin.from("user_roles").insert(rows)
     if (error) return NextResponse.json({ error: "Failed to set roles" }, { status: 500 })
   }
+
+  await invalidatePermissionCache()
 
   return NextResponse.json({ success: true })
 }

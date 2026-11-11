@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { supabaseAdmin } from "@/lib/supabase"
+import { CacheNamespace, CacheTtl, cacheGet, cacheSet } from "@/lib/cache"
 import {
   countAnalyticsEvents,
   countAuthUsers,
@@ -29,6 +30,13 @@ export async function GET(request: NextRequest) {
   const ctx = await getInternalAuthContext(request)
   if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   if (!hasPermission(ctx, "analytics.view")) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+
+  // Analytics is the most expensive read path in the app (20+ aggregates) and
+  // the answer is identical for every admin on the same date range, so key by
+  // the raw query string.
+  const cacheParams = "overview:" + (new URL(request.url).searchParams.toString() || "default")
+  const cachedPayload = await cacheGet<any>(CacheNamespace.analytics, cacheParams)
+  if (cachedPayload) return NextResponse.json(cachedPayload)
 
   const range = parseIsoRange(request.url, { daysBack: 30 })
   const prev = previousRange(range)
@@ -114,7 +122,7 @@ export async function GET(request: NextRequest) {
     })
   )
 
-  return NextResponse.json({
+  const payload = {
     range,
     kpis: {
       signups: { value: signups, previous: signupsPrev, delta_pct: pctDelta(signups, signupsPrev) },
@@ -127,5 +135,8 @@ export async function GET(request: NextRequest) {
       apply_submitted: { value: applySubmitted, previous: applySubmittedPrev, delta_pct: pctDelta(applySubmitted, applySubmittedPrev) },
     },
     series,
-  })
+  }
+
+  await cacheSet(CacheNamespace.analytics, cacheParams, payload, CacheTtl.analytics)
+  return NextResponse.json(payload)
 }

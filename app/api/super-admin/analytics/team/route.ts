@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { supabaseAdmin } from "@/lib/supabase"
 import { parseIsoRange } from "@/lib/super-admin-analytics"
+import { CacheNamespace, CacheTtl, cacheGet, cacheSet } from "@/lib/cache"
 
 export const runtime = "nodejs"
 
@@ -16,6 +17,10 @@ export async function GET(request: NextRequest) {
   const ctx = await getInternalAuthContext(request)
   if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   if (!hasPermission(ctx, "analytics.view")) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+
+  const cacheParams = "team:" + (new URL(request.url).searchParams.toString() || "default")
+  const cachedPayload = await cacheGet<any>(CacheNamespace.analytics, cacheParams)
+  if (cachedPayload) return NextResponse.json(cachedPayload)
 
   const range = parseIsoRange(request.url, { daysBack: 30 })
 
@@ -52,5 +57,7 @@ export async function GET(request: NextRequest) {
 
   rows.sort((a, b) => b.metrics.jobs_posted + b.metrics.outreach_messages - (a.metrics.jobs_posted + a.metrics.outreach_messages))
 
-  return NextResponse.json({ range, rows })
+  const payload = { range, rows }
+  await cacheSet(CacheNamespace.analytics, cacheParams, payload, CacheTtl.analytics)
+  return NextResponse.json(payload)
 }

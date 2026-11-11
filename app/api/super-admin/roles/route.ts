@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
+import { getInternalAuthContext, hasPermission, invalidatePermissionCache } from "@/lib/internal-auth"
 import { supabaseAdmin } from "@/lib/supabase"
 
 export async function GET(request: NextRequest) {
@@ -43,6 +43,8 @@ export async function POST(request: NextRequest) {
       await supabaseAdmin.from("role_permissions").insert(rows)
     }
   }
+
+  await invalidatePermissionCache()
 
   return NextResponse.json({ role })
 }

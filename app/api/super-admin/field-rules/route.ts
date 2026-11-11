@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
+import { getInternalAuthContext, hasPermission, invalidatePermissionCache } from "@/lib/internal-auth"
 import { supabaseAdmin } from "@/lib/supabase"
 
 export async function GET(request: NextRequest) {
@@ -45,5 +45,6 @@ export async function PUT(request: NextRequest) {
     )
 
   if (error) return NextResponse.json({ error: "Failed to save field rule" }, { status: 500 })
+  await invalidatePermissionCache()
   return NextResponse.json({ success: true })
 }

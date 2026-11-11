@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
+import { getInternalAuthContext, hasPermission, invalidatePermissionCache } from "@/lib/internal-auth"
 import { supabaseAdmin } from "@/lib/supabase"
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ userId: string }> }) {
@@ -64,6 +64,8 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
       metadata: { permission_key: permissionKey, resource, allowed_fields: allowedFields, denied_fields: deniedFields },
     })
     .then(() => {})
+
+  await invalidatePermissionCache()
 
   return NextResponse.json({ success: true })
 }

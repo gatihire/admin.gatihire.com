@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
+import { CacheNamespace, CacheTtl, cacheDeleteNamespace, cached } from "@/lib/cache"
 
 function nowIso() {
   return new Date().toISOString()
@@ -29,9 +30,22 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 })
   }
 
-  const { data, error } = await supabaseAdmin.from("clients").select("*").order("created_at", { ascending: false })
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-  return NextResponse.json(data || [])
+  try {
+    // The clients list is small and changes rarely, but it is rendered on every
+    // jobs/pipeline screen. One shared key serves every viewer.
+    const data = await cached(CacheNamespace.clients, "list", CacheTtl.clients, async () => {
+      const { data, error } = await supabaseAdmin.from("clients").select("*").order("created_at", { ascending: false })
+      if (error) throw error
+      return data || []
+    })
+
+    return NextResponse.json(data)
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Internal Server Error" },
+      { status: 500 },
+    )
+  }
 }
 
 export async function POST(request: NextRequest) {
@@ -70,5 +84,6 @@ export async function POST(request: NextRequest) {
 
   const { data, error } = await supabaseAdmin.from("clients").insert(insert).select("*").single()
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  await cacheDeleteNamespace(CacheNamespace.clients)
   return NextResponse.json(data)
 }

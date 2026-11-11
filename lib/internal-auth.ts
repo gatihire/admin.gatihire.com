@@ -8,6 +8,7 @@ import {
   throwIfUnavailable,
   withTimeout,
 } from "@/lib/fetch-with-timeout"
+import { CacheNamespace, CacheTtl, cacheDeleteNamespace, cached } from "@/lib/cache"
 
 type FieldRule = {
   permission_key: string
@@ -135,81 +136,113 @@ export async function getInternalAuthContext(request: NextRequest): Promise<Inte
     throw new SupabaseUnavailableError("Supabase client is not configured")
   }
 
-  const [permsResult, rulesResult, superAdminResult] = await Promise.all([
-    withTimeout(authedClient.rpc("current_user_permission_keys"), AUTH_TIMEOUT_MS, "current_user_permission_keys"),
-    withTimeout(authedClient.rpc("current_user_field_rules"), AUTH_TIMEOUT_MS, "current_user_field_rules"),
-    withTimeout(authedClient.rpc("is_super_admin"), AUTH_TIMEOUT_MS, "is_super_admin"),
-  ]).catch((error) => {
-    throw new SupabaseUnavailableError(
-      `Unable to load permissions: ${error instanceof Error ? error.message : "unknown error"}`,
-    )
-  })
-
-  const perms = (permsResult as any)?.data
-  const rules = (rulesResult as any)?.data
-  const isSuperAdmin = (superAdminResult as any)?.data
-
-  throwIfUnavailable(permsResult as any, "current_user_permission_keys")
-  throwIfUnavailable(rulesResult as any, "current_user_field_rules")
-  throwIfUnavailable(superAdminResult as any, "is_super_admin")
-
-  const superAdmin = Boolean(isSuperAdmin)
-
-  const rolePermissionKeys = Array.isArray(perms)
-    ? perms
-        .map((p: any) => String(p?.permission_key || "").trim())
-        .filter(Boolean)
-    : []
-
-  let overridePermissionKeys: string[] = []
-  if (!superAdmin) {
-    const userPermsResult = await supabaseAdmin
-      .from("user_permissions")
-      .select("permissions(key)")
-      .eq("auth_user_id", user.id)
-    throwIfUnavailable(userPermsResult, "user_permissions")
-    const userPerms = userPermsResult.data
-    overridePermissionKeys =
-      (userPerms ?? [])
-        .map((p: any) => String(p?.permissions?.key || "").trim())
-        .filter(Boolean) ?? []
-  }
-
-  let permissionKeys: Set<string>
-  if (superAdmin) {
-    const allPermissions = await supabaseAdmin
-      .from("permissions")
-      .select("key")
-      .order("key", { ascending: true })
-    throwIfUnavailable(allPermissions, "permissions")
-    permissionKeys = new Set<string>(
-      (allPermissions.data ?? [])
-        .map((p: any) => String(p?.key || "").trim())
-        .filter(Boolean),
-    )
-  } else {
-    permissionKeys = new Set<string>([...rolePermissionKeys, ...overridePermissionKeys])
-  }
-
-  const fieldRules: FieldRule[] = superAdmin
-    ? []
-    : Array.isArray(rules)
-      ? rules.map((r: any) => ({
-          permission_key: String(r?.permission_key || ""),
-          resource: String(r?.resource || ""),
-          allowed_fields: Array.isArray(r?.allowed_fields) ? r.allowed_fields.map((f: any) => String(f)) : null,
-          denied_fields: Array.isArray(r?.denied_fields) ? r.denied_fields.map((f: any) => String(f)) : null,
-        }))
-      : []
+  const bundle = await loadPermissionBundle(user.id, authedClient)
 
   return {
     accessToken,
     authUser: { id: user.id, email: user.email ?? null },
-    isSuperAdmin: superAdmin,
-    permissionKeys,
-    fieldRules,
+    isSuperAdmin: bundle.isSuperAdmin,
+    permissionKeys: new Set(bundle.permissionKeys),
+    fieldRules: bundle.fieldRules,
     refreshedSession,
   }
+}
+
+type PermissionBundle = {
+  isSuperAdmin: boolean
+  permissionKeys: string[]
+  fieldRules: FieldRule[]
+}
+
+/**
+ * Resolve permissions for a user.
+ *
+ * Every API request used to run 5 permission queries (3 RPCs + 2 table reads)
+ * *after* the token check. With the dashboard polling and several pages open
+ * that dominated query volume while adding nothing — permissions change maybe
+ * once a week. Cached for 60s per user, which is short enough that a revoked
+ * permission takes effect quickly, and invalidated explicitly on writes.
+ */
+async function loadPermissionBundle(userId: string, authedClient: any): Promise<PermissionBundle> {
+  return cached(CacheNamespace.permissions, userId, CacheTtl.permissions, async () => {
+    const [permsResult, rulesResult, superAdminResult] = await Promise.all([
+      withTimeout(authedClient.rpc("current_user_permission_keys"), AUTH_TIMEOUT_MS, "current_user_permission_keys"),
+      withTimeout(authedClient.rpc("current_user_field_rules"), AUTH_TIMEOUT_MS, "current_user_field_rules"),
+      withTimeout(authedClient.rpc("is_super_admin"), AUTH_TIMEOUT_MS, "is_super_admin"),
+    ]).catch((error) => {
+      throw new SupabaseUnavailableError(
+        `Unable to load permissions: ${error instanceof Error ? error.message : "unknown error"}`,
+      )
+    })
+
+    const perms = (permsResult as any)?.data
+    const rules = (rulesResult as any)?.data
+    const isSuperAdmin = (superAdminResult as any)?.data
+
+    throwIfUnavailable(permsResult as any, "current_user_permission_keys")
+    throwIfUnavailable(rulesResult as any, "current_user_field_rules")
+    throwIfUnavailable(superAdminResult as any, "is_super_admin")
+
+    const superAdmin = Boolean(isSuperAdmin)
+
+    const rolePermissionKeys = Array.isArray(perms)
+      ? perms
+          .map((p: any) => String(p?.permission_key || "").trim())
+          .filter(Boolean)
+      : []
+
+    let overridePermissionKeys: string[] = []
+    if (!superAdmin) {
+      const userPermsResult = await supabaseAdmin
+        .from("user_permissions")
+        .select("permissions(key)")
+        .eq("auth_user_id", userId)
+      throwIfUnavailable(userPermsResult, "user_permissions")
+      overridePermissionKeys =
+        (userPermsResult.data ?? [])
+          .map((p: any) => String(p?.permissions?.key || "").trim())
+          .filter(Boolean) ?? []
+    }
+
+    let permissionKeys: string[]
+    if (superAdmin) {
+      const allPermissions = await supabaseAdmin
+        .from("permissions")
+        .select("key")
+        .order("key", { ascending: true })
+      throwIfUnavailable(allPermissions, "permissions")
+      permissionKeys = (allPermissions.data ?? [])
+        .map((p: any) => String(p?.key || "").trim())
+        .filter(Boolean)
+    } else {
+      permissionKeys = [...rolePermissionKeys, ...overridePermissionKeys]
+    }
+
+    const fieldRules: FieldRule[] = superAdmin
+      ? []
+      : Array.isArray(rules)
+        ? rules.map((r: any) => ({
+            permission_key: String(r?.permission_key || ""),
+            resource: String(r?.resource || ""),
+            allowed_fields: Array.isArray(r?.allowed_fields) ? r.allowed_fields.map((f: any) => String(f)) : null,
+            denied_fields: Array.isArray(r?.denied_fields) ? r.denied_fields.map((f: any) => String(f)) : null,
+          }))
+        : []
+
+    return { isSuperAdmin: superAdmin, permissionKeys, fieldRules }
+  })
+}
+
+/**
+ * Drop every cached permission bundle.
+ *
+ * Call after changing roles, role permissions, user overrides or user status.
+ * A namespace wipe is intentional: role changes affect many users and the
+ * admin user base is small, so repopulating cheaply beats tracking per-user
+ * dependency graphs.
+ */
+export async function invalidatePermissionCache() {
+  await cacheDeleteNamespace(CacheNamespace.permissions)
 }
 
 /**

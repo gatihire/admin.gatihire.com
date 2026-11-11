@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { supabaseAdmin } from "@/lib/supabase"
 import { countAnalyticsEvents, countBetween, dayBucketsUtc, parseIsoRange } from "@/lib/super-admin-analytics"
+import { CacheNamespace, CacheTtl, cacheGet, cacheSet } from "@/lib/cache"
 
 export const runtime = "nodejs"
 
@@ -9,6 +10,10 @@ export async function GET(request: NextRequest) {
   const ctx = await getInternalAuthContext(request)
   if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   if (!hasPermission(ctx, "analytics.view")) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+
+  const cacheParams = "jobs:" + (new URL(request.url).searchParams.toString() || "default")
+  const cachedPayload = await cacheGet<any>(CacheNamespace.analytics, cacheParams)
+  if (cachedPayload) return NextResponse.json(cachedPayload)
 
   const range = parseIsoRange(request.url, { daysBack: 60 })
   const buckets = dayBucketsUtc(range)
@@ -72,7 +77,7 @@ export async function GET(request: NextRequest) {
 
   jobRows.sort((a, b) => b.applications - a.applications)
 
-  return NextResponse.json({
+  const payload = {
     range,
     totals: {
       open_jobs: openJobs ?? 0,
@@ -88,6 +93,9 @@ export async function GET(request: NextRequest) {
     },
     series,
     top_jobs: jobRows.slice(0, 15),
-  })
+  }
+
+  await cacheSet(CacheNamespace.analytics, cacheParams, payload, CacheTtl.analytics)
+  return NextResponse.json(payload)
 }
 

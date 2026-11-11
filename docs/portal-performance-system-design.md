@@ -58,7 +58,8 @@ page view, poll and dashboard is a live query.
 | 4 | Phone-screening page polled every **5s**, and `failed` kept it polling forever | `components/phone-screening-tab.tsx` | **fixed** — 15s, active calls only, pauses when tab hidden |
 | 5 | Participant list returned `*`, including `transcript_raw` (TOAST) on every poll | `/api/phone-screening/participants` | **fixed** — `fields=status&#124;card` projection modes; polling uses status only |
 | 6 | Analytics page force-refreshed every **60s**, bypassing its cache | `components/super-admin/SuperAdminAnalytics.tsx` | **fixed** — 5 min + visibility check |
-| 7 | Metrics endpoint runs ~48 `COUNT(*)` per call | `app/api/super-admin/metrics` | **fixed** — 60s server cache |
+| 7 | Metrics endpoint runs ~48 `COUNT(*)` per call | `app/api/super-admin/metrics` | **fixed** — 60s Redis cache |
+| 7b | Candidate list runs an exact `COUNT(*)` on every page — the #1 block reader in `pg_stat_statements` | `lib/supabase-candidates.ts` | **fixed** — `count: 'estimated'` always |
 | 8 | Reconcile scanned + healed an unbounded number of rows | `app/api/bolna/reconcile` | **fixed** — 60 rows / 45s per run, no N+1 timing query |
 | 9 | Missing composite/date indexes for the dashboard counters | — | **fixed** — two index migrations added |
 | 10 | Large mutable JSONB (`verdict_json`, `screening_context`, `whatsapp_history`) on the hottest table | schema | MVCC bloat + TOAST reads on every update/list |
@@ -156,13 +157,55 @@ Dashboard reads `analytics_daily` (≤ 365 rows) instead of running dozens of
 | Layer | What | TTL |
 | --- | --- | --- |
 | Browser (`cachedFetchJson`) | lists, job details, permissions | 60s–10min, SWR |
-| Server in-memory | global metrics, permissions | 60s |
-| Next data cache / Redis (recommended) | clients, jobs list, role/permission matrix, analytics rollups | 5–15 min, invalidate on write |
+| Server in-memory + Redis | metrics, permissions, analytics, clients, jobs | 60s–120s |
 | HTTP | `ETag` + `If-None-Match` on read-only endpoints | version by `updated_at` |
 
-Serverless instances don't share memory, so an in-memory cache is a burst
-absorber, not a global cache. If traffic grows, add Upstash Redis or
-`unstable_cache` with tags.
+Serverless instances don't share memory, so an in-memory cache is only a burst
+absorber. A Redis layer (`lib/cache.ts`, Upstash REST) makes the cache global
+across instances.
+
+### 7.1 Redis cache layer (implemented)
+
+`lib/cache.ts` is a thin layer over the existing `lib/redis.ts` client:
+
+| Helper | Behaviour |
+| --- | --- |
+| `cached(ns, key, ttl, load)` | read-through, single-flight, returns live data on any cache failure |
+| `cacheGet` / `cacheSet` | typed get/set, TTL plus 12% jitter so a namespace doesn't expire at once |
+| `cacheDeleteNamespace(ns)` | SCAN + DEL for write invalidation (never `KEYS`) |
+| `CacheNamespace` / `CacheTtl` | single source of truth for names and TTLs |
+
+Guarantees:
+
+- **No Redis → no-op.** Without `UPSTASH_REDIS_REST_URL` /
+  `UPSTASH_REDIS_REST_TOKEN`, every read misses and `cached()` just runs the
+  query. The app behaves exactly as before, only slower.
+- **Never blocks a request.** Every Redis operation is capped at 1.2s and errors
+  are swallowed (logged at most once per 30s).
+- **Empty results are not cached**, so a transient DB blip can't pin "no data".
+
+What is cached, and how it is invalidated:
+
+| Namespace | Contents | TTL | Invalidated by |
+| --- | --- | --- | --- |
+| `perm` | permission keys + field rules per user | 60s | role/permission/field-rule writes (`invalidatePermissionCache()`) |
+| `metrics` | dashboard counters, keyed by UTC day | 60s | TTL only |
+| `analytics` | overview/jobs/outreach/team, keyed by query string | 120s | TTL only |
+| `clients` | clients list | 120s | client create/update/delete |
+| `jobs` | jobs list + filters, keyed by resolved owner | 60s | `bumpJobsSearchRevision()` (all job writes) |
+
+Permissions used to cost 5 queries (3 RPCs + 2 table reads) on **every** API
+request; that is now once per user per minute.
+
+Required env vars (Vercel + `.env.local`):
+
+```
+UPSTASH_REDIS_REST_URL=https://<db>.upstash.io
+UPSTASH_REDIS_REST_TOKEN=...
+```
+
+`@upstash/redis` speaks the REST protocol only. A `redis://` / `rediss://` TCP
+URL will **not** work — that needs `ioredis`, which is not installed.
 
 ## 8. Real-time without hammering Postgres
 
@@ -290,6 +333,73 @@ showing "about to deplete" for a while after the incident even though pages load
    just by total time — that is what consumes the IO budget.
 6. If a single query dominates, optimise it before adding hardware.
 
+### 11.3 Reading pg_stat_statements correctly
+
+`shared_blks_read` is the number of 8 KB blocks Postgres had to fetch because
+they were **not** in `shared_buffers`. Multiply by 8 to get KiB. Three traps:
+
+1. **It is cumulative since `stats_reset`, not a rate.** A restart (including a
+   compute upgrade) resets it. A snapshot 26 minutes after a restart with `1`
+   call per statement says nothing about the outage — divide by `calls` and
+   compare against elapsed time before drawing conclusions.
+2. **Not every read is physical disk IO.** An OS page-cache hit still counts as
+   `shared_blks_read`. For the true table-level picture use
+   `pg_statio_user_tables` (`heap_blks_read + idx_blks_read`).
+3. **Writes may be invisible at the top.** `shared_blks_written` only counts
+   buffers evicted after being dirtied; small writes are absorbed by the WAL and
+   checkpoint cycle. Check `shared_blks_dirtied`, `n_dead_tup` and table size
+   growth instead.
+
+Useful queries:
+
+```sql
+-- 1. Per-call cost, not cumulative totals (needs >= 1h of uptime to mean anything)
+select
+  left(regexp_replace(query, '\s+', ' ', 'g'), 140) as query,
+  calls,
+  round((shared_blks_read + shared_blks_written)::numeric / greatest(calls, 1), 0) as blks_per_call,
+  round((shared_blks_read * 8.0 / 1024)::numeric, 1) as read_mb,
+  round((shared_blks_written * 8.0 / 1024)::numeric, 1) as written_mb,
+  round(mean_exec_time::numeric, 1) as mean_ms,
+  round(100.0 * shared_blks_hit
+        / nullif(shared_blks_hit + shared_blks_read, 0), 1) as cache_hit_pct
+from extensions.pg_stat_statements
+where calls > 0
+  and query not ilike '%pg_stat_statements%'
+order by (shared_blks_read + shared_blks_written)::numeric / greatest(calls, 1) desc
+limit 25;
+
+-- 2. Which TABLES are actually read from storage
+select relname,
+       seq_scan,
+       idx_scan,
+       heap_blks_read,
+       idx_blks_read,
+       round((heap_blks_read + idx_blks_read) * 8.0 / 1024, 1) as read_mb,
+       round(100.0 * (heap_blks_hit + idx_blks_hit)
+             / nullif(heap_blks_hit + idx_blks_hit + heap_blks_read + idx_blks_read, 0), 2) as cache_hit_pct
+from pg_statio_user_tables
+order by (heap_blks_read + idx_blks_read) desc
+limit 20;
+
+-- 3. Write amplification / bloat (large JSONB rows updated in place)
+select relname, n_live_tup, n_dead_tup,
+       round(100.0 * n_dead_tup / greatest(n_live_tup + n_dead_tup, 1), 1) as dead_pct,
+       last_vacuum, last_autovacuum
+from pg_stat_user_tables
+order by n_dead_tup desc
+limit 15;
+
+-- 4. Uptime + reset time, so the numbers above can be interpreted
+select stats_reset from extensions.pg_stat_statements_info;
+select pg_postmaster_start_time();
+```
+
+Rules of thumb: `cache_hit_pct < 99%` means the hot set does not fit in RAM
+(upgrade or shrink the working set). A statement with high
+`blks_per_call × calls` is worth optimising; a statement with high total but
+`1` call is noise.
+
 
 ## 12. Roadmap
 
@@ -315,7 +425,8 @@ showing "about to deplete" for a while after the incident even though pages load
 10. Split `candidate_documents` / `candidate_embeddings`.
 11. Split `participant_details`; archive transcripts > 90 days to Storage.
 12. Build `analytics_daily` rollups; point the dashboard at them.
-13. Add server cache (Redis or Next cache tags) for clients/jobs/permissions.
+13. ~~Add server cache (Redis) for clients/jobs/permissions~~ — done (`lib/cache.ts`,
+    namespaced TTLs + write invalidation, see §7.1).
 14. Add slow-query and error alerts.
 
 ### Quarter

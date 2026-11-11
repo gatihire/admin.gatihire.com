@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
+import { CacheNamespace, cacheDeleteNamespace } from "@/lib/cache"
 
 function nowIso() {
   return new Date().toISOString()
@@ -79,6 +80,7 @@ export async function PUT(request: NextRequest, { params }: { params: Promise<{ 
 
   const { data, error } = await supabaseAdmin.from("clients").update(patch).eq("id", id).select("*").single()
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  await cacheDeleteNamespace(CacheNamespace.clients)
   return NextResponse.json(data)
 }
 
@@ -90,5 +92,6 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
 
   const { error } = await supabaseAdmin.from("clients").delete().eq("id", id)
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  await cacheDeleteNamespace(CacheNamespace.clients)
   return NextResponse.json({ ok: true })
 }

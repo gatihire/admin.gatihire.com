@@ -1,16 +1,11 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { supabaseAdmin } from "@/lib/supabase"
+import { CacheNamespace, CacheTtl, cached } from "@/lib/cache"
 
 function toIso(d: Date) {
   return d.toISOString()
 }
-
-// This endpoint fans out to ~48 COUNT(*) queries (4 ranges × tables/statuses).
-// Multiple admins opening the dashboard used to re-run all of them each time.
-// A short shared cache collapses that burst without making the numbers visibly stale.
-let metricsCache: { at: number; payload: any } | null = null
-const METRICS_CACHE_MS = 60_000
 
 function startOfUtcDay(d: Date) {
   const x = new Date(d)
@@ -66,11 +61,16 @@ export async function GET(request: NextRequest) {
   if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
   if (!hasPermission(ctx, "analytics.view")) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
 
-  if (metricsCache && Date.now() - metricsCache.at < METRICS_CACHE_MS) {
-    return NextResponse.json(metricsCache.payload, { headers: { "x-metrics-cache": "hit" } })
-  }
-
+  // ~48 COUNT(*) queries (4 ranges × tables/statuses) per call. Keys are bucketed
+  // by UTC day, so every admin opening the dashboard within the TTL is served
+  // from one computation — shared across all serverless instances via Redis.
   const now = new Date()
+  const bucket = toIso(startOfUtcDay(now))
+  const payload = await cached(CacheNamespace.metrics, bucket, CacheTtl.metrics, () => computeMetrics(now))
+  return NextResponse.json(payload)
+}
+
+async function computeMetrics(now: Date) {
   const ranges = {
     day: { start: startOfUtcDay(now), end: now },
     week: { start: startOfUtcWeek(now), end: now },
@@ -142,7 +142,6 @@ export async function GET(request: NextRequest) {
     },
   }
 
-  metricsCache = { at: Date.now(), payload }
-  return NextResponse.json(payload)
+  return payload
 }
 
