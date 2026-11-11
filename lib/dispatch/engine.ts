@@ -98,6 +98,8 @@ export interface DispatchParticipant {
   verdict_json?: any
   ai_suggests_rejection?: boolean | null
   needs_manual_followup?: boolean | null
+  /** The details the candidate gave over WhatsApp (CTC, notice, location…). */
+  info_data?: Record<string, unknown> | null
   updated_at?: string | null
 }
 
@@ -210,6 +212,8 @@ export interface WorkItem {
   aiRecommendation: string | null
   whatsappSentAt: string | null
   callAttempts: number | null
+  /** The details the candidate gave over WhatsApp (CTC, notice, location…). */
+  infoData: Record<string, unknown> | null
   /** Whether this row can be bulk-selected (submitted to bulk actions). */
   selectable: boolean
   /** Small chips shown on the row (WhatsApp nudges, calls, AI score…). */
@@ -834,6 +838,15 @@ function deriveOne(input: WorkItemInput, now: Date): WorkItem | null {
     aiRecommendation: recommendationLabel(p),
     whatsappSentAt: p?.whatsapp_sent_at || null,
     callAttempts: Number.isFinite(Number(p?.call_attempts)) ? Number(p?.call_attempts) : null,
+    /**
+     * The details the candidate gave us over WhatsApp (CTC, notice period,
+     * location…). The Today row only shows the reason a case needs attention;
+     * the details behind it live here so the recruiter can open one modal and
+     * see everything instead of hunting through a transcript.
+     */
+    infoData: (p?.info_data && typeof p.info_data === "object" && !Array.isArray(p.info_data))
+      ? (p.info_data as Record<string, unknown>)
+      : null,
     selectable: cfg.selectable,
     pills: pillsFor(kind, p),
     aiFlagged: p?.ai_suggests_rejection === true,

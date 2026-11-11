@@ -25,7 +25,9 @@ import { Textarea } from "@/components/ui/textarea"
 import { ToastAction } from "@/components/ui/toast"
 import {
   AlarmClock,
+  ArrowRight,
   Building2,
+  CalendarCheck,
   CalendarClock,
   CheckCircle2,
   Eye,
@@ -175,6 +177,370 @@ async function api(path: string, init?: RequestInit): Promise<any> {
   return json
 }
 
+/**
+ * Category-based action fields — renders different inputs depending on what
+ * this case actually needs. This is the "what action needs to take place"
+ * part of the modal.
+ */
+function renderActionFields(item: WorkItem): React.ReactNode {
+  const kind = item.kind
+
+  // ── CALL: a screening call happened or needs to happen ──
+  if (kind === "call") {
+    return (
+      <div className="space-y-3">
+        <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Call action</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <button
+            onClick={() => {}}
+            className="w-full py-2 rounded-lg border border-zinc-200 bg-white text-left text-sm font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          >
+            <PhoneCall className="mr-2 h-4 w-4" /> Place call now
+          </button>
+          <button
+            onClick={() => {}}
+            className="w-full py-2 rounded-lg border border-zinc-200 bg-white text-left text-sm font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          >
+            <Phone className="mr-2 h-4 w-4" /> Log call outcome
+          </button>
+        </div>
+        {item.callAttempts && item.callAttempts > 0 && (
+          <p className="text-xs text-zinc-500">
+            {item.callAttempts} attempt{item.callAttempts > 1 ? "s" : ""} used
+          </p>
+        )}
+      </div>
+    )
+  }
+
+  // ── REPLY: candidate replied on WhatsApp, nobody answered yet ──
+  if (kind === "reply") {
+    return (
+      <div className="space-y-3">
+        <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Reply action</p>
+        <button
+          onClick={() => {}}
+          className="w-full py-2.5 rounded-lg border border-emerald-200 bg-emerald-50 text-left text-sm font-medium text-emerald-700 hover:bg-emerald-100 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300"
+        >
+          <MessageCircle className="mr-2 h-4 w-4" /> Reply on WhatsApp
+        </button>
+        <p className="text-xs text-zinc-500">
+          The candidate replied — answer their message to move them forward.
+        </p>
+      </div>
+    )
+  }
+
+  // ── REVIEW / DECIDE: screening completed, human verdict needed ──
+  if (item.primaryAction === "review" || item.primaryAction === "decide") {
+    return (
+      <div className="space-y-3">
+        <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Review & decision</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <button
+            onClick={() => {}}
+            className="w-full py-2 rounded-lg border border-green-200 bg-green-50 text-left text-sm font-medium text-green-700 hover:bg-green-100 dark:border-green-900 dark:bg-green-950/30 dark:text-green-300"
+          >
+            <CheckCircle2 className="mr-2 h-4 w-4" /> Approve & shortlist
+          </button>
+          <button
+            onClick={() => {}}
+            className="w-full py-2 rounded-lg border border-red-200 bg-red-50 text-left text-sm font-medium text-red-700 hover:bg-red-100 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300"
+          >
+            <UserX className="mr-2 h-4 w-4" /> Reject
+          </button>
+        </div>
+        <p className="text-xs text-zinc-500">
+          Review the screening transcript and summary before deciding.
+        </p>
+      </div>
+    )
+  }
+
+  // ── HUMAN: AI flagged — human must decide ──
+  if (kind === "human") {
+    return (
+      <div className="space-y-3">
+        <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Human decision</p>
+        <p className="text-sm text-zinc-700 dark:text-zinc-200">
+          The AI could not screen this candidate — a person needs to review and decide.
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <button
+            onClick={() => {}}
+            className="w-full py-2 rounded-lg border border-blue-200 bg-blue-50 text-left text-sm font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-300"
+          >
+            <Eye className="mr-2 h-4 w-4" /> Review profile
+          </button>
+          <button
+            onClick={() => {}}
+            className="w-full py-2 rounded-lg border border-zinc-200 bg-white text-left text-sm font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          >
+            <PhoneCall className="mr-2 h-4 w-4" /> Call now
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // ── DECLINED: candidate said not interested ──
+  if (kind === "declined") {
+    return (
+      <div className="space-y-3">
+        <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Declined</p>
+        <p className="text-sm text-zinc-700 dark:text-zinc-200">
+          The candidate declined — mark as rejected and remove from queue.
+        </p>
+        <button
+          onClick={() => {}}
+          className="w-full py-2 rounded-lg border border-red-200 bg-red-50 text-left text-sm font-medium text-red-700 hover:bg-red-100 dark:border-red-900 dark:bg-red-950/30 dark:text-red-300"
+        >
+          <UserX className="mr-2 h-4 w-4" /> Mark rejected
+        </button>
+      </div>
+    )
+  }
+
+  // ── SHORTLIST: ready to send to client ──
+  if (kind === "shortlist") {
+    return (
+      <div className="space-y-3">
+        <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Send to client</p>
+        <p className="text-sm text-zinc-700 dark:text-zinc-200">
+          Screening passed — ready to share this candidate with the client.
+        </p>
+        <button
+          onClick={() => {}}
+          className="w-full py-2 rounded-lg border border-emerald-200 bg-emerald-50 text-left text-sm font-medium text-emerald-700 hover:bg-emerald-100 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300"
+        >
+          <Send className="mr-2 h-4 w-4" /> Share shortlist with client
+        </button>
+      </div>
+    )
+  }
+
+  // ── CLIENT: waiting on client decision ──
+  if (kind === "client") {
+    return (
+      <div className="space-y-3">
+        <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Client decision</p>
+        <p className="text-sm text-zinc-700 dark:text-zinc-200">
+          Already sent to the client — waiting on their response.
+        </p>
+        <button
+          onClick={() => {}}
+          className="w-full py-2 rounded-lg border border-blue-200 bg-blue-50 text-left text-sm font-medium text-blue-700 hover:bg-blue-100 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-300"
+        >
+          <Phone className="mr-2 h-4 w-4" /> Remind client
+        </button>
+      </div>
+    )
+  }
+
+  // ── GHOSTED: no reply ──
+  if (kind === "ghosted") {
+    return (
+      <div className="space-y-3">
+        <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Re-engage</p>
+        <p className="text-sm text-zinc-700 dark:text-zinc-200">
+          No reply yet — nudge them on WhatsApp or call.
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <button
+            onClick={() => {}}
+            className="w-full py-2 rounded-lg border border-emerald-200 bg-emerald-50 text-left text-sm font-medium text-emerald-700 hover:bg-emerald-100 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-300"
+          >
+            <MessageCircle className="mr-2 h-4 w-4" /> Nudge on WhatsApp
+          </button>
+          <button
+            onClick={() => {}}
+            className="w-full py-2 rounded-lg border border-zinc-200 bg-white text-left text-sm font-medium text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          >
+            <PhoneCall className="mr-2 h-4 w-4" /> Call now
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // Default fallback
+  return (
+    <div className="space-y-3">
+      <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">Action</p>
+      <p className="text-sm text-zinc-700 dark:text-zinc-200">
+        Review this candidate and decide next steps.
+      </p>
+    </div>
+  )
+}
+
+/**
+ * WhatsApp info collected — what we already know vs what's still missing.
+ */
+function renderCollectedInfo(item: WorkItem): React.ReactNode {
+  const info = (item.infoData || {}) as Record<string, unknown>
+  const keys = Object.keys(info).filter((k) => info[k] !== null && info[k] !== undefined && info[k] !== "")
+
+  if (keys.length === 0) {
+    return (
+      <p className="text-xs text-zinc-500 dark:text-zinc-400 italic">
+        No WhatsApp details collected yet — ask for current CTC, expected CTC, notice period, and location.
+      </p>
+    )
+  }
+
+  const LABELS: Record<string, string> = {
+    current_ctc: "Current CTC",
+    expected_ctc: "Expected CTC",
+    notice_period: "Notice period",
+    total_experience: "Experience",
+    location: "Location",
+    current_role: "Current role",
+    willing_to_relocate: "Willing to relocate",
+  }
+
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-xs">
+      {keys.map((k) => (
+        <div key={k} className="flex items-start gap-2">
+          <span className="text-zinc-500 dark:text-zinc-400 shrink-0">
+            {LABELS[k] || k.replace(/_/g, " ")}:
+          </span>
+          <span className="text-zinc-800 dark:text-zinc-200 font-medium break-words">{String(info[k])}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * Primary action button for the modal footer — matches what the case needs.
+ */
+function renderPrimaryAction(item: WorkItem): React.ReactNode {
+  const id = item.primaryAction
+
+  if (id === "call") {
+    return (
+      <Button onClick={() => {}} className="bg-indigo-600 hover:bg-indigo-700">
+        <PhoneCall className="mr-2 h-4 w-4" /> Place call now
+      </Button>
+    )
+  }
+  if (id === "reply") {
+    return (
+      <Button onClick={() => {}} className="bg-emerald-600 hover:bg-emerald-700">
+        <MessageCircle className="mr-2 h-4 w-4" /> Reply on WhatsApp
+      </Button>
+    )
+  }
+  if (id === "review" || id === "decide") {
+    return (
+      <Button onClick={() => {}} className="bg-indigo-600 hover:bg-indigo-700">
+        <Eye className="mr-2 h-4 w-4" /> Review screening
+      </Button>
+    )
+  }
+  if (id === "schedule" || id === "resched") {
+    return (
+      <Button onClick={() => {}} className="bg-amber-600 hover:bg-amber-700">
+        <CalendarCheck className="mr-2 h-4 w-4" /> Schedule interview
+      </Button>
+    )
+  }
+  if (id === "share") {
+    return (
+      <Button onClick={() => {}} className="bg-emerald-600 hover:bg-emerald-700">
+        <Send className="mr-2 h-4 w-4" /> Share with client
+      </Button>
+    )
+  }
+  if (id === "advance") {
+    return (
+      <Button onClick={() => {}} className="bg-green-600 hover:bg-green-700">
+        <ArrowRight className="mr-2 h-4 w-4" /> Move to next stage
+      </Button>
+    )
+  }
+  if (id === "reject" || id === "drop") {
+    return (
+      <Button variant="destructive" onClick={() => {}}>
+        <UserX className="mr-2 h-4 w-4" /> Reject
+      </Button>
+    )
+  }
+  if (id === "nudge") {
+    return (
+      <Button onClick={() => {}} className="bg-blue-600 hover:bg-blue-700">
+        <MessageCircle className="mr-2 h-4 w-4" /> Nudge on WhatsApp
+      </Button>
+    )
+  }
+
+  return (
+    <Button onClick={() => {}} className="bg-zinc-600 hover:bg-zinc-700">
+      {item.cta || "Take action"}
+    </Button>
+  )
+}
+
+function RowMenu({
+  disabled,
+  extras,
+  onCall,
+  onCallback,
+  onLogCall,
+  onSnooze,
+  onDone,
+}: {
+  disabled?: boolean
+  /** Kind-specific leftovers (open chat, call now, review…) shown first. */
+  extras?: { label: string; onSelect: () => void }[]
+  onCall: (outcome: string, hours: number) => void
+  onCallback: () => void
+  onLogCall: () => void
+  onSnooze: (hours: number) => void
+  onDone: () => void
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="sm" disabled={disabled} aria-label="More actions">
+          <MoreHorizontal className="h-4 w-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-60">
+        {(extras ?? []).map((e) => (
+          <DropdownMenuItem key={e.label} onSelect={e.onSelect}>
+            {e.label}
+          </DropdownMenuItem>
+        ))}
+        {extras && extras.length > 0 && <DropdownMenuSeparator />}
+        <DropdownMenuLabel>I called them</DropdownMenuLabel>
+        <DropdownMenuItem onSelect={() => onCall("no answer", 4)}>No answer · hide 4h</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onCall("busy", 2)}>Line busy · hide 2h</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onCall("wrong number", 168)}>Wrong number · hide 7 days</DropdownMenuItem>
+        <DropdownMenuItem onSelect={onLogCall}>
+          <Phone className="mr-2 h-3.5 w-3.5" /> Log a call with a note…
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>They asked for a call at</DropdownMenuLabel>
+        <DropdownMenuItem onSelect={onCallback}>Set a time…</DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>Not now</DropdownMenuLabel>
+        {SNOOZE_OPTIONS.map((o) => (
+          <DropdownMenuItem key={o.hours} onSelect={() => onSnooze(o.hours)}>
+            {o.label}
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={onDone}>
+          <CheckCircle2 className="mr-2 h-3.5 w-3.5" /> Mark as done
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
 export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean; defaultScope: Scope }) {
   const router = useRouter()
   const { toast } = useToast()
@@ -217,6 +583,10 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
   const [callbackAt, setCallbackAt] = useState(() => toLocalInput(new Date(Date.now() + 60 * 60 * 1000)))
   const [dropOpen, setDropOpen] = useState(false)
   const [dropIds, setDropIds] = useState<string[]>([])
+
+  // Category-based action modal — opens with the right fields for this case's
+  // kind (call / reply / review / human / declined / hold / shortlist / client…).
+  const [actionModalItem, setActionModalItem] = useState<WorkItem | null>(null)
 
   const load = useCallback(
     async (opts?: { scope?: Scope; includeSnoozed?: boolean; includeDone?: boolean; quiet?: boolean }) => {
@@ -281,6 +651,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
   const visible = useMemo(() => filtered.slice(0, visibleCount), [filtered, visibleCount])
 
   const teamHidden = data?.teamHidden ?? 0
+
   // ── plumbing ────────────────────────────────────────────────────────────
   const withPending = useCallback(
     async (key: string, fn: () => Promise<void>) => {
@@ -365,6 +736,12 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
     }
   }
 
+  // Open the category-based action modal — the fields shown depend on what this
+  // case actually needs (call, reply, review, human follow-up, decline, hold…).
+  const openActionModal = (item: WorkItem) => {
+    setActionModalItem(item)
+  }
+
   const openConversation = (item: WorkItem) => {
     if (!item.participantId) {
       router.push(jobLink(item, item.stage))
@@ -406,21 +783,6 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
     setIvNudge(true)
     setInterview({ item, mode })
   }
-
-  /** Move the candidate one pipeline step forward (the "not done, advance" action). */
-  const advanceStage = (item: WorkItem, target?: string) =>
-    withPending(`advance:${item.key}`, async () => {
-      const to = target || nextStageFor(item.stage)
-      await api(`/api/applications/${item.applicationId}`, {
-        method: "PUT",
-        body: JSON.stringify({ status: to, origin: "today" }),
-      })
-      toast({
-        title: `Moved to ${stageLabel(to)}`,
-        description: `${item.candidateName} is one step ahead in ${item.jobTitle}.`,
-      })
-      await load({ quiet: true })
-    })
 
   /**
    * Save the interview form: always log the call with the structured answers,
@@ -475,6 +837,21 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
       await load({ quiet: true })
     })
   }
+
+  /** Move the candidate one pipeline step forward (the "not done, advance" action). */
+  const advanceStage = (item: WorkItem, target?: string) =>
+    withPending(`advance:${item.key}`, async () => {
+      const to = target || nextStageFor(item.stage)
+      await api(`/api/applications/${item.applicationId}`, {
+        method: "PUT",
+        body: JSON.stringify({ status: to, origin: "today" }),
+      })
+      toast({
+        title: `Moved to ${stageLabel(to)}`,
+        description: `${item.candidateName} is one step ahead in ${item.jobTitle}.`,
+      })
+      await load({ quiet: true })
+    })
 
   const nudgeText = (item: WorkItem) =>
     `Hi ${firstName(item.candidateName)}, following up on your application for ${item.jobTitle}. Do you have a few minutes to chat?`
@@ -965,6 +1342,15 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                         >
                           {item.candidateName}
                         </span>
+                        <button
+                          type="button"
+                          onClick={() => openActionModal(item)}
+                          className="shrink-0 p-1 text-zinc-400 hover:text-blue-600 dark:text-zinc-500 dark:hover:text-blue-400"
+                          title="View details & take action"
+                          aria-label="View details & take action"
+                        >
+                          <Eye className="h-3.5 w-3.5" />
+                        </button>
                         <span
                           className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${KIND_STYLE[item.kind]}`}
                         >
@@ -1192,6 +1578,66 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
         onOpenChange={(open) => !open && setConvoItem(null)}
         onSent={() => load({ quiet: true })}
       />
+
+      {/* Category-based action modal — shows the right fields for what this case needs */}
+      {actionModalItem && (
+        <Dialog open={!!actionModalItem} onOpenChange={(open) => !open && setActionModalItem(null)}>
+          <DialogContent className="max-w-lg">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <div>
+                  {(() => {
+                    const Icon = KIND_ICON[actionModalItem!.kind]
+                    const cls = KIND_STYLE[actionModalItem!.kind]
+                    return (
+                      <>
+                        <span className={`h-7 w-7 rounded-full flex items-center justify-center ${cls}`}>
+                          <Icon className="h-3.5 w-3.5" />
+                        </span>
+                        <div>
+                          <span className="text-base font-semibold leading-none">{actionModalItem.candidateName}</span>
+                          <p className="text-xs text-zinc-500">
+                            {actionModalItem.jobTitle} · {actionModalItem.clientName}
+                          </p>
+                        </div>
+                      </>
+                    )
+                  })()}
+                </div>
+              </DialogTitle>
+            </DialogHeader>
+
+            <div className="grid grid-cols-1 gap-4 py-3">
+              {/* What this case is / why it needs attention */}
+              <div className="p-3 rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/50">
+                <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">What this case needs</p>
+                <p className="text-sm text-zinc-800 dark:text-zinc-100">{actionModalItem.detail}</p>
+                <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                  Stage: {actionModalItem.stage.replace(/_/g, " ")} ·
+                  Waiting {formatAge(actionModalItem.ageHours)} ·
+                  Attempt {actionModalItem.callAttempts ?? 0}
+                </p>
+              </div>
+
+              {/* Category-specific fields */}
+              {renderActionFields(actionModalItem)}
+
+              {/* WhatsApp data collected — what we already know vs what's missing */}
+              {actionModalItem.participantId && (
+                <div className="p-3 rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/50">
+                  <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">WhatsApp info collected</p>
+                  {renderCollectedInfo(actionModalItem)}
+                </div>
+              )}
+            </div>
+
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setActionModalItem(null)}>Close</Button>
+              {renderPrimaryAction(actionModalItem)}
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
 
       {/* Interview feedback form — shown after a placed call or from "Log a call".
           Captures the outcome, the questions a human asks on the call, and a real
@@ -1569,63 +2015,5 @@ function DropConfirm({
         </DialogContent>
       </Dialog>
     </>
-  )
-}
-
-function RowMenu({
-  disabled,
-  extras,
-  onCall,
-  onCallback,
-  onLogCall,
-  onSnooze,
-  onDone,
-}: {
-  disabled?: boolean
-  /** Kind-specific leftovers (open chat, call now, review…) shown first. */
-  extras?: { label: string; onSelect: () => void }[]
-  onCall: (outcome: string, hours: number) => void
-  onCallback: () => void
-  onLogCall: () => void
-  onSnooze: (hours: number) => void
-  onDone: () => void
-}) {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="sm" disabled={disabled} aria-label="More actions">
-          <MoreHorizontal className="h-4 w-4" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-60">
-        {(extras ?? []).map((e) => (
-          <DropdownMenuItem key={e.label} onSelect={e.onSelect}>
-            {e.label}
-          </DropdownMenuItem>
-        ))}
-        {extras && extras.length > 0 && <DropdownMenuSeparator />}
-        <DropdownMenuLabel>I called them</DropdownMenuLabel>
-        <DropdownMenuItem onSelect={() => onCall("no answer", 4)}>No answer · hide 4h</DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => onCall("busy", 2)}>Line busy · hide 2h</DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => onCall("wrong number", 168)}>Wrong number · hide 7 days</DropdownMenuItem>
-        <DropdownMenuItem onSelect={onLogCall}>
-          <Phone className="mr-2 h-3.5 w-3.5" /> Log a call with a note…
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuLabel>They asked for a call at</DropdownMenuLabel>
-        <DropdownMenuItem onSelect={onCallback}>Set a time…</DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuLabel>Not now</DropdownMenuLabel>
-        {SNOOZE_OPTIONS.map((o) => (
-          <DropdownMenuItem key={o.hours} onSelect={() => onSnooze(o.hours)}>
-            {o.label}
-          </DropdownMenuItem>
-        ))}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={onDone}>
-          <CheckCircle2 className="mr-2 h-3.5 w-3.5" /> Mark as done
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
   )
 }

@@ -232,6 +232,7 @@ export async function GET(request: NextRequest) {
             "verdict_json",
             "ai_suggests_rejection",
             "needs_manual_followup",
+            "info_data",
             "updated_at",
           ].join(", "),
           column: "job_id",
