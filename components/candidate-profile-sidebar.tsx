@@ -11,11 +11,78 @@ import { Skeleton } from "@/components/ui/skeleton"
 import {
   Download, MapPin, Phone, Mail, Building, Award, Globe, FileText,
   BrainCircuit, ChevronDown, ChevronUp, ExternalLink, GraduationCap,
-  Maximize2, Minimize2, CheckCircle, AlertTriangle,
+  Maximize2, Minimize2, CheckCircle, AlertTriangle, ArrowRight, MessageCircle,
 } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 import { CandidateActivityTimeline } from "./candidate-activity-timeline"
 import { createPreviewUrl } from "@/lib/file-preview-utils"
+
+/**
+ * The pipeline, in order. Rendered as a stepper so the recruiter can see at a
+ * glance where the candidate sits and what comes next — the old header only
+ * showed the current stage name, which read as a label rather than a position.
+ */
+const PIPELINE_STAGES = [
+  { id: "applied", label: "Applied" },
+  { id: "ai_screen", label: "AI Screen" },
+  { id: "shortlist", label: "Shortlist" },
+  { id: "interview", label: "Interview" },
+  { id: "offer", label: "Offer" },
+] as const
+
+function PipelineStepper({ current }: { current?: string | null }) {
+  const idx = PIPELINE_STAGES.findIndex((s) => s.id === current)
+  const terminal = current === "hired" || current === "rejected"
+  // An unknown/legacy stage (hr_review, client_review…) sits between AI Screen
+  // and Shortlist — show it as the current step rather than pretending the
+  // candidate never left Applied.
+  const currentIdx = idx >= 0 ? idx : terminal ? 4 : 1
+
+  return (
+    <div className="flex items-center gap-1">
+      {PIPELINE_STAGES.map((s, i) => {
+        const done = i < currentIdx
+        const active = i === currentIdx
+        return (
+          <div key={s.id} className="flex items-center gap-1 min-w-0">
+            <div className="flex flex-col items-center gap-1 min-w-0">
+              <span
+                className={`h-2 w-2 rounded-full shrink-0 ${
+                  active
+                    ? "bg-indigo-600 ring-4 ring-indigo-100"
+                    : done
+                      ? "bg-emerald-500"
+                      : "bg-zinc-200"
+                }`}
+              />
+              <span
+                className={`text-[9px] font-semibold uppercase tracking-wide truncate max-w-[52px] ${
+                  active ? "text-indigo-700" : done ? "text-emerald-700" : "text-zinc-400"
+                }`}
+              >
+                {s.label}
+              </span>
+            </div>
+            {i < PIPELINE_STAGES.length - 1 && (
+              <div className={`h-px w-3 shrink-0 -mt-3 ${i < currentIdx ? "bg-emerald-400" : "bg-zinc-200"}`} />
+            )}
+          </div>
+        )
+      })}
+      {terminal && (
+        <div className="flex items-center gap-1 min-w-0">
+          <div className="h-px w-3 shrink-0 -mt-3 bg-zinc-200" />
+          <div className="flex flex-col items-center gap-1 min-w-0">
+            <span className={`h-2 w-2 rounded-full shrink-0 ${current === "hired" ? "bg-emerald-600" : "bg-red-500"}`} />
+            <span className={`text-[9px] font-semibold uppercase tracking-wide ${current === "hired" ? "text-emerald-700" : "text-red-600"}`}>
+              {current === "hired" ? "Hired" : "Rejected"}
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
 
 interface WorkExperience {
   role: string
@@ -90,13 +157,19 @@ interface CandidateProfileSidebarProps {
   fitScore?: number | null
   /** Pipeline stage to display in the header (e.g. from Today / WhatsApp inbox). */
   stageLabel?: string | null
+  /**
+   * Why this candidate is on the recruiter's desk right now, and what to do
+   * about it. Without this the header showed a stage name and nothing else,
+   * so the recruiter had to work out the next step from scratch.
+   */
+  nextStep?: { reason?: string | null; cta?: string | null } | null
   /** Job opening context (title, client, description) to show in the header. */
   jobOpening?: { title?: string | null; clientName?: string | null; description?: string | null } | null
 }
 
 export function CandidateProfileSidebar({
   candidate: rawCandidate, application, isOpen, onClose, jobId, aiInfo, participant, fitScore,
-  stageLabel, jobOpening,
+  stageLabel, nextStep, jobOpening,
 }: CandidateProfileSidebarProps) {
   const { toast } = useToast()
   const [activeTab, setActiveTab] = useState("screening")
@@ -111,6 +184,75 @@ export function CandidateProfileSidebar({
   const [fitAnalysis, setFitAnalysis] = useState<any>(null)
   const [fitLoading, setFitLoading] = useState(false)
   const [jobDescExpanded, setJobDescExpanded] = useState(false)
+  const [callBusy, setCallBusy] = useState(false)
+  const [nudgeBusy, setNudgeBusy] = useState(false)
+
+  /**
+   * Place a real AI screening call. The button used to only show a toast that
+   * said "Starting AI call…" — nothing was dialled, so the recruiter was told
+   * a call was happening that never did.
+   */
+  const startAiCall = async () => {
+    if (!participant?.id) {
+      toast({ title: "No screening record", description: "This candidate has no phone-screening entry yet.", variant: "destructive" })
+      return
+    }
+    setCallBusy(true)
+    try {
+      const res = await fetch("/api/phone-screening/call-now", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ participantId: participant.id }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error || "Could not place the call")
+      if (json?.callPlaced === false) {
+        toast({
+          title: "Call not placed",
+          description: json?.error || json?.reason || "The provider did not accept the call.",
+          variant: "destructive",
+        })
+        return
+      }
+      toast({
+        title: "Call placed",
+        description: json?.executionId
+          ? `Calling ${c?.name || "the candidate"} now.`
+          : `Calling ${c?.name || "the candidate"} now.`,
+      })
+    } catch (e: any) {
+      toast({ title: "Call not placed", description: e?.message || "Something went wrong", variant: "destructive" })
+    } finally {
+      setCallBusy(false)
+    }
+  }
+
+  /** Send a real WhatsApp nudge to the candidate. */
+  const sendWhatsAppNudge = async () => {
+    if (!participant?.id) {
+      toast({ title: "No screening record", description: "This candidate has no phone-screening entry yet.", variant: "destructive" })
+      return
+    }
+    setNudgeBusy(true)
+    try {
+      const first = String(c?.name || "there").split(" ")[0]
+      const role = jobOpening?.title || "the role"
+      const res = await fetch(`/api/phone-screening/participants/${participant.id}/send-message`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: `Hi ${first}, following up on your application for ${role}. Do you have a few minutes to chat?`,
+        }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error || "Could not send the message")
+      toast({ title: "Nudge sent", description: `WhatsApp message sent to ${c?.name || "the candidate"}.` })
+    } catch (e: any) {
+      toast({ title: "Nudge failed", description: e?.message || "Something went wrong", variant: "destructive" })
+    } finally {
+      setNudgeBusy(false)
+    }
+  }
 
   // Merge raw candidate data with enriched data
   const c = useMemo(() => {
@@ -265,6 +407,12 @@ export function CandidateProfileSidebar({
     }
   }
 
+  /**
+   * Re-run the profile-fit analysis on demand. Kept as a function (rather than
+   * the old always-visible purple "Analyze Against JD" button) so the fit can
+   * be refreshed after the resume changes — the auto-load on open still fills
+   * it in the first place.
+   */
   const reAnalyzeFit = async () => {
     if (!jobId || !c?.id || fitLoading) return
     setFitLoading(true)
@@ -277,6 +425,7 @@ export function CandidateProfileSidebar({
       const data = await res.json()
       if (data.fits?.[c.id]) {
         setFitAnalysis(data.fits[c.id])
+        toast({ title: "Profile fit refreshed" })
       }
     } catch {
       toast({ title: "Failed to analyze", variant: "destructive" })
@@ -396,19 +545,34 @@ export function CandidateProfileSidebar({
             )}
           </div>
 
-          {/* Pipeline stage + job opening context (shown when opened from Today / WhatsApp inbox) */}
-          {(stageLabel || jobOpening?.title) && (
-            <div className="mt-4 rounded-xl border border-zinc-200 bg-zinc-50 p-3 space-y-2">
+          {/* Where is this candidate + what to do next */}
+          {(stageLabel || jobOpening?.title || nextStep?.reason) && (
+            <div className="mt-4 rounded-xl border border-indigo-200 bg-indigo-50/40 p-3 space-y-3">
               {stageLabel && (
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Pipeline stage</span>
-                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold bg-indigo-100 text-indigo-700 capitalize">
-                    {stageLabel.replace(/_/g, " ")}
-                  </span>
+                <div>
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-indigo-500 mb-2">
+                    Where they are in the pipeline
+                  </p>
+                  <PipelineStepper current={stageLabel} />
                 </div>
               )}
+
+              {nextStep?.reason && (
+                <div className="rounded-lg bg-white border border-indigo-100 p-2.5">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+                    Why they&apos;re on your desk
+                  </p>
+                  <p className="text-sm text-zinc-800 leading-snug">{nextStep.reason}</p>
+                  {nextStep.cta && (
+                    <p className="mt-1.5 flex items-center gap-1 text-xs font-semibold text-indigo-700">
+                      <ArrowRight className="h-3 w-3" /> Next: {nextStep.cta}
+                    </p>
+                  )}
+                </div>
+              )}
+
               {jobOpening?.title && (
-                <div>
+                <div className="rounded-lg bg-white border border-zinc-200 p-2.5">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Job opening</span>
                     {jobId && (
@@ -428,7 +592,7 @@ export function CandidateProfileSidebar({
                   )}
                   {jobOpening.description && (
                     <>
-                      <p className={`text-xs text-zinc-600 mt-1 leading-relaxed whitespace-pre-line ${jobDescExpanded ? "" : "line-clamp-3"}`}>
+                      <p className={`text-xs text-zinc-600 mt-1 leading-relaxed whitespace-pre-line ${jobDescExpanded ? "" : "line-clamp-2"}`}>
                         {jobOpening.description}
                       </p>
                       {jobOpening.description.length > 200 && (
@@ -436,7 +600,7 @@ export function CandidateProfileSidebar({
                           onClick={() => setJobDescExpanded(!jobDescExpanded)}
                           className="text-[11px] font-semibold text-indigo-600 hover:underline mt-0.5"
                         >
-                          {jobDescExpanded ? "Show less" : "Show more"}
+                          {jobDescExpanded ? "Show less" : "Show full job description"}
                         </button>
                       )}
                     </>
@@ -510,13 +674,19 @@ export function CandidateProfileSidebar({
         <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col overflow-hidden">
           <div className="px-7 border-b border-zinc-100 bg-white flex-shrink-0">
             <TabsList className="h-10 bg-transparent gap-0 p-0">
-              {["screening", "ai_context", "profile", "resume", "activity"].map((tab) => (
+              {([
+                { id: "screening", label: "Screening" },
+                { id: "ai_context", label: "AI Context" },
+                { id: "profile", label: "Profile" },
+                { id: "resume", label: "Resume" },
+                { id: "activity", label: "Activity" },
+              ]).map((tab) => (
                 <TabsTrigger
-                  key={tab}
-                  value={tab}
+                  key={tab.id}
+                  value={tab.id}
                   className="text-xs font-semibold capitalize data-[state=active]:text-zinc-900 data-[state=active]:border-b-2 data-[state=active]:border-zinc-900 data-[state=active]:font-bold rounded-none h-10 px-4 text-zinc-400 border-b-2 border-transparent"
                 >
-                  {tab === "ai_context" ? "AI Context" : tab}
+                  {tab.label}
                 </TabsTrigger>
               ))}
             </TabsList>
@@ -563,50 +733,67 @@ export function CandidateProfileSidebar({
                 </>
               ) : (
                 <div className="space-y-4">
-                  {/* AI Analysis Section */}
-                  <div className="text-center py-8">
-                    <BrainCircuit className="h-8 w-8 mx-auto mb-2 text-zinc-300" />
-                    <p className="text-sm font-semibold text-zinc-600">AI Profile Analysis</p>
-                    <p className="text-xs text-zinc-400 mt-1 mb-4">Analyze this candidate against the job requirements</p>
-                    
-                    {!fitAnalysis && !fitLoading && (
-                      <button
-                        onClick={reAnalyzeFit}
-                        className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold text-white bg-purple-600 hover:bg-purple-700 transition-colors"
-                      >
-                        <BrainCircuit className="h-3.5 w-3.5" /> Analyze Against JD
-                      </button>
+                  {/* No screening has run for this candidate yet.
+                      The old UI put an "AI Profile Analysis — Analyze this
+                      candidate against the job requirements" prompt here, which
+                      was noise: it described a tool rather than telling the
+                      recruiter anything about THIS candidate. Replaced with the
+                      two things that actually unblock the case. */}
+                  <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-center">
+                    <BrainCircuit className="h-6 w-6 mx-auto mb-2 text-zinc-300" />
+                    {fitAnalysis ? (
+                      <>
+                        <p className="text-sm font-semibold text-zinc-700">Profile fit for this role</p>
+                        <p className="text-xs text-zinc-500 mt-1">
+                          Matched against the job requirements from the resume.
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-sm font-semibold text-zinc-700">No AI screening yet</p>
+                        <p className="text-xs text-zinc-500 mt-1">
+                          This candidate has not been screened by the AI yet. Start a screening call, or
+                          nudge them on WhatsApp to collect their details first.
+                        </p>
+                        {fitLoading && (
+                          <div className="mt-3 flex items-center justify-center gap-2 text-xs text-zinc-400">
+                            <BrainCircuit className="h-3.5 w-3.5 animate-pulse" />
+                            Matching against the job requirements…
+                          </div>
+                        )}
+                      </>
                     )}
-                    
-                    {fitLoading && (
-                      <div className="flex items-center justify-center gap-2 text-xs text-zinc-400">
-                        <BrainCircuit className="h-3.5 w-3.5 animate-pulse" />
-                        Analyzing fit...
-                      </div>
-                    )}
-                    
                     {fitAnalysis && (
-                      <div className="text-left p-4 rounded-xl bg-purple-50/50 border border-purple-100 space-y-3">
+                      <div className="mt-3 text-left p-3 rounded-lg bg-purple-50/50 border border-purple-100 space-y-2">
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
                             <BrainCircuit className="h-4 w-4 text-purple-600" />
-                            <span className="text-sm font-bold text-purple-700">Fit Score</span>
+                            <span className="text-sm font-bold text-purple-700">Profile fit</span>
                           </div>
-                          <Badge variant="outline" className={`text-xs font-bold ${
-                            fitAnalysis.fit_score >= 70
-                              ? "bg-emerald-100 text-emerald-700 border-emerald-200"
-                              : fitAnalysis.fit_score >= 40
-                              ? "bg-amber-100 text-amber-700 border-amber-200"
-                              : "bg-red-100 text-red-600 border-red-200"
-                          }`}>
-                            {fitAnalysis.fit_score}%
-                          </Badge>
+                          <div className="flex items-center gap-2">
+                            <Badge variant="outline" className={`text-xs font-bold ${
+                              fitAnalysis.fit_score >= 70
+                                ? "bg-emerald-100 text-emerald-700 border-emerald-200"
+                                : fitAnalysis.fit_score >= 40
+                                ? "bg-amber-100 text-amber-700 border-amber-200"
+                                : "bg-red-100 text-red-600 border-red-200"
+                            }`}>
+                              {fitAnalysis.fit_score}%
+                            </Badge>
+                            <button
+                              onClick={reAnalyzeFit}
+                              disabled={fitLoading}
+                              title="Re-run the fit analysis"
+                              aria-label="Re-run the fit analysis"
+                              className="p-1 rounded text-zinc-400 hover:text-purple-600 disabled:opacity-40"
+                            >
+                              <BrainCircuit className={`h-3.5 w-3.5 ${fitLoading ? "animate-pulse" : ""}`} />
+                            </button>
+                          </div>
                         </div>
-                        
                         {fitAnalysis.summary && (
                           <p className="text-xs text-zinc-600 leading-relaxed">{fitAnalysis.summary}</p>
                         )}
-                        
                         {fitAnalysis.pros?.length > 0 && (
                           <div>
                             <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">Strengths</p>
@@ -617,7 +804,6 @@ export function CandidateProfileSidebar({
                             ))}
                           </div>
                         )}
-                        
                         {fitAnalysis.misses?.length > 0 && (
                           <div>
                             <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">Concerns</p>
@@ -631,26 +817,42 @@ export function CandidateProfileSidebar({
                       </div>
                     )}
                   </div>
-                  
-                  {/* Start Call Buttons */}
+
+                  {/* Start Call Buttons — these place a REAL call and send a
+                      REAL WhatsApp message. They used to only show a toast
+                      that said it was happening. */}
                   <div className="flex items-center justify-center gap-2 pt-4 border-t border-zinc-100">
                     <button
-                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 transition-colors"
-                      onClick={() => {
-                        toast({ title: "Starting AI call...", description: `Calling ${c?.name}` })
-                      }}
+                      disabled={!participant || callBusy}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      onClick={startAiCall}
                     >
-                      <Phone className="h-3.5 w-3.5" /> Start AI Call
+                      {callBusy ? (
+                        <BrainCircuit className="h-3.5 w-3.5 animate-pulse" />
+                      ) : (
+                        <Phone className="h-3.5 w-3.5" />
+                      )}
+                      {callBusy ? "Calling…" : "Start AI Call"}
                     </button>
                     <button
-                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 transition-colors"
-                      onClick={() => {
-                        toast({ title: "Sending WhatsApp nudge...", description: `Nudging ${c?.name}` })
-                      }}
+                      disabled={!participant || nudgeBusy}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      onClick={sendWhatsAppNudge}
                     >
-                      <Mail className="h-3.5 w-3.5" /> WhatsApp Nudge
+                      {nudgeBusy ? (
+                        <BrainCircuit className="h-3.5 w-3.5 animate-pulse" />
+                      ) : (
+                        <MessageCircle className="h-3.5 w-3.5" />
+                      )}
+                      {nudgeBusy ? "Sending…" : "WhatsApp Nudge"}
                     </button>
                   </div>
+                  {!participant && (
+                    <p className="text-[11px] text-zinc-500 text-center">
+                      This candidate has no phone-screening record yet — start a screening from the
+                      job pipeline to enable calls and WhatsApp.
+                    </p>
+                  )}
                 </div>
               )}
             </TabsContent>

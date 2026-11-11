@@ -441,40 +441,111 @@ function renderActionFields(item: WorkItem, h: TodayModalHandlers): React.ReactN
 }
 
 /**
- * WhatsApp info collected — what we already know vs what's still missing.
+ * Candidate details — what we already collected, and what is still missing.
+ *
+ * The old version had a heading that said "WhatsApp info collected" and then,
+ * right underneath, said "no details collected". Two contradictory sentences
+ * for one piece of information. This splits it into two honest lists: what we
+ * have, and what we still need to ask for.
  */
+const DETAIL_FIELDS: Array<{ key: string; label: string }> = [
+  { key: "current_ctc", label: "Current CTC" },
+  { key: "expected_ctc", label: "Expected CTC" },
+  { key: "notice_period", label: "Notice period" },
+  { key: "total_experience", label: "Experience" },
+  { key: "location", label: "Location" },
+  { key: "current_role", label: "Current role" },
+  { key: "willing_to_relocate", label: "Willing to relocate" },
+  { key: "reason_for_switching", label: "Reason for switching" },
+]
+
 function renderCollectedInfo(item: WorkItem): React.ReactNode {
   const info = (item.infoData || {}) as Record<string, unknown>
-  const keys = Object.keys(info).filter((k) => info[k] !== null && info[k] !== undefined && info[k] !== "")
+  const collected = DETAIL_FIELDS.filter((f) => {
+    const v = info[f.key]
+    return v !== null && v !== undefined && String(v).trim() !== ""
+  })
+  // Anything the candidate gave us that isn't on the standard list still
+  // matters — show it under its own label rather than dropping it.
+  const extra = Object.keys(info).filter(
+    (k) => !DETAIL_FIELDS.some((f) => f.key === k) && info[k] != null && String(info[k]).trim() !== ""
+  )
+  const missing = DETAIL_FIELDS.filter((f) => !collected.some((c) => c.key === f.key))
 
-  if (keys.length === 0) {
+  if (collected.length === 0 && extra.length === 0) {
     return (
-      <p className="text-xs text-zinc-500 dark:text-zinc-400 italic">
-        No WhatsApp details collected yet — ask for current CTC, expected CTC, notice period, and location.
-      </p>
+      <div>
+        <p className="text-xs text-zinc-600 dark:text-zinc-300">
+          Nothing collected yet — the candidate has not replied to the details request.
+        </p>
+        {missing.length > 0 && (
+          <div className="mt-2">
+            <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1">
+              Still to collect
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {missing.map((f) => (
+                <span
+                  key={f.key}
+                  className="inline-flex items-center rounded-full border border-dashed border-zinc-300 bg-white px-2 py-0.5 text-[10px] font-medium text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400"
+                >
+                  {f.label}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
     )
   }
 
-  const LABELS: Record<string, string> = {
-    current_ctc: "Current CTC",
-    expected_ctc: "Expected CTC",
-    notice_period: "Notice period",
-    total_experience: "Experience",
-    location: "Location",
-    current_role: "Current role",
-    willing_to_relocate: "Willing to relocate",
-  }
-
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 text-xs">
-      {keys.map((k) => (
-        <div key={k} className="flex items-start gap-2">
-          <span className="text-zinc-500 dark:text-zinc-400 shrink-0">
-            {LABELS[k] || k.replace(/_/g, " ")}:
-          </span>
-          <span className="text-zinc-800 dark:text-zinc-200 font-medium break-words">{String(info[k])}</span>
+    <div className="space-y-3">
+      <div>
+        <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 mb-1.5">
+          Collected ({collected.length + extra.length})
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+          {collected.map((f) => (
+            <div key={f.key} className="flex items-start gap-2">
+              <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-emerald-500" />
+              <span className="text-zinc-500 dark:text-zinc-400 shrink-0">{f.label}:</span>
+              <span className="text-zinc-800 dark:text-zinc-200 font-medium break-words">
+                {String(info[f.key])}
+              </span>
+            </div>
+          ))}
+          {extra.map((k) => (
+            <div key={k} className="flex items-start gap-2">
+              <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0 text-emerald-500" />
+              <span className="text-zinc-500 dark:text-zinc-400 shrink-0">
+                {k.replace(/_/g, " ")}:
+              </span>
+              <span className="text-zinc-800 dark:text-zinc-200 font-medium break-words">
+                {String(info[k])}
+              </span>
+            </div>
+          ))}
         </div>
-      ))}
+      </div>
+
+      {missing.length > 0 && (
+        <div>
+          <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1.5">
+            Still to collect ({missing.length})
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {missing.map((f) => (
+              <span
+                key={f.key}
+                className="inline-flex items-center rounded-full border border-dashed border-zinc-300 bg-white px-2 py-0.5 text-[10px] font-medium text-zinc-500 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-400"
+              >
+                {f.label}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -1533,7 +1604,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
                         size="sm"
                         onClick={() => runPrimary(item)}
                         disabled={busy}
-                        className="font-medium text-zinc-900 dark:text-zinc-100"
+                        className="bg-indigo-600 font-semibold text-white hover:bg-indigo-700"
                         title={item.detail || item.cta}
                       >
                         {busy && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
@@ -1693,6 +1764,14 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
           }
           participant={profileParticipant}
           stageLabel={profileItem.stage ?? null}
+          nextStep={
+            profileItem
+              ? {
+                  reason: profileItem.detail || null,
+                  cta: profileItem.cta || null,
+                }
+              : null
+          }
           jobOpening={
             profileItem.jobTitle || profileItem.clientName || profileJob?.description
               ? {
@@ -1762,10 +1841,12 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
               {/* Category-specific fields */}
               {renderActionFields(actionModalItem, modalHandlers)}
 
-              {/* WhatsApp data collected — what we already know vs what's missing */}
+              {/* Candidate details — what we have, and what we still need */}
               {actionModalItem.participantId && (
                 <div className="p-3 rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/50">
-                  <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-1">WhatsApp info collected</p>
+                  <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider mb-2">
+                    Candidate details
+                  </p>
                   {renderCollectedInfo(actionModalItem)}
                 </div>
               )}
