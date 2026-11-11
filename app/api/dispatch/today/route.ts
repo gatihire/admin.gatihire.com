@@ -196,43 +196,8 @@ export async function GET(request: NextRequest) {
   const scopedApps = allApps.filter((a) => a.jobs && inScope(String(a.job_id), a.jobs.owner_auth_user_id || null))
   const activeApps = scopedApps.filter((a) => ACTIVE_STATUSES.includes(String(a.status)))
 
-  // ── Company / role filter metadata (for the cascading dropdowns on Today) ──
-  // Build the company list from scoped jobs that have at least one active
-  // application, with a count of waiting items per company.
-  const companyCounts = new Map<string, number>()
-  for (const a of activeApps) {
-    if (!a.jobs) continue
-    const company = String(a.jobs.client_name || "Unnamed company")
-    companyCounts.set(company, (companyCounts.get(company) || 0) + 1)
-  }
-  const companies = Array.from(companyCounts.entries())
-    .map(([name, count]) => ({ name, count }))
-    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
-
-  // Roles within the selected company (or all companies when none is selected),
-  // each with its own waiting-item count.
-  const roleCounts = new Map<string, number>()
-  for (const a of activeApps) {
-    if (!a.jobs) continue
-    if (filterCompany && String(a.jobs.client_name || "") !== filterCompany) continue
-    const role = String(a.jobs.title || "Untitled role")
-    roleCounts.set(role, (roleCounts.get(role) || 0) + 1)
-  }
-  const roles = Array.from(roleCounts.entries())
-    .map(([title, count]) => ({ title, count }))
-    .sort((a, b) => b.count - a.count || a.title.localeCompare(b.title))
-
-  // Apply the company / role filter to the active applications.
-  let filteredApps = activeApps
-  if (filterCompany) {
-    filteredApps = filteredApps.filter((a) => a.jobs && String(a.jobs.client_name || "") === filterCompany)
-  }
-  if (filterRole) {
-    filteredApps = filteredApps.filter((a) => a.jobs && String(a.jobs.title || "") === filterRole)
-  }
-
-  const appIds = filteredApps.map((a) => String(a.id))
-  const jobIds = Array.from(new Set(filteredApps.map((a) => String(a.job_id))))
+  const appIds = activeApps.map((a) => String(a.id))
+  const jobIds = Array.from(new Set(activeApps.map((a) => String(a.job_id))))
   const candidateIds = Array.from(new Set(scopedApps.map((a) => String(a.candidate_id))))
 
   const [participantsPaged, statesPaged, sharesPaged, interviewsPaged] = await Promise.all([
@@ -349,7 +314,7 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  const inputs: WorkItemInput[] = filteredApps
+  const inputs: WorkItemInput[] = activeApps
     .filter((a) => a.jobs && a.candidates)
     .map((a) => ({
       application: {
@@ -452,6 +417,40 @@ export async function GET(request: NextRequest) {
     // Subtract what the viewer already sees, so the hint never double-counts.
     teamHidden = Math.max(0, teamItems.length - items.length)
   }
+
+  // ── Company / role filter metadata (from Today work items, not all apps) ──
+  // Counts reflect how many waiting items each company/role has in the Today
+  // queue — exactly what HR needs to decide where to focus.
+  const companyCounts = new Map<string, number>()
+  for (const it of items) {
+    const company = String(it.clientName || "Unnamed company")
+    companyCounts.set(company, (companyCounts.get(company) || 0) + 1)
+  }
+  const companies = Array.from(companyCounts.entries())
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+
+  // Roles within the selected company (or all companies), each with its own
+  // waiting-item count in Today.
+  const roleCounts = new Map<string, number>()
+  for (const it of items) {
+    if (filterCompany && String(it.clientName || "") !== filterCompany) continue
+    const role = it.jobTitle || "Untitled role"
+    roleCounts.set(role, (roleCounts.get(role) || 0) + 1)
+  }
+  const roles = Array.from(roleCounts.entries())
+    .map(([title, count]) => ({ title, count }))
+    .sort((a, b) => b.count - a.count || a.title.localeCompare(b.title))
+
+  // Apply the company / role filter to the Today items themselves.
+  let filteredItems = items
+  if (filterCompany) {
+    filteredItems = filteredItems.filter((it) => String(it.clientName || "") === filterCompany)
+  }
+  if (filterRole) {
+    filteredItems = filteredItems.filter((it) => it.jobTitle === filterRole)
+  }
+  items = filteredItems
 
   // ── Header stats ───────────────────────────────────────────────────────────
   const stats: DispatchStats = {
