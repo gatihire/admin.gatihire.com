@@ -22,7 +22,9 @@ import { PipelineDetailModal, type PipelineDetailData } from "./job-pipeline-det
 import { deriveCardStatus, type PipelineCardData } from "./job-pipeline-card"
 import {
   PIPELINE_COLUMNS,
+  resolveStage,
   stageLabelSafe,
+  stageNeedsConfirmation,
   type PipelineStageId,
 } from "./job-pipeline-stages"
 import { CandidateActivityTimeline } from "./candidate-activity-timeline"
@@ -37,7 +39,7 @@ import { RootCauseAnalytics } from "./root-cause-analytics"
 import {
   Loader2, User, MapPin, Briefcase, Eye, Sparkles, Mail, Phone, ChevronDown, ChevronUp,
   PhoneCall, PhoneOff, CalendarCheck, CheckCircle, CheckCheck, Check, Clock, UserX, Play, Save, Filter, MessageCircle, Send,
-  AlertCircle, RefreshCw, BrainCircuit, ShieldCheck, Upload, Download, Search, X,
+  AlertCircle, RefreshCw, BrainCircuit, ShieldCheck, Upload, Download, Search, X, Columns3, List,
 } from "lucide-react"
 import {
   AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription,
@@ -637,6 +639,10 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
     [],
   )
 
+  // A stable callback — the board memoises its cards, and a new arrow
+  // function on every render meant every card re-rendered anyway.
+  const openPipelineDetail = useCallback((id: string) => setDetailApplicationId(id), [])
+
   const changeViewMode = (mode: PipelineViewMode) => {
     setViewMode(mode)
     try {
@@ -856,9 +862,11 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
   }, [activeCallSubFilter])
 
   const handleStageChange = (appId: string, from: string, to: string, name: string) => {
-    if (["interview", "offer", "hired", "rejected"].includes(to) && from !== to) {
-      setPendingStageChange({ applicationId: appId, from, to, candidateName: name })
-    } else if (to === "shortlist" && from !== to) {
+    // One rule, from the shared stage model — not a list hardcoded here.
+    // The two lists had already drifted: the shared model wanted
+    // client_review to be confirmed, the inline list did not, so a drag
+    // into Client Review moved the candidate silently.
+    if (from !== to && stageNeedsConfirmation(to)) {
       setPendingStageChange({ applicationId: appId, from, to, candidateName: name })
     } else {
       try {
@@ -876,7 +884,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
    * a drag into Interview / Offer / Hired / Shortlist still asks the
    * recruiter to confirm, and a drag that matters is never silent.
    */
-  const handleKanbanMove = (appId: string, toStage: PipelineStageId) => {
+  const handleKanbanMove = (appId: string, toStage: PipelineStageId | "rejected") => {
     const app = applications.find((a) => a.id === appId)
     if (!app) return
     const name = (app.candidates as any)?.name || "candidate"
@@ -1008,24 +1016,23 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
    * WhatsApp thread, metrics bar, pre-screen verdict and collected info).
    * On a board it becomes a wall. The detail modal carries all of it.
    */
-  const pipelineCards = useMemo(() => {
+  const { pipelineCards, rejectedPipelineCards } = useMemo(() => {
     const out: Array<PipelineCardData & { stage: PipelineStageId }> = []
+    const rejected: Array<PipelineCardData & { stage: PipelineStageId }> = []
     for (const app of applications) {
       const c: any = app.candidates || {}
       const participant = participantDataByCandidate[app.candidate_id] || null
       const truth = participant ? getCallTruth(participant) : null
       const aiInfo = aiInfoByCandidate[app.candidate_id]
 
-      // An application whose stage is not one of the pipeline columns (a
-      // legacy value, say) still has to land somewhere visible. Applied is
-      // the honest fallback: it is where a candidate without a recognised
-      // stage belongs for review.
-      const rawStage = String(app.status || "applied")
-      const stage = (PIPELINE_COLUMNS.some((col) => col.id === rawStage)
-        ? rawStage
-        : "applied") as PipelineStageId
+      // resolveStage maps legacy names onto the current model and returns
+      // null for `rejected` — a rejected candidate is out of the pipeline,
+      // not sitting in Applied. They are collected separately below.
+      const resolved = resolveStage(String(app.status || "applied"))
+      const stage = (resolved ?? "rejected") as PipelineStageId
+      const bucket = resolved ? out : rejected
 
-      out.push({
+      bucket.push({
         applicationId: app.id,
         candidateId: app.candidate_id,
         stage,
@@ -1051,7 +1058,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
         clientDecision: clientDecisions?.[app.id] ?? null,
       } as PipelineCardData & { stage: PipelineStageId })
     }
-    return out
+    return { pipelineCards: out, rejectedPipelineCards: rejected }
   }, [
     applications,
     participantDataByCandidate,
@@ -1078,6 +1085,26 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
     })
   }, [pipelineCards, boardSearch, boardNeedsAttention, filter, applications, ATTENTION_STATUS_IDS])
 
+  /**
+   * The rejected candidates, with the SAME filters applied as the columns.
+   *
+   * They used to be passed through unfiltered, so typing a name into the
+   * board search narrowed the columns to one card while the strip below
+   * still rendered all 1,111 rejected candidates.
+   */
+  const filteredRejectedCards = useMemo(() => {
+    const q = boardSearch.trim().toLowerCase()
+    return rejectedPipelineCards.filter((card) => {
+      if (!matchesSourceFilter(card.applicationId, filter)) return false
+      if (!q) return true
+      return (
+        card.name.toLowerCase().includes(q) ||
+        card.role.toLowerCase().includes(q) ||
+        card.company.toLowerCase().includes(q)
+      )
+    })
+  }, [rejectedPipelineCards, boardSearch, filter, matchesSourceFilter])
+
   /** The candidate whose card was clicked, shaped for the detail modal. */
   const detailData: PipelineDetailData | null = useMemo(() => {
     if (!detailApplicationId) return null
@@ -1100,7 +1127,12 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
       fitScore: fitScores[app.candidate_id] ?? null,
       aiScore: ai?.score ?? null,
       aiRecommendation: ai?.recommendation ?? null,
-      stage: String(app.status || "applied"),
+      // The RESOLVED stage, not the raw status. A legacy row still on
+      // "screening" shows in the HR Review column, so the modal must say
+      // HR Review too — otherwise the "Move to Shortlist" button vanishes
+      // (nextStage("screening") is null) and the recruiter has no forward
+      // action at all.
+      stage: resolveStage(String(app.status || "applied")) ?? "rejected",
       appliedAgo: app.applied_at ? formatDistanceToNow(new Date(app.applied_at), { addSuffix: true }) : "",
       ageLabel: formatAge(stageAgeHours[app.id] ?? 0),
       clientDecision: clientDecisions?.[app.id] ?? null,
@@ -1125,9 +1157,11 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
   const interviewApps = activeStage === "interview" ? applications.filter((a) => a.status === "interview") : []
   const interviewAppCount = interviewApps.length
 
-  const toggleSelect = (id: string) => {
+  // useCallback so the memoised board cards are not re-rendered on every
+  // parent render.
+  const toggleSelect = useCallback((id: string) => {
     setSelectedIds((prev) => { const next = new Set(prev); if (next.has(id)) next.delete(id); else next.add(id); return next })
-  }
+  }, [])
 
   const selectedApplications = applications.filter((a) => selectedIds.has(a.id))
   const selectedCandidateIds = selectedApplications.map((a) => a.candidate_id)
@@ -1202,6 +1236,46 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
     } catch (err: any) {
       toast({ title: "Call was not placed", description: err.message, variant: "destructive" })
     } finally { setCallNowCandidate(null) }
+  }
+
+  /**
+   * Send the WhatsApp info request for one candidate.
+   *
+   * The card's own nudge button used the "collect info first" mode: the
+   * candidate gets a message asking for their details and the AI screen
+   * continues from there. The modal uses the same path so both entry
+   * points behave identically.
+   */
+  const nudgeCandidate = async (candidateId: string) => {
+    const participantId = participantIdByCandidate[candidateId]
+    if (!participantId) {
+      toast({ title: "No screening record", description: "This candidate has no phone-screening entry yet", variant: "destructive" })
+      return
+    }
+    setNudgeBusyCandidate(candidateId)
+    try {
+      const res = await fetch("/api/phone-screening/trigger", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jobId,
+          candidateIds: [candidateId],
+          origin: "outbound",
+          createApplication: true,
+          callMode: "collect_info_first",
+          campaignConfig: { nudgeHours: 4, escalateHours: 8, maxCallAttempts: 2 },
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || "Failed to send WhatsApp")
+      toast({ title: "WhatsApp sent", description: "The candidate has been asked for their details." })
+      fetchParticipants()
+      onRefresh()
+    } catch (err: any) {
+      toast({ title: "WhatsApp was not sent", description: err.message, variant: "destructive" })
+    } finally {
+      setNudgeBusyCandidate(null)
+    }
   }
 
   // Re-poll the telephony provider for one participant so HR sees the real
@@ -1373,21 +1447,64 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
               Clear
             </button>
           )}
+
+          {/* ── View switch + refresh ──────────────────────────────────────
+              These live here, not inside the board, so they are visible in
+              BOTH views. When the toggle lived inside the board component,
+              switching to List unmounted the board — and with it the only
+              way back to the board. Clicking "List" was a one-way door. */}
+          <div className="ml-auto flex items-center gap-2">
+            <div className="flex items-center rounded-lg border border-zinc-200 bg-white p-0.5 dark:border-zinc-700 dark:bg-zinc-900">
+              <button
+                type="button"
+                onClick={() => changeViewMode("board")}
+                aria-pressed={viewMode === "board"}
+                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                  viewMode === "board"
+                    ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                    : "text-zinc-600 hover:bg-zinc-50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                }`}
+              >
+                <Columns3 className="h-3.5 w-3.5" />
+                Board
+              </button>
+              <button
+                type="button"
+                onClick={() => changeViewMode("list")}
+                aria-pressed={viewMode === "list"}
+                className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors ${
+                  viewMode === "list"
+                    ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                    : "text-zinc-600 hover:bg-zinc-50 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                }`}
+              >
+                <List className="h-3.5 w-3.5" />
+                List
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={handleRefresh}
+              disabled={refreshing}
+              aria-label="Refresh candidates and call status"
+              className="flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
+              <span className="hidden sm:inline">Refresh</span>
+            </button>
+          </div>
         </div>
 
         {/* ── Board mode: the kanban ───────────────────────────────────── */}
         {viewMode === "board" && (
           <PipelineKanban
             cards={filteredPipelineCards as any}
-            viewMode={viewMode}
-            onViewModeChange={changeViewMode}
-            onOpen={(id) => setDetailApplicationId(id)}
-            onToggleSelect={(id) => toggleSelect(id)}
+            onOpen={openPipelineDetail}
+            onToggleSelect={toggleSelect}
             onMoveStage={handleKanbanMove}
             selectedIds={selectedIds}
-            onRefresh={handleRefresh}
-            refreshing={refreshing}
             focusStage={activeStage !== "all" ? activeStage : null}
+            rejectedCards={filteredRejectedCards as any}
             emptyState={
               <div className="py-12 text-center text-sm text-zinc-400">
                 <User className="mx-auto mb-2 h-8 w-8 text-zinc-300" />
@@ -1923,12 +2040,15 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
           onCallNow={() => {
             const app = applications.find((a) => a.id === detailApplicationId)
             if (!app) return
-            setCallNowCandidate(app.candidate_id)
+            // The real handler — setting the busy flag on its own placed no
+            // call, left the candidate permanently "busy", and made the
+            // button look broken.
+            void callCandidateNow(app.candidate_id)
           }}
           onNudge={() => {
             const app = applications.find((a) => a.id === detailApplicationId)
             if (!app) return
-            setCallNowCandidate(app.candidate_id)
+            void nudgeCandidate(app.candidate_id)
           }}
           onViewResults={() => {
             const app = applications.find((a) => a.id === detailApplicationId)

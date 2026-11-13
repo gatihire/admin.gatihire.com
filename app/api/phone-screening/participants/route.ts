@@ -31,16 +31,39 @@ export async function GET(request: NextRequest) {
   // `transcript_raw` is ~5–20 KB per participant and the pipeline only ever
   // checks whether call data exists. Selecting it made every job page read the
   // whole transcript history from TOAST. Same for call_payload_json/cost_breakdown.
+  //
+  // The pipeline projection.
+  //
+  // These columns MUST stay in step with the projection in
+  // app/api/jobs/[id]/pipeline/route.ts. The pipeline page loads the rich
+  // rows from the pipeline route, then polls THIS endpoint and replaces them
+  // with whatever comes back here — so if this list is missing a column, the
+  // page silently loses that signal a few seconds after it loads.
+  //
+  // It used to be missing: call_attempts, call_voicemail, call_duration_seconds,
+  // call_hangup_reason, call_disconnect_reason, last_attempt_at,
+  // max_call_attempts and needs_manual_followup. The visible effect was a
+  // voicemail call showing as "Screened 8/10", a no-answer showing
+  // "attempt 0 of 2", and rows needing a human dropping out of the
+  // "needs attention" filter.
+  //
   const PIPELINE_COLUMNS = `
       id, campaign_id, job_id, candidate_id, status, origin, bolna_status,
       bolna_execution_id, retry_count, next_retry_at, scheduled_call_at,
-      call_ended_at, recording_url, call_is_partial, ai_score, ai_recommendation,
+      call_started_at, call_ended_at, call_attempts, max_call_attempts,
+      call_duration_seconds, call_is_partial, call_voicemail,
+      call_hangup_reason, call_disconnect_reason, hangup_by, last_attempt_at,
+      carrier, ring_duration,
+      recording_url, ai_score, ai_summary, ai_recommendation,
       ai_suggests_rejection, ai_suggests_rejection_at,
       classification_outcome, clarification_asked_at, clarification_answered_at,
       clarification_question, generated_questions, info_data, info_sources,
-      info_request_sent_at, info_received_at, review_status,
+      info_request_sent_at, info_received_at, review_status, review_note,
+      needs_manual_followup, prescreen_decision, prescreen_reason,
+      callback_preference,
       verdict_json, screening_context, whatsapp_history,
       whatsapp_delivery_status, whatsapp_reply_text, whatsapp_response, whatsapp_sent_at,
+      whatsapp_message_id, info_step, info_confirmed,
       created_at, updated_at,
       candidates: candidate_id (id, name, email, phone, current_role, current_company, total_experience, location, technical_skills),
       jobs:job_id (id, title, client_name, city, location, salary_min, salary_max, salary_type, experience_min_years, experience_max_years, skills_must_have)

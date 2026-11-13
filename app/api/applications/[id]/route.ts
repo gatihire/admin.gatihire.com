@@ -87,9 +87,15 @@ export async function PUT(request: NextRequest, props: { params: Promise<{ id: s
       }
     }
 
-    // Log stage changed event if status actually changed
+    // Log stage changed event if status actually changed.
+    //
+    // AWAITED on purpose. It used to be fire-and-forget, so the activity row
+    // could land AFTER the response — and the pipeline derives "how long has
+    // this candidate been in this stage" from exactly these rows. A drop
+    // that landed on the board showed the age the candidate had accumulated
+    // in their PREVIOUS stage, and stayed wrong until a full refetch.
     if (status && currentApp.status !== status) {
-      logCandidateActivity({
+      await logCandidateActivity({
         jobId: currentApp.job_id,
         candidateId: currentApp.candidate_id,
         applicationId: id,

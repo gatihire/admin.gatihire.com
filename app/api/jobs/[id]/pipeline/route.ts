@@ -41,23 +41,32 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       // row of transcript text that the card never shows and the results
       // sheet fetches separately anyway. On a busy job that was hundreds of
       // MB over the wire for a list view.
+      //
+      // It MUST match the `fields=pipeline` projection in
+      // app/api/phone-screening/participants/route.ts. The pipeline page
+      // polls that endpoint and replaces these rows with whatever comes
+      // back, so a column missing from either list is a signal the page
+      // loses a few seconds after it loads.
       supabaseAdmin
         .from("phone_screening_participants")
         .select(`
-          id, candidate_id, job_id, status, bolna_status, bolna_execution_id,
-          call_attempts, retry_count, next_retry_at, last_attempt_at,
-          call_started_at, call_ended_at, call_duration_seconds, call_is_partial,
-          call_voicemail, call_hangup_reason, call_disconnect_reason,
-          scheduled_call_at, classification_outcome, verdict_json,
-          whatsapp_message_id, whatsapp_sent_at, whatsapp_delivery_status,
-          whatsapp_response, whatsapp_reply_text, whatsapp_reply_at,
-          whatsapp_history, info_request_sent_at, info_received_at,
-          info_data, info_sources, info_step, info_confirmed,
-          ai_score, ai_summary, ai_recommendation, ai_suggests_rejection,
-          prescreen_decision, prescreen_reason, review_status, review_note,
-          needs_manual_followup, clarification_question, clarification_asked_at,
-          clarification_answered_at, screening_context, generated_questions,
-          callback_preference, recording_url, created_at, updated_at,
+          id, campaign_id, job_id, candidate_id, status, origin, bolna_status,
+          bolna_execution_id, retry_count, next_retry_at, scheduled_call_at,
+          call_started_at, call_ended_at, call_attempts, max_call_attempts,
+          call_duration_seconds, call_is_partial, call_voicemail,
+          call_hangup_reason, call_disconnect_reason, hangup_by, last_attempt_at,
+          carrier, ring_duration,
+          recording_url, ai_score, ai_summary, ai_recommendation,
+          ai_suggests_rejection, ai_suggests_rejection_at,
+          classification_outcome, clarification_asked_at, clarification_answered_at,
+          clarification_question, generated_questions, info_data, info_sources,
+          info_request_sent_at, info_received_at, review_status, review_note,
+          needs_manual_followup, prescreen_decision, prescreen_reason,
+          callback_preference,
+          verdict_json, screening_context, whatsapp_history,
+          whatsapp_delivery_status, whatsapp_reply_text, whatsapp_response, whatsapp_sent_at,
+          whatsapp_message_id, info_step, info_confirmed,
+          created_at, updated_at,
           candidates: candidate_id (id, name, email, phone, current_role, current_company, total_experience, location, technical_skills)
         `)
         .eq("job_id", jobId)
@@ -129,13 +138,16 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     // entered the stage they are in NOW. If we have no such event, fall
     // back to applied_at.
     const stageEnteredAt: Record<string, string> = {}
+    // A Map, not applications.find() inside the loop. That was a nested
+    // scan — O(applications x activity rows) on every pipeline load.
+    const appById = new Map(applications.map((a) => [a.id as string, a]))
     for (const ev of activityRes.data || []) {
       const appId = (ev as any)?.application_id
       if (!appId) continue
       if (stageEnteredAt[appId]) continue
       // Ignore an event that moved them to a stage they are no longer in.
       const to = (ev as any)?.event_data?.to
-      const app = applications.find((a) => a.id === appId)
+      const app = appById.get(appId)
       if (to && app && app.status && to !== app.status) continue
       stageEnteredAt[appId] = (ev as any).created_at
     }

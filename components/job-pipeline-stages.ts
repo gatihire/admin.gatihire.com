@@ -125,8 +125,42 @@ export const COLUMN_BY_ID: Record<string, PipelineColumn> = Object.fromEntries(
 /** Stages that are shown as columns when the recruiter expands "history". */
 export const TERMINAL_STAGE_IDS = ["rejected"]
 
-/** Every stage an application can be moved to from the stage menu. */
-export const ALL_STAGE_IDS = [...PIPELINE_COLUMNS.map((c) => c.id), ...TERMINAL_STAGE_IDS]
+/**
+ * Legacy stage names, mapped onto the current model.
+ *
+ * The pipeline used to have different names for the same step. A migration
+ * renamed them (`phone_call` -> `ai_screen`, `screening`/`human_review` ->
+ * `hr_review`) but the old values are still sitting in the applications
+ * table — 13 rows are still on `screening` today. Left unmapped they fell
+ * through to the default column, which put a candidate who had already
+ * been screened back in with the new applications.
+ */
+export const LEGACY_STAGE_ALIASES: Record<string, PipelineStageId> = {
+  phone_call: "ai_screen",
+  screening: "hr_review",
+  human_review: "hr_review",
+  hold: "hr_review",
+  in_pipeline: "applied",
+  pipeline: "applied",
+  new: "applied",
+}
+
+/**
+ * The stage a raw application status maps onto.
+ *
+ * Returns null for `rejected` — a rejected candidate is not "somewhere in
+ * the pipeline", they are out of it. The board keeps them in a collapsed
+ * history section instead of dumping 1,111 of them into Applied.
+ */
+export function resolveStage(rawStatus: string): PipelineStageId | null {
+  const s = String(rawStatus || "").trim()
+  if (!s) return "applied"
+  if (s === "rejected") return null
+  if (PIPELINE_COLUMNS.some((c) => c.id === s)) return s as PipelineStageId
+  const alias = LEGACY_STAGE_ALIASES[s]
+  if (alias) return alias
+  return "applied"
+}
 
 export function stageLabelSafe(status: string): string {
   const col = COLUMN_BY_ID[status]
@@ -147,13 +181,6 @@ export function nextStage(stage: string): PipelineStageId | null {
   if (idx === -1) return null
   if (idx === PIPELINE_COLUMNS.length - 1) return null
   return PIPELINE_COLUMNS[idx + 1].id
-}
-
-/** The stage before — used for "move back". */
-export function prevStage(stage: string): PipelineStageId | null {
-  const idx = PIPELINE_COLUMNS.findIndex((c) => c.id === stage)
-  if (idx <= 0) return null
-  return PIPELINE_COLUMNS[idx - 1].id
 }
 
 /**

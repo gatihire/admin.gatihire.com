@@ -83,26 +83,63 @@ function fitTone(score: number): string {
   return "bg-zinc-500/10 text-zinc-600 dark:text-zinc-300"
 }
 
+/**
+ * A comparator that compares the FIELDS, not the object identity.
+ *
+ * The board builds a fresh `data` object on every render (it merges the
+ * selection flag in), so the default shallow compare always missed and
+ * `memo` never actually saved anything. On the biggest job there are 300+
+ * cards, and each one was re-rendering on every participant poll and every
+ * frame of a drag.
+ */
+function cardPropsEqual(
+  prev: { data: PipelineCardData; onOpen: (id: string) => void; onToggleSelect?: (id: string) => void; draggable?: boolean },
+  next: { data: PipelineCardData; onOpen: (id: string) => void; onToggleSelect?: (id: string) => void; draggable?: boolean },
+) {
+  if (prev.onOpen !== next.onOpen) return false
+  if (prev.onToggleSelect !== next.onToggleSelect) return false
+  if (prev.draggable !== next.draggable) return false
+  const a = prev.data
+  const b = next.data
+  return (
+    a.applicationId === b.applicationId &&
+    a.name === b.name &&
+    a.role === b.role &&
+    a.company === b.company &&
+    a.fitScore === b.fitScore &&
+    a.ageLabel === b.ageLabel &&
+    a.selected === b.selected &&
+    a.isNew === b.isNew &&
+    a.clientDecision === b.clientDecision &&
+    a.status.id === b.status.id &&
+    a.status.label === b.status.label &&
+    a.status.tone === b.status.tone
+  )
+}
+
 export const PipelineCard = memo(function PipelineCard({
   data,
   onOpen,
   onToggleSelect,
-  dragging,
+  draggable = true,
 }: {
   data: PipelineCardData
   onOpen: (applicationId: string) => void
   onToggleSelect?: (applicationId: string) => void
-  dragging?: boolean
+  /** Some cards (rejected history) must not be draggable. */
+  draggable?: boolean
 }) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: data.applicationId,
     data: { applicationId: data.applicationId, candidateId: data.candidateId },
-    disabled: dragging,
+    disabled: !draggable,
   })
 
-  const style = transform
-    ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
-    : undefined
+  // No transform on the source card: the DragOverlay is what follows the
+  // cursor. Applying the transform here as well meant the recruiter saw
+  // TWO cards — the real one translated to the pointer and the overlay on
+  // top of it.
+  const style: React.CSSProperties | undefined = undefined
 
   const initials = (data.name || "?").trim().slice(0, 2).toUpperCase()
 
@@ -112,7 +149,7 @@ export const PipelineCard = memo(function PipelineCard({
       style={style}
       className={`group relative rounded-xl border bg-white p-2.5 text-left shadow-sm transition-shadow dark:bg-zinc-900 ${
         isDragging
-          ? "z-50 opacity-90 shadow-xl ring-2 ring-blue-400"
+          ? "opacity-30"
           : "border-zinc-200 hover:border-zinc-300 hover:shadow dark:border-zinc-800 dark:hover:border-zinc-700"
       }`}
     >
@@ -190,22 +227,24 @@ export const PipelineCard = memo(function PipelineCard({
       </div>
 
       {/* Drag handle — a small grip in the corner, so the card body stays clickable. */}
-      <button
-        type="button"
-        {...listeners}
-        {...attributes}
-        aria-label={`Drag ${data.name} to another stage`}
-        className="absolute right-1 top-1 cursor-grab rounded p-0.5 text-zinc-300 opacity-0 transition-opacity hover:text-zinc-500 focus:opacity-100 group-hover:opacity-100 active:cursor-grabbing dark:text-zinc-700 dark:hover:text-zinc-500"
-      >
-        <svg width="10" height="10" viewBox="0 0 10 10" className="fill-current">
-          <circle cx="3" cy="2" r="1.2" /><circle cx="7" cy="2" r="1.2" />
-          <circle cx="3" cy="5" r="1.2" /><circle cx="7" cy="5" r="1.2" />
-          <circle cx="3" cy="8" r="1.2" /><circle cx="7" cy="8" r="1.2" />
-        </svg>
-      </button>
+      {draggable && (
+        <button
+          type="button"
+          {...listeners}
+          {...attributes}
+          aria-label={`Drag ${data.name} to another stage`}
+          className="absolute right-1 top-1 cursor-grab rounded p-0.5 text-zinc-300 opacity-0 transition-opacity hover:text-zinc-500 focus:opacity-100 group-hover:opacity-100 active:cursor-grabbing dark:text-zinc-700 dark:hover:text-zinc-500"
+        >
+          <svg width="10" height="10" viewBox="0 0 10 10" className="fill-current">
+            <circle cx="3" cy="2" r="1.2" /><circle cx="7" cy="2" r="1.2" />
+            <circle cx="3" cy="5" r="1.2" /><circle cx="7" cy="5" r="1.2" />
+            <circle cx="3" cy="8" r="1.2" /><circle cx="7" cy="8" r="1.2" />
+          </svg>
+        </button>
+      )}
     </div>
   )
-})
+}, cardPropsEqual)
 
 /**
  * Derive the single most important status for a candidate.
@@ -239,6 +278,16 @@ export function deriveCardStatus(args: {
   }
 
   if (callTruth) {
+    // A row the AI flagged for a human comes back from getCallTruth with
+    // state "not_placed" but bucket "review" — the call genuinely has not
+    // been placed, but the reason it has not been placed is that a PERSON
+    // has to look at it. Labelling that "No call yet" (a neutral grey pill)
+    // buried the highest-priority rows on the board under the least
+    // interesting ones. The bucket is the signal, not the state.
+    if (callTruth.bucket === "review") {
+      return { id: "needs_review", label: "Needs decision", tone: "warn", icon: "alert" }
+    }
+
     switch (callTruth.state) {
       case "our_side_failed":
         return { id: "call_failed", label: "Call failed — retry", tone: "bad", icon: "alert" }
@@ -259,6 +308,10 @@ export function deriveCardStatus(args: {
       case "retry_pending":
         return { id: "retry", label: "Retry booked", tone: "info", icon: "clock" }
       case "needs_review":
+        // getCallTruth does not currently emit this state (it reports
+        // review rows as not_placed + bucket "review", handled above), but
+        // it is in the type union, so it is handled rather than falling
+        // through.
         return { id: "needs_review", label: "Needs decision", tone: "warn", icon: "alert" }
       case "completed":
         if (aiRecommendation === "not_a_fit") {

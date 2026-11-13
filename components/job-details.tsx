@@ -263,6 +263,10 @@ export function JobDetails({ job, onBack, initialTab, initialStage, initialCallS
 
   const updateStatus = useCallback(async (applicationId: string, newStatus: string, rejectionReason?: string) => {
     setApplications((prev) => prev.map((app) => app.id === applicationId ? { ...app, status: newStatus } : app))
+    // Reset the clock on the stage timer. Without this a candidate dragged
+    // from Applied to Offer kept showing the age they had accumulated in
+    // Applied — the card moved, the number did not.
+    setStageEnteredAt((prev) => ({ ...prev, [applicationId]: new Date().toISOString() }))
     try {
       const res = await fetch(`/api/applications/${applicationId}`, {
         method: "PUT",
