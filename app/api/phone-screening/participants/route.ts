@@ -34,29 +34,22 @@ export async function GET(request: NextRequest) {
   //
   // The pipeline projection.
   //
-  // These columns MUST stay in step with the projection in
-  // app/api/jobs/[id]/pipeline/route.ts. The pipeline page loads the rich
-  // rows from the pipeline route, then polls THIS endpoint and replaces them
-  // with whatever comes back here — so if this list is missing a column, the
-  // page silently loses that signal a few seconds after it loads.
-  //
-  // It used to be missing: call_attempts, call_voicemail, call_duration_seconds,
-  // call_hangup_reason, call_disconnect_reason, last_attempt_at,
-  // max_call_attempts and needs_manual_followup. The visible effect was a
-  // voicemail call showing as "Screened 8/10", a no-answer showing
-  // "attempt 0 of 2", and rows needing a human dropping out of the
-  // "needs attention" filter.
-  //
+  // DO NOT add a column without verifying it exists on the table first —
+  // PostgREST rejects the WHOLE query when one selected column does not
+  // exist, so a single bad name silently emptied the entire calls pane on
+  // every job. (`max_call_attempts` lives on phone_screening_campaigns, and
+  // `classification_outcome` is stored inside verdict_json as
+  // `_classification_outcome`; neither exists on this table.)
   const PIPELINE_COLUMNS = `
       id, campaign_id, job_id, candidate_id, status, origin, bolna_status,
       bolna_execution_id, retry_count, next_retry_at, scheduled_call_at,
-      call_started_at, call_ended_at, call_attempts, max_call_attempts,
+      call_started_at, call_ended_at, call_attempts,
       call_duration_seconds, call_is_partial, call_voicemail,
       call_hangup_reason, call_disconnect_reason, hangup_by, last_attempt_at,
       carrier, ring_duration,
       recording_url, ai_score, ai_summary, ai_recommendation,
       ai_suggests_rejection, ai_suggests_rejection_at,
-      classification_outcome, clarification_asked_at, clarification_answered_at,
+      clarification_asked_at, clarification_answered_at,
       clarification_question, generated_questions, info_data, info_sources,
       info_request_sent_at, info_received_at, review_status, review_note,
       needs_manual_followup, prescreen_decision, prescreen_reason,

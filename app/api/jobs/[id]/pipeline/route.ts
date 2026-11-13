@@ -38,27 +38,36 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       // NOTE: the participant projection below is EXPLICIT, not `select(*)`.
       // `select(*)` pulled `transcript_raw`, `call_payload_json` and
       // `cost_breakdown` for every participant on the job — tens of KB per
-      // row of transcript text that the card never shows and the results
-      // sheet fetches separately anyway. On a busy job that was hundreds of
-      // MB over the wire for a list view.
+      // row of transcript text that the card never shows and the sidebar
+      // sheet fetches separately anyway.
       //
       // It MUST match the `fields=pipeline` projection in
       // app/api/phone-screening/participants/route.ts. The pipeline page
-      // polls that endpoint and replaces these rows with whatever comes
-      // back, so a column missing from either list is a signal the page
-      // loses a few seconds after it loads.
+      // loads the rich rows from this route, then polls THAT endpoint and
+      // replaces them with whatever comes back here — so a column missing
+      // from either list is a signal the page loses a few seconds after it
+      // loads.
+      //
+      // IMPORTANT: do NOT add columns here without checking they exist on
+      // the phone_screening_participants table. PostgREST rejects the WHOLE
+      // request if one selected column does not exist, and the route cannot
+      // surface that (see below) — the user sees an empty calls pane with
+      // no error. `max_call_attempts` lives on phone_screening_campaigns
+      // (read via campaignId -> campaigns), and `classification_outcome` is
+      // persisted inside verdict_json (`_classification_outcome`) because
+      // the column was never added to this table.
       supabaseAdmin
         .from("phone_screening_participants")
         .select(`
           id, campaign_id, job_id, candidate_id, status, origin, bolna_status,
           bolna_execution_id, retry_count, next_retry_at, scheduled_call_at,
-          call_started_at, call_ended_at, call_attempts, max_call_attempts,
+          call_started_at, call_ended_at, call_attempts,
           call_duration_seconds, call_is_partial, call_voicemail,
           call_hangup_reason, call_disconnect_reason, hangup_by, last_attempt_at,
           carrier, ring_duration,
           recording_url, ai_score, ai_summary, ai_recommendation,
           ai_suggests_rejection, ai_suggests_rejection_at,
-          classification_outcome, clarification_asked_at, clarification_answered_at,
+          clarification_asked_at, clarification_answered_at,
           clarification_question, generated_questions, info_data, info_sources,
           info_request_sent_at, info_received_at, review_status, review_note,
           needs_manual_followup, prescreen_decision, prescreen_reason,
@@ -100,6 +109,17 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
     if (applicationsRes.error) {
       return NextResponse.json({ error: applicationsRes.error.message }, { status: 500 })
+    }
+
+    // Before this existed, a failed participants query (e.g. one bad column in
+    // the projection) returned `""` here, produced `participants: {}`, and the
+    // pipeline rendered every candidate as "not yet contacted" with no error
+    // anywhere — so HR saw a fully empty calls pane and couldn't tell whether
+    // it was filters, data, or the route. Fail loudly instead; the page shows
+    // a toast with the message.
+    if (participantsRes.error) {
+      console.error("[pipeline] participants query failed:", participantsRes.error.message)
+      return NextResponse.json({ error: `Screening data failed: ${participantsRes.error.message}` }, { status: 500 })
     }
 
     const applications = applicationsRes.data || []
