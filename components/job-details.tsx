@@ -152,6 +152,9 @@ export function JobDetails({ job, onBack, initialTab, initialStage, initialCallS
   }, [job.id])
   const [uploadOpen, setUploadOpen] = useState(false)
   const [clientDecisions, setClientDecisions] = useState<Record<string, string | null>>({})
+  // When each candidate entered their current stage — so the board can say
+  // "3 days in Shortlist" instead of "3 days since they applied".
+  const [stageEnteredAt, setStageEnteredAt] = useState<Record<string, string>>({})
   const [sourcingView, setSourcingView] = useState<"db_matches" | "juicebox">("db_matches")
   const [missingFitCount, setMissingFitCount] = useState(0)
   const [backfillRunning, setBackfillRunning] = useState(false)
@@ -207,6 +210,7 @@ export function JobDetails({ job, onBack, initialTab, initialStage, initialCallS
         setParticipants(data.participants || {})
         setFitScores(data.fitScores || {})
         setClientDecisions(data.clientDecisions || {})
+        setStageEnteredAt(data.stageEnteredAt || {})
         const missing = data.missingFitCount || 0
         setMissingFitCount(missing)
         if (missing > 0 && !backfillRunning) {
@@ -299,6 +303,8 @@ export function JobDetails({ job, onBack, initialTab, initialStage, initialCallS
             onStageChange={updateStatus}
             onApplicationUpdated={updateApplication}
             onViewProfile={handleViewProfile}
+            onOpenFullProfile={handleViewProfile}
+            stageEnteredAt={stageEnteredAt}
             onRefresh={() => fetchPipeline({ force: true })}
           />
         )

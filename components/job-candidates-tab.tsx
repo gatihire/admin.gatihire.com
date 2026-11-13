@@ -17,6 +17,14 @@ import {
 } from "@/components/ui/tooltip"
 import { PhoneScreeningResultsSheet } from "./phone-screening-results-sheet"
 import { PrescreenReviewModal, type ReviewCandidate } from "./prescreen-review-modal"
+import { PipelineKanban, type PipelineViewMode } from "./job-pipeline-kanban"
+import { PipelineDetailModal, type PipelineDetailData } from "./job-pipeline-detail-modal"
+import { deriveCardStatus, type PipelineCardData } from "./job-pipeline-card"
+import {
+  PIPELINE_COLUMNS,
+  stageLabelSafe,
+  type PipelineStageId,
+} from "./job-pipeline-stages"
 import { CandidateActivityTimeline } from "./candidate-activity-timeline"
 import { CandidateTimeline } from "./candidate-timeline"
 import { CandidateMetricsBar } from "./candidate-metrics-bar"
@@ -24,11 +32,12 @@ import { CollectedInfoView, PreScreenVerdict } from "./candidate-collected-info"
 import { supabase } from "@/lib/supabase"
 import { WhatsAppThreadTimeline } from "./whatsapp-thread-timeline"
 import { getCallTruth, CALL_TRUTH_FILTERS } from "@/lib/call-truth"
+import { formatAge } from "@/lib/dispatch/engine"
 import { RootCauseAnalytics } from "./root-cause-analytics"
 import {
   Loader2, User, MapPin, Briefcase, Eye, Sparkles, Mail, Phone, ChevronDown, ChevronUp,
   PhoneCall, PhoneOff, CalendarCheck, CheckCircle, CheckCheck, Check, Clock, UserX, Play, Save, Filter, MessageCircle, Send,
-  AlertCircle, RefreshCw, BrainCircuit, ShieldCheck, Upload, Download,
+  AlertCircle, RefreshCw, BrainCircuit, ShieldCheck, Upload, Download, Search, X,
 } from "lucide-react"
 import {
   AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription,
@@ -129,6 +138,14 @@ export interface CandidatesTabProps {
   onViewProfile: (candidate: any, application?: Application, participant?: any, aiInfo?: { recommendation?: string; score?: number }, fitScore?: number | null) => void
   onViewResults?: (candidateId: string) => void
   onRefresh: () => void
+  /**
+   * When each candidate entered their current stage, keyed by application id.
+   * Without it the kanban can only say "applied 3 days ago", which says
+   * nothing about how long they have been STUCK where they are.
+   */
+  stageEnteredAt?: Record<string, string>
+  /** Open the full profile sidebar. */
+  onOpenFullProfile?: (candidate: any, application?: Application, participant?: any, aiInfo?: { recommendation?: string; score?: number }, fitScore?: number | null) => void
 }
 
 const STATUS_COLUMNS = [
@@ -520,7 +537,7 @@ function formatElapsedSince(pastIso: string): string {
   return days === 1 ? "yesterday" : `${days} days ago`
 }
 
-export function CandidatesTab({ jobId, applications, loading, activeStage, activeCallSubFilter, clientDecisions, participants: participantsProp, fitScores: fitScoresProp, missingFitCount = 0, backfillRunning = false, pipelinePage = 1, pipelinePerPage = 100, pipelineTotal, onPipelinePageChange, onStageSelect, onCallSubFilterChange, onStageChange, onApplicationUpdated, onViewProfile, onRefresh }: CandidatesTabProps) {
+export function CandidatesTab({ jobId, applications, loading, activeStage, activeCallSubFilter, clientDecisions, participants: participantsProp, fitScores: fitScoresProp, missingFitCount = 0, backfillRunning = false, pipelinePage = 1, pipelinePerPage = 100, pipelineTotal, onPipelinePageChange, onStageSelect, onCallSubFilterChange, onStageChange, onApplicationUpdated, onViewProfile, onRefresh, stageEnteredAt, onOpenFullProfile }: CandidatesTabProps) {
   const { toast } = useToast()
   const [pendingStageChange, setPendingStageChange] = useState<{
     applicationId: string; from: string; to: string; candidateName: string
@@ -554,6 +571,70 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
 
   // Viewed candidates (local only)
   const [viewedCandidates, setViewedCandidates] = useState<Set<string>>(new Set())
+
+  // ── Pipeline board ──────────────────────────────────────────────────────
+  //
+  // The board is the DEFAULT view. The old default was a vertical list of
+  // very tall cards filtered by a row of stage chips — to answer "how many
+  // people are at each stage" you had to click through seven chips one at a
+  // time. A kanban shows the shape of the pipeline at a glance.
+  //
+  // The board is the default, but the list is kept: some recruiters scan
+  // left-to-right down one column and genuinely prefer a list. Their choice
+  // is remembered per browser.
+  const [viewMode, setViewMode] = useState<PipelineViewMode>(() => {
+    if (typeof window === "undefined") return "board"
+    try {
+      return window.localStorage.getItem("gatihire.pipeline.view") === "list" ? "list" : "board"
+    } catch {
+      return "board"
+    }
+  })
+  const [detailApplicationId, setDetailApplicationId] = useState<string | null>(null)
+  const [detailBusy, setDetailBusy] = useState(false)
+
+  // ── The one filter bar ─────────────────────────────────────────────────
+  //
+  // The old page had EIGHT filter dimensions across four stacked bars:
+  // stage chips, inbound/outbound tabs, a source dropdown, 11 call-truth
+  // chips, an interview round picker, 7 interview sub-section chips, a
+  // bulk-stage dropdown and a bulk-nudge toggle. Up to four of them were
+  // visible at once, and two of them (the call-truth chips and the interview
+  // chips) shared ONE state variable — so switching between the AI Screen
+  // and Interview stages carried a stale filter id across.
+  //
+  // The board needs three things and no more:
+  //   - a way to find one person (search)
+  //   - a way to split sourced vs applied (origin)
+  //   - a way to surface "who needs me right now" (needs attention)
+  //
+  // Everything else is either visible on the card or lives in the modal.
+  const [boardSearch, setBoardSearch] = useState("")
+  const [boardOrigin, setBoardOrigin] = useState<"all" | "inbound" | "outbound">("all")
+  const [boardNeedsAttention, setBoardNeedsAttention] = useState(false)
+
+  /** Statuses that mean "this candidate is waiting on a human". */
+  const ATTENTION_STATUS_IDS = useMemo(
+    () => new Set([
+      "call_failed",
+      "call_partial",
+      "no_answer",
+      "not_placed",
+      "needs_review",
+      "client_pending",
+      "no_screening",
+    ]),
+    [],
+  )
+
+  const changeViewMode = (mode: PipelineViewMode) => {
+    setViewMode(mode)
+    try {
+      window.localStorage.setItem("gatihire.pipeline.view", mode)
+    } catch {
+      // Private browsing — the preference just will not stick.
+    }
+  }
 
   // Compute derived maps from participants prop (single source of truth)
   const [participantsLocal, setParticipantsLocal] = useState<Record<string, any> | null>(null)
@@ -778,6 +859,20 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
     }
   }
 
+  /**
+   * Move a candidate by dropping their card on another column.
+   *
+   * It goes through the SAME confirmation path as the old stage dropdown, so
+   * a drag into Interview / Offer / Hired / Shortlist still asks the
+   * recruiter to confirm, and a drag that matters is never silent.
+   */
+  const handleKanbanMove = (appId: string, toStage: PipelineStageId) => {
+    const app = applications.find((a) => a.id === appId)
+    if (!app) return
+    const name = (app.candidates as any)?.name || "candidate"
+    handleStageChange(appId, String(app.status || "applied"), toStage, name)
+  }
+
   const confirmStageChange = () => {
     if (!pendingStageChange) return
     onStageChange(pendingStageChange.applicationId, pendingStageChange.to, pendingStageChange.to === "rejected" ? rejectionReason : undefined)
@@ -837,6 +932,151 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
       if (scoreB !== scoreA) return scoreB - scoreA
       return new Date(b.applied_at).getTime() - new Date(a.applied_at).getTime()
     })
+
+  /**
+   * How long a candidate has been sitting in their current stage.
+   *
+   * `applied_at` is NOT this. A candidate who applied three weeks ago and
+   * moved to Shortlist yesterday has been in Shortlist for ONE day, and
+   * showing "3 weeks" there made every column look equally stale. The
+   * stage_entered_at map comes from the candidate_activity stage_changed
+   * events, so it is the real waiting time.
+   */
+  const stageAgeHours = useMemo(() => {
+    const out: Record<string, number> = {}
+    const now = Date.now()
+    for (const app of applications) {
+      const enteredAt = stageEnteredAt?.[app.id] || app.applied_at
+      if (!enteredAt) {
+        out[app.id] = 0
+        continue
+      }
+      const ms = now - new Date(enteredAt).getTime()
+      out[app.id] = Number.isFinite(ms) ? Math.max(0, Math.round(ms / 3_600_000)) : 0
+    }
+    return out
+  }, [applications, stageEnteredAt])
+
+  /**
+   * The kanban's view of the pipeline: one compact card per candidate.
+   *
+   * This deliberately does NOT reuse the big CandidateCard. That card
+   * renders 12-20 lines (fit score twice, call state three times, plus the
+   * WhatsApp thread, metrics bar, pre-screen verdict and collected info).
+   * On a board it becomes a wall. The detail modal carries all of it.
+   */
+  const pipelineCards = useMemo(() => {
+    const out: Array<PipelineCardData & { stage: PipelineStageId }> = []
+    for (const app of applications) {
+      const c: any = app.candidates || {}
+      const participant = participantDataByCandidate[app.candidate_id] || null
+      const truth = participant ? getCallTruth(participant) : null
+      const aiInfo = aiInfoByCandidate[app.candidate_id]
+
+      // An application whose stage is not one of the pipeline columns (a
+      // legacy value, say) still has to land somewhere visible. Applied is
+      // the honest fallback: it is where a candidate without a recognised
+      // stage belongs for review.
+      const rawStage = String(app.status || "applied")
+      const stage = (PIPELINE_COLUMNS.some((col) => col.id === rawStage)
+        ? rawStage
+        : "applied") as PipelineStageId
+
+      out.push({
+        applicationId: app.id,
+        candidateId: app.candidate_id,
+        stage,
+        name: c.name || "Unnamed candidate",
+        role: c.current_role || "",
+        company: c.current_company || "",
+        location: c.location || "",
+        experience: c.total_experience || "",
+        fitScore: fitScores[app.candidate_id] ?? null,
+        status: deriveCardStatus({
+          clientDecision: clientDecisions?.[app.id] ?? null,
+          callTruth: truth,
+          aiRecommendation: aiInfo?.recommendation ?? null,
+          aiScore: aiInfo?.score ?? null,
+          hasParticipant: !!participant,
+        }),
+        ageLabel: formatAge(stageAgeHours[app.id] ?? 0),
+        selected: selectedIds.has(app.id),
+        isNew:
+          app.status === "applied" &&
+          !participant &&
+          !viewedCandidates.has(app.candidate_id),
+        clientDecision: clientDecisions?.[app.id] ?? null,
+      } as PipelineCardData & { stage: PipelineStageId })
+    }
+    return out
+  }, [
+    applications,
+    participantDataByCandidate,
+    aiInfoByCandidate,
+    fitScores,
+    clientDecisions,
+    stageAgeHours,
+    selectedIds,
+    viewedCandidates,
+  ])
+
+  /** The board's cards, after the three filters. */
+  const filteredPipelineCards = useMemo(() => {
+    const q = boardSearch.trim().toLowerCase()
+    return pipelineCards.filter((card) => {
+      if (boardOrigin !== "all") {
+        const app = applications.find((a) => a.id === card.applicationId)
+        const origin = (app?.origin || "inbound") as "inbound" | "outbound"
+        if (origin !== boardOrigin) return false
+      }
+      if (boardNeedsAttention && !ATTENTION_STATUS_IDS.has(card.status.id)) return false
+      if (!q) return true
+      return (
+        card.name.toLowerCase().includes(q) ||
+        card.role.toLowerCase().includes(q) ||
+        card.company.toLowerCase().includes(q)
+      )
+    })
+  }, [pipelineCards, boardSearch, boardOrigin, boardNeedsAttention, applications, ATTENTION_STATUS_IDS])
+
+  /** The candidate whose card was clicked, shaped for the detail modal. */
+  const detailData: PipelineDetailData | null = useMemo(() => {
+    if (!detailApplicationId) return null
+    const app = applications.find((a) => a.id === detailApplicationId)
+    if (!app) return null
+    const c: any = app.candidates || {}
+    const participant = participantDataByCandidate[app.candidate_id] || null
+    const ai = aiInfoByCandidate[app.candidate_id]
+
+    return {
+      applicationId: app.id,
+      name: c.name || "Unnamed candidate",
+      email: c.email || "",
+      phone: c.phone || c.phone_e164 || "",
+      role: c.current_role || "",
+      company: c.current_company || "",
+      location: c.location || "",
+      experience: c.total_experience || "",
+      summary: c.summary || "",
+      fitScore: fitScores[app.candidate_id] ?? null,
+      aiScore: ai?.score ?? null,
+      aiRecommendation: ai?.recommendation ?? null,
+      stage: String(app.status || "applied"),
+      appliedAgo: app.applied_at ? formatDistanceToNow(new Date(app.applied_at), { addSuffix: true }) : "",
+      ageLabel: formatAge(stageAgeHours[app.id] ?? 0),
+      clientDecision: clientDecisions?.[app.id] ?? null,
+      participant,
+      notes: app.notes || "",
+    }
+  }, [
+    detailApplicationId,
+    applications,
+    participantDataByCandidate,
+    aiInfoByCandidate,
+    fitScores,
+    clientDecisions,
+    stageAgeHours,
+  ])
 
   const stageCount = (stageId: string) => {
     if (stageId === "ai_screen") return applications.filter((a) => !!callStatusByCandidate[a.candidate_id] && a.status === "ai_screen").length
@@ -1018,7 +1258,108 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
   return (
     <TooltipProvider>
       <div className="space-y-4">
-        {/* ── Mini-Kanban Pipeline Bar ── */}
+        {/* ── Pipeline header ───────────────────────────────────────────────
+            One row. Search, origin, and "needs attention" — the three things
+            a recruiter actually filters by. The stage chips are GONE from the
+            board because the board IS the stages: eight columns, each with
+            its own count. */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Search */}
+          <div className="relative min-w-[200px] flex-1 sm:max-w-xs">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
+            <input
+              value={boardSearch}
+              onChange={(e) => setBoardSearch(e.target.value)}
+              placeholder="Search name, role or company…"
+              aria-label="Search candidates"
+              className="h-8 w-full rounded-lg border border-zinc-200 bg-white pl-8 pr-7 text-xs text-zinc-800 placeholder:text-zinc-400 focus:border-blue-400 focus:outline-none focus:ring-1 focus:ring-blue-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+            />
+            {boardSearch && (
+              <button
+                type="button"
+                onClick={() => setBoardSearch("")}
+                aria-label="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
+
+          {/* Origin */}
+          <Select value={boardOrigin} onValueChange={(v) => setBoardOrigin(v as any)}>
+            <SelectTrigger className="h-8 w-[150px] rounded-lg border-zinc-200 text-xs dark:border-zinc-700 dark:bg-zinc-900">
+              <SelectValue placeholder="Origin" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All candidates</SelectItem>
+              <SelectItem value="inbound">Inbound · applied</SelectItem>
+              <SelectItem value="outbound">Outbound · sourced</SelectItem>
+            </SelectContent>
+          </Select>
+
+          {/* Needs attention */}
+          <button
+            type="button"
+            onClick={() => setBoardNeedsAttention((v) => !v)}
+            aria-pressed={boardNeedsAttention}
+            className={`flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors ${
+              boardNeedsAttention
+                ? "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300"
+                : "border-zinc-200 bg-white text-zinc-600 hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            }`}
+          >
+            <AlertCircle className="h-3.5 w-3.5" />
+            Needs attention
+            {boardNeedsAttention && (
+              <span className="rounded bg-amber-200/70 px-1 text-[10px] font-bold tabular-nums dark:bg-amber-900">
+                {filteredPipelineCards.length}
+              </span>
+            )}
+          </button>
+
+          {/* Clear */}
+          {(boardSearch || boardOrigin !== "all" || boardNeedsAttention) && (
+            <button
+              type="button"
+              onClick={() => {
+                setBoardSearch("")
+                setBoardOrigin("all")
+                setBoardNeedsAttention(false)
+              }}
+              className="rounded-lg px-2 py-1 text-xs font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800"
+            >
+              Clear
+            </button>
+          )}
+        </div>
+
+        {/* ── Board mode: the kanban ───────────────────────────────────── */}
+        {viewMode === "board" && (
+          <PipelineKanban
+            cards={filteredPipelineCards as any}
+            viewMode={viewMode}
+            onViewModeChange={changeViewMode}
+            onOpen={(id) => setDetailApplicationId(id)}
+            onToggleSelect={(id) => toggleSelect(id)}
+            onMoveStage={handleKanbanMove}
+            selectedIds={selectedIds}
+            onRefresh={handleRefresh}
+            refreshing={refreshing}
+            emptyState={
+              <div className="py-12 text-center text-sm text-zinc-400">
+                <User className="mx-auto mb-2 h-8 w-8 text-zinc-300" />
+                <p className="font-semibold">Nothing here</p>
+                <p className="mt-1 text-xs">Try clearing the filters.</p>
+              </div>
+            }
+          />
+        )}
+
+        {/* ── List mode: the old filter set + the detailed list ────────── */}
+        {viewMode === "list" && (
+          <>
+                {/* ── Mini-Kanban Pipeline Bar ── */}
         <motion.div
           initial={{ opacity: 0, y: -8 }}
           animate={{ opacity: 1, y: 0 }}
@@ -1213,6 +1554,10 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
           </div>
         )}
 
+          </>
+        )}
+
+
         {/* ── Bulk Action Bar ── */}
         <AnimatePresence>
           {selectedApplications.length > 0 && (
@@ -1352,123 +1697,128 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
           )}
         </AnimatePresence>
 
-        {/* ── Empty State ── */}
-        {filtered.length === 0 ? (
-          <div className="text-center py-12 text-zinc-400 text-sm border-2 border-dashed border-zinc-200 rounded-2xl bg-zinc-50/50">
-            <User className="h-8 w-8 mx-auto mb-2 text-zinc-300" />
-            <p className="font-semibold">No candidates in this stage</p>
-          </div>
-        ) : (
-          /* ── Candidate Cards ── */
-          <div className="space-y-3">
-            {/* ── Select All Bar ── */}
-            {filtered.length > 0 && (
-              <div className="flex items-center gap-2 px-1 py-1">
-                <Checkbox
-                  checked={selectedIds.size === filtered.length && filtered.length > 0}
-                  onCheckedChange={(checked) => {
-                    if (checked) {
-                      setSelectedIds(new Set(filtered.map(a => a.id)))
-                    } else {
-                      setSelectedIds(new Set())
-                    }
-                  }}
-                />
-                <span className="text-xs text-zinc-500">
-                  {selectedIds.size > 0
-                    ? `${selectedIds.size} of ${filtered.length} selected`
-                    : `Select all ${filtered.length} candidates`}
-                </span>
-                {selectedIds.size > 0 && (
-                  <button
-                    className="text-xs text-zinc-400 hover:text-zinc-600 ml-auto"
-                    onClick={() => setSelectedIds(new Set())}
-                  >
-                    Clear
-                  </button>
-                )}
-              </div>
-            )}
-            {backfillRunning && missingFitCount > 0 && (
-              <div className="flex items-center gap-2 px-4 py-2.5 mb-3 bg-purple-50 border border-purple-200 rounded-xl text-sm text-purple-700">
-                <BrainCircuit className="h-4 w-4 animate-pulse text-purple-500" />
-                <span className="font-medium">AI is analyzing {missingFitCount} candidate{missingFitCount > 1 ? "s" : ""} and ranking by fit score...</span>
-              </div>
-            )}
-            <AnimatePresence mode="popLayout">
-              {filtered.map((app, index) => (
-                <motion.div
-                  key={app.id}
-                  layout
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, x: -20, transition: { duration: 0.2 } }}
-                  transition={{ delay: index * 0.03, duration: 0.25, ease: "easeOut" }}
-                >
-                   <CandidateCard
-                    application={app}
-                    jobId={jobId}
-                    callStatus={activeStage === "ai_screen" ? callStatusByCandidate[app.candidate_id] || "pending" : undefined}
-                    participant={participantDataByCandidate[app.candidate_id]}
-                    aiInfo={aiInfoByCandidate[app.candidate_id]}
-                    clientDecision={clientDecisions?.[app.id] ?? null}
-                    selected={selectedIds.has(app.id)}
-                    isNew={app.status === "applied" && !participantDataByCandidate[app.candidate_id] && !viewedCandidates.has(app.candidate_id)}
-                    fitScore={fitScores[app.candidate_id]}
-                    callNowBusy={callNowCandidate === app.candidate_id}
-                    nudgeBusy={nudgeBusyCandidate === app.candidate_id}
-                    verifyBusy={verifyCandidate === app.candidate_id}
-                    onCallNow={() => callCandidateNow(app.candidate_id)}
-                    onVerifyStatus={() => verifyCallStatus(app.candidate_id)}
-                    onNudgeStart={() => setNudgeBusyCandidate(app.candidate_id)}
-                    onNudgeEnd={() => { setNudgeBusyCandidate(null); fetchParticipants(); onRefresh() }}
-                    onRefreshParticipants={() => { fetchParticipants(); onRefresh() }}
-                    onSelect={() => toggleSelect(app.id)}
-                    onViewProfile={(c, app2, part, ai, fs) => {
-                      setViewedCandidates(prev => new Set([...prev, app.candidate_id]))
-                      onViewProfile(c, app2, part, ai, fs)
-                    }}
-                    onViewResults={(candidateId) => {
-                      const pid = participantIdByCandidate[candidateId]
-                      if (pid) {
-                        setResultParticipantId(pid)
-                        return
+        {/* ── List mode body: the detailed candidate list ─────────── */}
+        {viewMode === "list" && (
+          <>
+          {/* ── Empty State ── */}
+          {filtered.length === 0 ? (
+            <div className="text-center py-12 text-zinc-400 text-sm border-2 border-dashed border-zinc-200 rounded-2xl bg-zinc-50/50">
+              <User className="h-8 w-8 mx-auto mb-2 text-zinc-300" />
+              <p className="font-semibold">No candidates in this stage</p>
+            </div>
+          ) : (
+            /* ── Candidate Cards ── */
+            <div className="space-y-3">
+              {/* ── Select All Bar ── */}
+              {filtered.length > 0 && (
+                <div className="flex items-center gap-2 px-1 py-1">
+                  <Checkbox
+                    checked={selectedIds.size === filtered.length && filtered.length > 0}
+                    onCheckedChange={(checked) => {
+                      if (checked) {
+                        setSelectedIds(new Set(filtered.map(a => a.id)))
+                      } else {
+                        setSelectedIds(new Set())
                       }
-                      // The button used to do nothing at all when the screening
-                      // row wasn't loaded, which reads as a broken page rather
-                      // than "there is nothing to show yet".
-                      toast({
-                        title: "No screening record for this candidate yet",
-                        description: "The call hasn't produced a result row. Refresh, or start a screening first.",
-                        variant: "destructive",
-                      })
                     }}
-                    onReviewInfo={() => {
-                      const participant = participantDataByCandidate[app.candidate_id]
-                      if (!participant) return
-                      const reviewData = buildReviewCandidate(participant, app)
-                      // Find all review candidates for navigation
-                      const allReview = filtered
-                        .filter((a) => callSubSection(participantDataByCandidate[a.candidate_id]) === "review")
-                        .map((a) => buildReviewCandidate(participantDataByCandidate[a.candidate_id], a))
-                      setReviewList(allReview)
-                      const idx = allReview.findIndex(r => r.participantId === reviewData.participantId)
-                      setReviewIndex(idx >= 0 ? idx : 0)
-                      setReviewCandidate(reviewData)
-                    }}
-                    onStageChange={handleStageChange}
-                    onApplicationUpdated={onApplicationUpdated}
-                    interviewEntry={activeStage === "interview" ? interviewsByKey[`${selectedInterviewRound}:${app.id}`] : undefined}
-                    interviewDraft={activeStage === "interview" ? interviewDrafts[`${selectedInterviewRound}:${app.id}`] : undefined}
-                    onInterviewUpdate={activeStage === "interview" ? (patch) => upsertInterview(app.id, patch) : undefined}
-                    onInterviewDraftChange={activeStage === "interview" ? (draft) => {
-                      setInterviewDrafts((prev) => ({ ...prev, [`${selectedInterviewRound}:${app.id}`]: draft }))
-                    } : undefined}
                   />
-                </motion.div>
-              ))}
-            </AnimatePresence>
-          </div>
+                  <span className="text-xs text-zinc-500">
+                    {selectedIds.size > 0
+                      ? `${selectedIds.size} of ${filtered.length} selected`
+                      : `Select all ${filtered.length} candidates`}
+                  </span>
+                  {selectedIds.size > 0 && (
+                    <button
+                      className="text-xs text-zinc-400 hover:text-zinc-600 ml-auto"
+                      onClick={() => setSelectedIds(new Set())}
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+              )}
+              {backfillRunning && missingFitCount > 0 && (
+                <div className="flex items-center gap-2 px-4 py-2.5 mb-3 bg-purple-50 border border-purple-200 rounded-xl text-sm text-purple-700">
+                  <BrainCircuit className="h-4 w-4 animate-pulse text-purple-500" />
+                  <span className="font-medium">AI is analyzing {missingFitCount} candidate{missingFitCount > 1 ? "s" : ""} and ranking by fit score...</span>
+                </div>
+              )}
+              <AnimatePresence mode="popLayout">
+                {filtered.map((app, index) => (
+                  <motion.div
+                    key={app.id}
+                    layout
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, x: -20, transition: { duration: 0.2 } }}
+                    transition={{ delay: index * 0.03, duration: 0.25, ease: "easeOut" }}
+                  >
+                     <CandidateCard
+                      application={app}
+                      jobId={jobId}
+                      callStatus={activeStage === "ai_screen" ? callStatusByCandidate[app.candidate_id] || "pending" : undefined}
+                      participant={participantDataByCandidate[app.candidate_id]}
+                      aiInfo={aiInfoByCandidate[app.candidate_id]}
+                      clientDecision={clientDecisions?.[app.id] ?? null}
+                      selected={selectedIds.has(app.id)}
+                      isNew={app.status === "applied" && !participantDataByCandidate[app.candidate_id] && !viewedCandidates.has(app.candidate_id)}
+                      fitScore={fitScores[app.candidate_id]}
+                      callNowBusy={callNowCandidate === app.candidate_id}
+                      nudgeBusy={nudgeBusyCandidate === app.candidate_id}
+                      verifyBusy={verifyCandidate === app.candidate_id}
+                      onCallNow={() => callCandidateNow(app.candidate_id)}
+                      onVerifyStatus={() => verifyCallStatus(app.candidate_id)}
+                      onNudgeStart={() => setNudgeBusyCandidate(app.candidate_id)}
+                      onNudgeEnd={() => { setNudgeBusyCandidate(null); fetchParticipants(); onRefresh() }}
+                      onRefreshParticipants={() => { fetchParticipants(); onRefresh() }}
+                      onSelect={() => toggleSelect(app.id)}
+                      onViewProfile={(c, app2, part, ai, fs) => {
+                        setViewedCandidates(prev => new Set([...prev, app.candidate_id]))
+                        onViewProfile(c, app2, part, ai, fs)
+                      }}
+                      onViewResults={(candidateId) => {
+                        const pid = participantIdByCandidate[candidateId]
+                        if (pid) {
+                          setResultParticipantId(pid)
+                          return
+                        }
+                        // The button used to do nothing at all when the screening
+                        // row wasn't loaded, which reads as a broken page rather
+                        // than "there is nothing to show yet".
+                        toast({
+                          title: "No screening record for this candidate yet",
+                          description: "The call hasn't produced a result row. Refresh, or start a screening first.",
+                          variant: "destructive",
+                        })
+                      }}
+                      onReviewInfo={() => {
+                        const participant = participantDataByCandidate[app.candidate_id]
+                        if (!participant) return
+                        const reviewData = buildReviewCandidate(participant, app)
+                        // Find all review candidates for navigation
+                        const allReview = filtered
+                          .filter((a) => callSubSection(participantDataByCandidate[a.candidate_id]) === "review")
+                          .map((a) => buildReviewCandidate(participantDataByCandidate[a.candidate_id], a))
+                        setReviewList(allReview)
+                        const idx = allReview.findIndex(r => r.participantId === reviewData.participantId)
+                        setReviewIndex(idx >= 0 ? idx : 0)
+                        setReviewCandidate(reviewData)
+                      }}
+                      onStageChange={handleStageChange}
+                      onApplicationUpdated={onApplicationUpdated}
+                      interviewEntry={activeStage === "interview" ? interviewsByKey[`${selectedInterviewRound}:${app.id}`] : undefined}
+                      interviewDraft={activeStage === "interview" ? interviewDrafts[`${selectedInterviewRound}:${app.id}`] : undefined}
+                      onInterviewUpdate={activeStage === "interview" ? (patch) => upsertInterview(app.id, patch) : undefined}
+                      onInterviewDraftChange={activeStage === "interview" ? (draft) => {
+                        setInterviewDrafts((prev) => ({ ...prev, [`${selectedInterviewRound}:${app.id}`]: draft }))
+                      } : undefined}
+                    />
+                  </motion.div>
+                ))}
+              </AnimatePresence>
+            </div>
+          )}
+          </>
         )}
 
         {/* ── Stage Change Confirmation (Premium AlertDialog) ── */}
@@ -1564,6 +1914,50 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
           open={!!resultParticipantId}
           onOpenChange={(open) => { if (!open) setResultParticipantId(null) }}
           onReviewed={() => { fetchParticipants(); onRefresh() }}
+        />
+
+        {/* ── Pipeline detail modal ───────────────────────────────────────
+            The card shows who / how good a match / what needs attention.
+            This shows everything else, in the order a recruiter reads it. */}
+        <PipelineDetailModal
+          open={!!detailApplicationId}
+          onOpenChange={(open) => { if (!open) setDetailApplicationId(null) }}
+          data={detailData}
+          busy={detailBusy}
+          onMoveStage={(toStage) => {
+            if (!detailApplicationId) return
+            handleKanbanMove(detailApplicationId, toStage)
+            setDetailApplicationId(null)
+          }}
+          onCallNow={() => {
+            const app = applications.find((a) => a.id === detailApplicationId)
+            if (!app) return
+            setCallNowCandidate(app.candidate_id)
+          }}
+          onNudge={() => {
+            const app = applications.find((a) => a.id === detailApplicationId)
+            if (!app) return
+            setCallNowCandidate(app.candidate_id)
+          }}
+          onViewResults={() => {
+            const app = applications.find((a) => a.id === detailApplicationId)
+            if (!app) return
+            const p = participantDataByCandidate[app.candidate_id]
+            if (p?.id) setResultParticipantId(p.id)
+            else toast({ title: "No screening recorded yet", description: "This candidate has not had a screening call.", variant: "default" })
+          }}
+          onOpenFullProfile={() => {
+            const app = applications.find((a) => a.id === detailApplicationId)
+            if (!app) return
+            const p = participantDataByCandidate[app.candidate_id]
+            const ai = aiInfoByCandidate[app.candidate_id]
+            if (onOpenFullProfile) {
+              onOpenFullProfile(app.candidates, app, p, ai, fitScores[app.candidate_id] ?? null)
+            } else {
+              onViewProfile(app.candidates, app, p, ai, fitScores[app.candidate_id] ?? null)
+            }
+            setDetailApplicationId(null)
+          }}
         />
 
         <PrescreenReviewModal
