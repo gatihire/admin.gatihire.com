@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import {
   DndContext,
   DragOverlay,
@@ -59,6 +59,15 @@ export interface PipelineKanbanProps {
   columnTotals?: Record<string, number>
   /** Shown when there is nothing to show. */
   emptyState?: React.ReactNode
+  /**
+   * A stage to scroll to and highlight.
+   *
+   * The job list's metric badges deep-link to `?stage=ai_screen`. On the
+   * board there is no single stage to show, so instead of dropping the
+   * intent on the floor we scroll to that column and ring it — the
+   * recruiter lands on exactly the slice the badge promised.
+   */
+  focusStage?: string | null
 }
 
 function Column({
@@ -67,17 +76,25 @@ function Column({
   selectedIds,
   onOpen,
   onToggleSelect,
+  focused,
 }: {
   stage: (typeof PIPELINE_COLUMNS)[number]
   cards: PipelineCardData[]
   selectedIds: Set<string>
   onOpen: (id: string) => void
   onToggleSelect: (id: string) => void
+  focused: boolean
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: stage.id })
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!focused) return
+    scrollRef.current?.scrollIntoView({ behavior: "smooth", inline: "start", block: "nearest" })
+  }, [focused])
 
   return (
-    <div className="flex w-[280px] shrink-0 flex-col">
+    <div ref={scrollRef} className="flex w-[280px] shrink-0 flex-col">
       {/* Header: name + count. The hint is a tooltip, not permanent text —
           the board has to stay scannable, not a wall of explanation. */}
       <div className="mb-2 flex items-center gap-2 px-0.5">
@@ -86,6 +103,11 @@ function Column({
         <span className="rounded bg-zinc-100 px-1.5 py-px text-[10px] font-bold tabular-nums text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
           {cards.length}
         </span>
+        {focused && (
+          <span className="rounded bg-blue-100 px-1.5 py-px text-[9px] font-bold uppercase tracking-wide text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+            focused
+          </span>
+        )}
       </div>
 
       <div
@@ -125,8 +147,13 @@ export function PipelineKanban({
   onRefresh,
   refreshing,
   emptyState,
+  focusStage,
 }: PipelineKanbanProps) {
   const [activeId, setActiveId] = useState<string | null>(null)
+
+  // Only focus a column that actually exists on the board.
+  const focusedStage =
+    focusStage && PIPELINE_COLUMNS.some((c) => c.id === focusStage) ? focusStage : null
 
   // A small activation distance so a click on a card does not start a drag.
   const sensors = useSensors(
@@ -252,6 +279,7 @@ export function PipelineKanban({
                 selectedIds={selectedIds}
                 onOpen={onOpen}
                 onToggleSelect={onToggleSelect}
+                focused={focusedStage === col.id}
               />
             ))}
           </div>

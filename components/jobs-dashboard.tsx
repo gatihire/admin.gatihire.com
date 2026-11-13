@@ -541,12 +541,29 @@ function JobCard({
   const totalScreening = screening.pending + screening.whatsapp_sent + screening.replied + screening.calling + screening.call_done + screening.rejected
 
   let primaryAction: { label: string; icon: any; color: string; stage: string; sub?: string } | null = null
+  //
+  // The `stage` and `sub` values become `?stage=` and `?callsub=` in the URL.
+  // Both have to be REAL values or the deep link lands the recruiter on an
+  // empty list with no error — which is what happened:
+  //
+  //   stage "pipeline"  — not a stage. Filtered to a.status === "pipeline",
+  //                        which no row ever has, so the list was EMPTY.
+  //   sub "interview"   — not a call-truth filter id. The filter lookup
+  //                        returned undefined, which fell through to
+  //                        "match everything" — so the badge said "Interview"
+  //                        and the page showed every candidate.
+  //   sub "replied"     — same problem. The badge said "Call 12 candidates"
+  //                        and the page showed all of them.
+  //
+  // The valid ids live in CALL_TRUTH_FILTERS (lib/call-truth.ts) and in
+  // INTERVIEW_SUB_SECTIONS (components/job-candidates-tab.tsx).
+  //
   if (hasReview) primaryAction = { label: `Review ${stats.aiReview} call${stats.aiReview > 1 ? "s" : ""}`, icon: Eye, color: "bg-amber-500 hover:bg-amber-600", stage: "ai_screen", sub: "completed" }
-  else if (hasClientPending) primaryAction = { label: `Check ${client.pending} client decision${client.pending > 1 ? "s" : ""}`, icon: ExternalLink, color: "bg-purple-500 hover:bg-purple-600", stage: "shortlist" }
-  else if (hasInterviewRescheduled) primaryAction = { label: `${stats.interview.rescheduled} candidate${stats.interview.rescheduled > 1 ? "s" : ""} suggested new time`, icon: Clock, color: "bg-orange-500 hover:bg-orange-600", stage: "pipeline", sub: "interview" }
-  else if (hasInterviewPending) primaryAction = { label: `Send ${stats.interview.pending} interview invite${stats.interview.pending > 1 ? "s" : ""}`, icon: Send, color: "bg-cyan-500 hover:bg-cyan-600", stage: "pipeline", sub: "interview" }
+  else if (hasClientPending) primaryAction = { label: `Check ${client.pending} client decision${client.pending > 1 ? "s" : ""}`, icon: ExternalLink, color: "bg-purple-500 hover:bg-purple-600", stage: "client_review" }
+  else if (hasInterviewRescheduled) primaryAction = { label: `${stats.interview.rescheduled} candidate${stats.interview.rescheduled > 1 ? "s" : ""} suggested new time`, icon: Clock, color: "bg-orange-500 hover:bg-orange-600", stage: "interview", sub: "pending" }
+  else if (hasInterviewPending) primaryAction = { label: `Send ${stats.interview.pending} interview invite${stats.interview.pending > 1 ? "s" : ""}`, icon: Send, color: "bg-cyan-500 hover:bg-cyan-600", stage: "interview", sub: "pending" }
   else if (hasNewApps) primaryAction = { label: `Screen ${stats.newApps} new applicant${stats.newApps > 1 ? "s" : ""}`, icon: Send, color: "bg-blue-500 hover:bg-blue-600", stage: "applied" }
-  else if (hasReplied) primaryAction = { label: `Call ${screening.replied} candidate${screening.replied > 1 ? "s" : ""}`, icon: PhoneCall, color: "bg-green-500 hover:bg-green-600", stage: "ai_screen", sub: "replied" }
+  else if (hasReplied) primaryAction = { label: `Call ${screening.replied} candidate${screening.replied > 1 ? "s" : ""}`, icon: PhoneCall, color: "bg-green-500 hover:bg-green-600", stage: "ai_screen", sub: "review" }
 
   const accent = hasReview
     ? "border-l-4 border-l-amber-400 bg-amber-50/30"

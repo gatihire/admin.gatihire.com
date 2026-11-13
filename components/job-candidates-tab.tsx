@@ -544,10 +544,21 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
   } | null>(null)
   const [rejectionReason, setRejectionReason] = useState("Not a good fit")
   const [filter, setFilter] = useState<FilterValue>("all")
-  const [allViewTab, setAllViewTab] = useState<"inbound" | "outbound">("inbound")
+  //
+  // TWO separate sub-filter states.
+  //
+  // These used to share ONE variable, which meant switching between the
+  // AI Screen stage and the Interview stage carried a stale filter id
+  // across: pick "No call placed" on AI Screen, go to Interview, and the
+  // list was filtered by an interview-section id that happened to match
+  // nothing — or matched everything.
+  //
+  // The AI-Screen filter is seeded from the URL (?callsub=). The interview
+  // one is NOT, because the same URL param is used for both.
   const [callSubFilter, setCallSubFilter] = useState<CallSubFilter>(() =>
     activeCallSubFilter && activeCallSubFilter !== "all" ? (activeCallSubFilter as CallSubFilter) : "all"
   )
+  const [interviewSubFilter, setInterviewSubFilter] = useState<string>("all")
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [callNowCandidate, setCallNowCandidate] = useState<string | null>(null)
   const [nudgeBusyCandidate, setNudgeBusyCandidate] = useState<string | null>(null)
@@ -610,7 +621,6 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
   //
   // Everything else is either visible on the card or lives in the modal.
   const [boardSearch, setBoardSearch] = useState("")
-  const [boardOrigin, setBoardOrigin] = useState<"all" | "inbound" | "outbound">("all")
   const [boardNeedsAttention, setBoardNeedsAttention] = useState(false)
 
   /** Statuses that mean "this candidate is waiting on a human". */
@@ -886,23 +896,56 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
       ? applications.filter((a) => !!callStatusByCandidate[a.candidate_id] && a.status === "ai_screen")
       : applications.filter((a) => a.status === activeStage)
 
+  /**
+   * The source filter — one definition, used by the board and the list.
+   *
+   * It used to live inline in the list filter chain only, so the board had
+   * to reimplement it (and did it slightly differently). Two implementations
+   * of one filter is how they drift apart.
+   */
+  const matchesSourceFilter = useCallback(
+    (applicationId: string, value: FilterValue) => {
+      if (value === "all") return true
+      const app = applications.find((a) => a.id === applicationId)
+      if (!app) return true
+      if (value === "inbound") return (app.origin || "inbound") === "inbound"
+      if (value === "outbound") return (app.origin || "inbound") === "outbound"
+      if (value === "database") return ["database", "enhanced_match"].includes(app.source || "")
+      return app.source === "board-app"
+    },
+    [applications],
+  )
+
   const filtered = baseFiltered
+    .filter((a) => matchesSourceFilter(a.id, filter))
+    // The search box and the "needs attention" toggle sit above BOTH views,
+    // so they have to apply to the list too — otherwise clicking them in
+    // list mode does nothing.
     .filter((a) => {
-      if (activeStage === "all") {
-        if (allViewTab === "inbound") return (a.origin || "inbound") === "inbound"
-        if (allViewTab === "outbound") return (a.origin || "inbound") === "outbound"
-        return true
-      }
-      if (filter === "all") return true
-      if (filter === "inbound") return (a.origin || "inbound") === "inbound"
-      if (filter === "outbound") return (a.origin || "inbound") === "outbound"
-      if (filter === "database") return ["database", "enhanced_match"].includes(a.source || "")
-      return a.source === "board-app"
+      if (!boardSearch.trim()) return true
+      const q = boardSearch.trim().toLowerCase()
+      const c: any = a.candidates || {}
+      return (
+        String(c.name || "").toLowerCase().includes(q) ||
+        String(c.current_role || "").toLowerCase().includes(q) ||
+        String(c.current_company || "").toLowerCase().includes(q)
+      )
     })
     .filter((a) => {
-      if (activeStage === "interview" && callSubFilter !== "all" && selectedInterviewRound) {
+      if (boardNeedsAttention) {
+        const truth = getCallTruth(participantDataByCandidate[a.candidate_id])
+        const st = deriveCardStatus({
+          clientDecision: clientDecisions?.[a.id] ?? null,
+          callTruth: truth,
+          aiRecommendation: aiInfoByCandidate[a.candidate_id]?.recommendation ?? null,
+          aiScore: aiInfoByCandidate[a.candidate_id]?.score ?? null,
+          hasParticipant: !!participantDataByCandidate[a.candidate_id],
+        })
+        if (!ATTENTION_STATUS_IDS.has(st.id)) return false
+      }
+      if (activeStage === "interview" && interviewSubFilter !== "all" && selectedInterviewRound) {
         const entry = interviewsByKey[`${selectedInterviewRound}:${a.id}`]
-        return interviewSubSection(entry) === callSubFilter
+        return interviewSubSection(entry) === interviewSubFilter
       }
       if (activeStage !== "ai_screen" || callSubFilter === "all") return true
       const t = getCallTruth(participantDataByCandidate[a.candidate_id])
@@ -1024,11 +1067,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
   const filteredPipelineCards = useMemo(() => {
     const q = boardSearch.trim().toLowerCase()
     return pipelineCards.filter((card) => {
-      if (boardOrigin !== "all") {
-        const app = applications.find((a) => a.id === card.applicationId)
-        const origin = (app?.origin || "inbound") as "inbound" | "outbound"
-        if (origin !== boardOrigin) return false
-      }
+      if (!matchesSourceFilter(card.applicationId, filter)) return false
       if (boardNeedsAttention && !ATTENTION_STATUS_IDS.has(card.status.id)) return false
       if (!q) return true
       return (
@@ -1037,7 +1076,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
         card.company.toLowerCase().includes(q)
       )
     })
-  }, [pipelineCards, boardSearch, boardOrigin, boardNeedsAttention, applications, ATTENTION_STATUS_IDS])
+  }, [pipelineCards, boardSearch, boardNeedsAttention, filter, applications, ATTENTION_STATUS_IDS])
 
   /** The candidate whose card was clicked, shaped for the detail modal. */
   const detailData: PipelineDetailData | null = useMemo(() => {
@@ -1286,15 +1325,17 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
             )}
           </div>
 
-          {/* Origin */}
-          <Select value={boardOrigin} onValueChange={(v) => setBoardOrigin(v as any)}>
-            <SelectTrigger className="h-8 w-[150px] rounded-lg border-zinc-200 text-xs dark:border-zinc-700 dark:bg-zinc-900">
-              <SelectValue placeholder="Origin" />
+          {/* Origin / source — one dropdown for every source there is */}
+          <Select value={filter} onValueChange={(v) => setFilter(v as FilterValue)}>
+            <SelectTrigger className="h-8 w-[190px] rounded-lg border-zinc-200 text-xs dark:border-zinc-700 dark:bg-zinc-900">
+              <SelectValue placeholder="All candidates" />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All candidates</SelectItem>
-              <SelectItem value="inbound">Inbound · applied</SelectItem>
-              <SelectItem value="outbound">Outbound · sourced</SelectItem>
+              <SelectItem value="inbound">Inbound · applied to us</SelectItem>
+              <SelectItem value="outbound">Outbound · we sourced</SelectItem>
+              <SelectItem value="database">Database matches</SelectItem>
+              <SelectItem value="board-app">Talent Portal</SelectItem>
             </SelectContent>
           </Select>
 
@@ -1319,12 +1360,12 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
           </button>
 
           {/* Clear */}
-          {(boardSearch || boardOrigin !== "all" || boardNeedsAttention) && (
+          {(boardSearch || filter !== "all" || boardNeedsAttention) && (
             <button
               type="button"
               onClick={() => {
                 setBoardSearch("")
-                setBoardOrigin("all")
+                setFilter("all")
                 setBoardNeedsAttention(false)
               }}
               className="rounded-lg px-2 py-1 text-xs font-medium text-zinc-500 hover:text-zinc-800 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800"
@@ -1346,6 +1387,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
             selectedIds={selectedIds}
             onRefresh={handleRefresh}
             refreshing={refreshing}
+            focusStage={activeStage !== "all" ? activeStage : null}
             emptyState={
               <div className="py-12 text-center text-sm text-zinc-400">
                 <User className="mx-auto mb-2 h-8 w-8 text-zinc-300" />
@@ -1413,57 +1455,6 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
             <span className="hidden sm:inline">{refreshing ? "Refreshing..." : "Refresh"}</span>
           </button>
         </motion.div>
-
-        {/* ── All View: Inbound / Outbound Tabs ── */}
-        {activeStage === "all" && (
-          <div className="flex flex-wrap items-center gap-1.5 px-1">
-            <span className="text-xs font-bold text-zinc-400 uppercase mr-1">View:</span>
-            <button
-              onClick={() => setAllViewTab("inbound")}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold uppercase tracking-wide transition-all ${
-                allViewTab === "inbound"
-                  ? "bg-blue-600 text-white shadow-sm"
-                  : "bg-zinc-100 text-zinc-500 hover:bg-zinc-200"
-              }`}
-            >
-              Inbound <span className="ml-1 text-[10px] opacity-70">(applied to us)</span>
-            </button>
-            <button
-              onClick={() => setAllViewTab("outbound")}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold uppercase tracking-wide transition-all ${
-                allViewTab === "outbound"
-                  ? "bg-violet-600 text-white shadow-sm"
-                  : "bg-zinc-100 text-zinc-500 hover:bg-zinc-200"
-              }`}
-            >
-              Outbound <span className="ml-1 text-[10px] opacity-70">(we sourced)</span>
-            </button>
-          </div>
-        )}
-
-        {/* ── Source Filter Bar (for non-All stages) ── */}
-        {activeStage !== "all" && (
-          <div className="flex flex-wrap items-center gap-1.5 px-1">
-            <Filter className="h-3.5 w-3.5 text-zinc-400" />
-            <Select value={filter} onValueChange={(v) => setFilter(v as FilterValue)}>
-              <SelectTrigger className="h-7 w-44 text-xs bg-white rounded-lg border-zinc-200">
-                <SelectValue placeholder="Filter candidates" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All candidates</SelectItem>
-                <SelectItem value="inbound">Inbound · applied to us</SelectItem>
-                <SelectItem value="outbound">Outbound · we sourced</SelectItem>
-                <SelectItem value="database">Database matches</SelectItem>
-                <SelectItem value="board-app">Talent Portal</SelectItem>
-              </SelectContent>
-            </Select>
-            {filter !== "all" && (
-              <button className="text-xs font-semibold text-zinc-400 hover:text-zinc-600 px-1.5 py-1" onClick={() => setFilter("all")}>
-                Clear
-              </button>
-            )}
-          </div>
-        )}
 
         {/* ── AI Screen Call-Outcome Filters ── */}
         {activeStage === "ai_screen" && (
@@ -1533,19 +1524,19 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
                 return (
                   <button
                     key={sub.id}
-                    onClick={() => { const next = callSubFilter === sub.id ? "all" : sub.id; setCallSubFilter(next); onCallSubFilterChange?.(next) }}
+                    onClick={() => { const next = interviewSubFilter === sub.id ? "all" : sub.id; setInterviewSubFilter(next) }}
                     title={sub.hint}
                     className={`px-2.5 py-1 rounded-lg text-xs font-semibold uppercase tracking-wide transition-all flex items-center gap-1 ${
-                      callSubFilter === sub.id ? "bg-purple-600 text-white shadow-sm" : "bg-zinc-100 text-zinc-500 hover:bg-zinc-200"
+                      interviewSubFilter === sub.id ? "bg-purple-600 text-white shadow-sm" : "bg-zinc-100 text-zinc-500 hover:bg-zinc-200"
                     }`}
                   >
                     {sub.label}
-                    <span className={`text-[10px] ml-0.5 ${callSubFilter === sub.id ? "text-purple-200" : "text-zinc-400"}`}>{count}</span>
+                    <span className={`text-[10px] ml-0.5 ${interviewSubFilter === sub.id ? "text-purple-200" : "text-zinc-400"}`}>{count}</span>
                   </button>
                 )
               })}
-              {callSubFilter !== "all" && (
-                <button className="text-xs font-semibold text-zinc-400 hover:text-zinc-600 px-2" onClick={() => { setCallSubFilter("all"); onCallSubFilterChange?.("all") }}>Clear</button>
+              {interviewSubFilter !== "all" && (
+                <button className="text-xs font-semibold text-zinc-400 hover:text-zinc-600 px-2" onClick={() => setInterviewSubFilter("all")}>Clear</button>
               )}
             </div>
             <p className="text-xs text-zinc-400 leading-relaxed">

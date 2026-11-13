@@ -21,13 +21,17 @@ export async function GET(request: NextRequest) {
     
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
     
-    // Test different models
+    // Test different models.
+    //
+    // Only models that still EXIST. "gemini-2.0-flash" and
+    // "gemini-1.5-pro" were retired by Google and return 404 — listing
+    // them here made this endpoint look like the key was broken when the
+    // key was fine.
     const models = [
-      process.env.GEMINI_MODEL || "gemini-2.5-flash",
+      process.env.GEMINI_MODEL || "gemini-3.1-flash-lite-preview",
       "gemini-2.5-flash",
-      "gemini-2.0-flash",
-      process.env.GEMINI_MODEL || "gemini-2.5-flash",
-      "gemini-1.5-pro"
+      "gemini-3.8-flash",
+      "gemini-2.5-flash-lite"
     ]
     const results = []
     
