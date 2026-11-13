@@ -65,9 +65,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
           callback_preference,
           verdict_json, screening_context, whatsapp_history,
           whatsapp_delivery_status, whatsapp_reply_text, whatsapp_response, whatsapp_sent_at,
-          whatsapp_message_id, info_step, info_confirmed,
+          whatsapp_reply_at, whatsapp_message_id, info_step, info_confirmed,
           created_at, updated_at,
-          candidates: candidate_id (id, name, email, phone, current_role, current_company, total_experience, location, technical_skills)
+          candidates: candidate_id (id, name, email, phone, current_role, current_company, total_experience, location, technical_skills),
+          jobs: job_id (id, title, client_name, city, location, salary_min, salary_max, salary_type, experience_min_years, experience_max_years, skills_must_have)
         `)
         .eq("job_id", jobId)
         .order("created_at", { ascending: false }),

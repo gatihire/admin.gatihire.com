@@ -62,8 +62,6 @@ export interface PipelineKanbanProps {
   /** Fired when a card is dropped on a different stage. */
   onMoveStage: (applicationId: string, toStage: PipelineStageId | "rejected") => void
   selectedIds: Set<string>
-  /** Counts for the column headers — all candidates in that stage. */
-  columnTotals?: Record<string, number>
   /** Shown when there is nothing to show. */
   emptyState?: React.ReactNode
   /**
@@ -203,10 +201,10 @@ function RejectZone() {
   return (
     <div
       ref={setNodeRef}
-      className={`mt-1 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed px-4 py-2.5 text-xs font-medium transition-colors ${
+      className={`sticky bottom-2 z-30 mt-1 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed px-4 py-2.5 text-xs font-medium shadow-sm backdrop-blur transition-colors ${
         isOver
-          ? "border-rose-400 bg-rose-50 text-rose-700 dark:border-rose-700 dark:bg-rose-950/30 dark:text-rose-300"
-          : "border-zinc-200 text-zinc-400 dark:border-zinc-800 dark:text-zinc-600"
+          ? "border-rose-400 bg-rose-50 text-rose-700 dark:border-rose-700 dark:bg-rose-950/50 dark:text-rose-300"
+          : "border-zinc-200 bg-white/90 text-zinc-400 dark:border-zinc-800 dark:bg-zinc-900/90 dark:text-zinc-600"
       }`}
     >
       <UserX className="h-3.5 w-3.5" />
@@ -245,7 +243,7 @@ export function PipelineKanban({
     for (const card of cards) {
       // A card whose stage is not a known column (a legacy value) still has
       // to be visible — Applied is where it belongs for review.
-      const stage = out[card.stage] ? card.stage : "applied"
+      const stage = card.stage in out ? card.stage : "applied"
       out[stage].push(card)
     }
     return out
@@ -262,7 +260,11 @@ export function PipelineKanban({
     const out: Record<string, number> = {}
     for (const col of PIPELINE_COLUMNS) out[col.id] = 0
     for (const card of allCards) {
-      const stage = out[card.stage] ? card.stage : "applied"
+      // `card.stage in out` — NOT `out[card.stage] ?`. The value is a
+      // number, and 0 is falsy, so the truthiness test sent the first card
+      // of every non-applied column to Applied and left those columns at
+      // zero. The board showed "Applied = everyone, everything else = 0".
+      const stage = card.stage in out ? card.stage : "applied"
       out[stage] = (out[stage] || 0) + 1
     }
     return out
@@ -316,7 +318,7 @@ export function PipelineKanban({
     onMoveStage(id, isReject ? "rejected" : target!.id)
   }
 
-  if (cards.length === 0 && emptyState) {
+  if (cards.length === 0 && emptyState && rejectedCards.length === 0) {
     return <>{emptyState}</>
   }
 

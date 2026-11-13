@@ -3,7 +3,7 @@
 import { memo } from "react"
 import { useDraggable } from "@dnd-kit/core"
 import { Check, Clock, PhoneCall, PhoneOff, Sparkles, UserCheck, AlertCircle, Loader2 } from "lucide-react"
-import { getCallTruth, type CallTruth } from "@/lib/call-truth"
+import { type CallTruth } from "@/lib/call-truth"
 
 /**
  * The compact pipeline card.
@@ -284,7 +284,15 @@ export function deriveCardStatus(args: {
     // has to look at it. Labelling that "No call yet" (a neutral grey pill)
     // buried the highest-priority rows on the board under the least
     // interesting ones. The bucket is the signal, not the state.
-    if (callTruth.bucket === "review") {
+    //
+    // `state !== "partial"` is load-bearing. getCallTruth reports FOUR
+    // branches as bucket "review", and three of them are state "partial" —
+    // a call that was cut off mid-conversation. Those are call OUTCOMES,
+    // not pending decisions, and the filter chips already exclude them
+    // (`bucket === "review" && state !== "partial"`). Without the same
+    // guard here, every "1st screening incomplete" row was relabelled
+    // "Needs decision" and lost its "retry the call" meaning.
+    if (callTruth.bucket === "review" && callTruth.state !== "partial") {
       return { id: "needs_review", label: "Needs decision", tone: "warn", icon: "alert" }
     }
 

@@ -544,7 +544,11 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
   const [pendingStageChange, setPendingStageChange] = useState<{
     applicationId: string; from: string; to: string; candidateName: string
   } | null>(null)
-  const [rejectionReason, setRejectionReason] = useState("Not a good fit")
+  // The default has to be one of the Select's options. It used to be
+  // "Not a good fit", which is not in the list — so the trigger showed an
+  // empty "Select a reason..." placeholder while "Not a good fit" was
+  // what actually got written to the row.
+  const [rejectionReason, setRejectionReason] = useState("not_qualified")
   const [filter, setFilter] = useState<FilterValue>("all")
   //
   // TWO separate sub-filter states.
@@ -604,7 +608,6 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
     }
   })
   const [detailApplicationId, setDetailApplicationId] = useState<string | null>(null)
-  const [detailBusy, setDetailBusy] = useState(false)
 
   // ── The one filter bar ─────────────────────────────────────────────────
   //
@@ -911,17 +914,24 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
    * to reimplement it (and did it slightly differently). Two implementations
    * of one filter is how they drift apart.
    */
+  const appById = useMemo(
+    () => new Map(applications.map((a) => [a.id as string, a])),
+    [applications],
+  )
+
   const matchesSourceFilter = useCallback(
     (applicationId: string, value: FilterValue) => {
       if (value === "all") return true
-      const app = applications.find((a) => a.id === applicationId)
+      // A Map, not applications.find() — this runs once per card per
+      // render, and find() made it O(applications^2).
+      const app = appById.get(applicationId)
       if (!app) return true
       if (value === "inbound") return (app.origin || "inbound") === "inbound"
       if (value === "outbound") return (app.origin || "inbound") === "outbound"
       if (value === "database") return ["database", "enhanced_match"].includes(app.source || "")
       return app.source === "board-app"
     },
-    [applications],
+    [appById],
   )
 
   const filtered = baseFiltered
@@ -1252,6 +1262,12 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
       toast({ title: "No screening record", description: "This candidate has no phone-screening entry yet", variant: "destructive" })
       return
     }
+    // The candidate's REAL origin. Forcing "outbound" here made the
+    // trigger route send the outbound talent-outreach template instead of
+    // a details request — while the toast said the candidate had been
+    // asked for their details.
+    const app = applications.find((a) => a.candidate_id === candidateId)
+    const origin = app?.origin || "outbound"
     setNudgeBusyCandidate(candidateId)
     try {
       const res = await fetch("/api/phone-screening/trigger", {
@@ -1260,7 +1276,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
         body: JSON.stringify({
           jobId,
           candidateIds: [candidateId],
-          origin: "outbound",
+          origin,
           createApplication: true,
           callMode: "collect_info_first",
           campaignConfig: { nudgeHours: 4, escalateHours: 8, maxCallAttempts: 2 },
@@ -1268,7 +1284,13 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || "Failed to send WhatsApp")
-      toast({ title: "WhatsApp sent", description: "The candidate has been asked for their details." })
+      toast({
+        title: "WhatsApp sent",
+        description:
+          origin === "inbound"
+            ? "The candidate has been asked for their details."
+            : "The candidate has been nudged to respond.",
+      })
       fetchParticipants()
       onRefresh()
     } catch (err: any) {
@@ -1499,6 +1521,11 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
         {viewMode === "board" && (
           <PipelineKanban
             cards={filteredPipelineCards as any}
+            // The UNFILTERED cards — the column counts are the size of each
+            // stage, not the number of cards the filters happen to leave
+            // visible. A board whose counts move when you type in a search
+            // box cannot tell you which stage is backed up.
+            allCards={pipelineCards as any}
             onOpen={openPipelineDetail}
             onToggleSelect={toggleSelect}
             onMoveStage={handleKanbanMove}
@@ -1561,16 +1588,12 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
               </button>
             )
           })}
-          <button
-            onClick={handleRefresh}
-            disabled={refreshing || loading}
-            title="Refresh candidates and call status"
-            aria-label="Refresh candidates and call status"
-            className="ml-auto flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold text-zinc-600 bg-zinc-50 hover:bg-zinc-100 border border-zinc-200 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
-            <span className="hidden sm:inline">{refreshing ? "Refreshing..." : "Refresh"}</span>
-          </button>
+          {/*
+            No Refresh button here — the header above the board has one,
+            and it is visible in BOTH views. This one only existed in list
+            mode, so the same page had two Refresh buttons that did the
+            same thing.
+          */}
         </motion.div>
 
         {/* ── AI Screen Call-Outcome Filters ── */}
@@ -1937,8 +1960,8 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
               <AlertDialogDescription className="space-y-2">
                 <p>
                   Move <strong>{pendingStageChange?.candidateName}</strong> from{" "}
-                  <strong>{pendingStageChange?.from}</strong> to{" "}
-                  <strong>{pendingStageChange?.to}</strong>?
+                  <strong>{stageLabelSafe(pendingStageChange?.from || "")}</strong> to{" "}
+                  <strong>{stageLabelSafe(pendingStageChange?.to || "")}</strong>?
                 </p>
                 {pendingStageChange?.to === "shortlist" && (
                   <span className="block text-sm text-amber-600 font-medium">
@@ -2031,7 +2054,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
           open={!!detailApplicationId}
           onOpenChange={(open) => { if (!open) setDetailApplicationId(null) }}
           data={detailData}
-          busy={detailBusy}
+          busy={nudgeBusyCandidate !== null || callNowCandidate !== null}
           onMoveStage={(toStage) => {
             if (!detailApplicationId) return
             handleKanbanMove(detailApplicationId, toStage)
