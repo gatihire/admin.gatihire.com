@@ -600,11 +600,11 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
   // left-to-right down one column and genuinely prefer a list. Their choice
   // is remembered per browser.
   const [viewMode, setViewMode] = useState<PipelineViewMode>(() => {
-    if (typeof window === "undefined") return "board"
+    if (typeof window === "undefined") return "list"
     try {
-      return window.localStorage.getItem("gatihire.pipeline.view") === "list" ? "list" : "board"
+      return window.localStorage.getItem("gatihire.pipeline.view") === "board" ? "board" : "list"
     } catch {
-      return "board"
+      return "list"
     }
   })
   const [detailApplicationId, setDetailApplicationId] = useState<string | null>(null)
@@ -904,8 +904,10 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
   const baseFiltered = activeStage === "all"
     ? applications
     : activeStage === "ai_screen"
-      ? applications.filter((a) => !!callStatusByCandidate[a.candidate_id] && a.status === "ai_screen")
-      : applications.filter((a) => a.status === activeStage)
+      ? applications.filter((a) => !!callStatusByCandidate[a.candidate_id] && resolveStage(a.status) === "ai_screen")
+      : resolveStage(activeStage) != null
+        ? applications.filter((a) => resolveStage(a.status) === activeStage)
+        : applications.filter((a) => a.status === activeStage)
 
   /**
    * The source filter — one definition, used by the board and the list.

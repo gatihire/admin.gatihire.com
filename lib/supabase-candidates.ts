@@ -596,7 +596,7 @@ export class SupabaseCandidateService {
       // fair trade for removing a full index/table scan on every page view.
       let query = supabaseAdmin
         .from('candidates')
-        .select(CANDIDATE_LIST_COLUMNS, { count: 'estimated' })
+        .select(CANDIDATE_LIST_COLUMNS, { count: 'exact' })
         .order(sortBy, { ascending: sortOrder === 'asc' })
         .or('source.is.null,source.neq.juicebox')
         // Re-uploaded duplicates are parked with status='duplicate' (see the
