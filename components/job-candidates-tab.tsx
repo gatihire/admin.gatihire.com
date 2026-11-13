@@ -904,7 +904,16 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
   const baseFiltered = activeStage === "all"
     ? applications
     : activeStage === "ai_screen"
-      ? applications.filter((a) => !!callStatusByCandidate[a.candidate_id] && resolveStage(a.status) === "ai_screen")
+      ? applications
+          .filter((a) => resolveStage(a.status) === "ai_screen")
+          .sort((a, b) => {
+            // Candidates with call status data float to the top
+            const aHasCall = !!callStatusByCandidate[a.candidate_id]
+            const bHasCall = !!callStatusByCandidate[b.candidate_id]
+            if (aHasCall && !bHasCall) return -1
+            if (!aHasCall && bHasCall) return 1
+            return 0
+          })
       : resolveStage(activeStage) != null
         ? applications.filter((a) => resolveStage(a.status) === activeStage)
         : applications.filter((a) => a.status === activeStage)
