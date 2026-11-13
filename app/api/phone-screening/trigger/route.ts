@@ -306,7 +306,11 @@ export async function POST(request: NextRequest) {
   try {
     const ctx = await getInternalAuthContext(request)
     if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-    if (!hasPermission(ctx, "applications.manage")) {
+    // `applications.manage` is the admin gate; recruiters are granted
+    // `outreach.send` instead (the canonical permission for contacting
+    // candidates), so accept either — otherwise a recruiter can look at
+    // everything but cannot actually nudge/call a candidate.
+    if (!hasPermission(ctx, "applications.manage") && !hasPermission(ctx, "outreach.send")) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     }
 

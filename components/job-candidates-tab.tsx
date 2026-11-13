@@ -2209,9 +2209,31 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || "Failed to start screening")
+      // The trigger reports per-candidate failures in `errors`/`renudgeErrors`
+      // (e.g. "RENU RANA: shortlist message failed (pre-screen returned needs_review)").
+      // Before this, those failures were dropped on the floor and HR saw
+      // "Info request sent" even though no message was delivered. If nothing
+      // was sent, surface the real reason.
+      const errs: string[] = Array.isArray(data.errors)
+        ? data.errors
+        : Array.isArray(data.renudgeErrors)
+          ? data.renudgeErrors
+          : []
+      const sent = Number(data.nudgeSent ?? 0) + Number(data.callsTriggered ?? 0)
+      const skipped = Array.isArray(data.skippedNoPhone) ? data.skippedNoPhone : []
+      if (sent === 0 && (errs.length > 0 || skipped.length > 0)) {
+        const detail = (errs.length ? errs.join(" · ") : `No phone for ${skipped.join(", ")}`).slice(0, 400)
+        throw new Error(detail)
+      }
+      // Partial success: at least one candidate failed — tell HR, don't hide it.
+      const partial = errs.length > 0 ? errs.join(" · ").slice(0, 200) : null
       const title = mode === "call_now" ? "AI call started" : "Info request sent"
-      const desc = mode === "call_now" ? `Direct call triggered for ${c.name}` : `WhatsApp info request sent to ${c.name}`
-      toast({ title, description: desc })
+      const desc = mode === "call_now"
+        ? `Direct call triggered for ${c.name}`
+        : partial
+          ? `Message sent to ${c.name}, but: ${partial}`
+          : `WhatsApp info request sent to ${c.name}`
+      toast({ title, description: desc, variant: partial ? "default" : undefined })
       onApplicationUpdated({ ...application, status: "ai_screen" })
     } catch (err: any) { toast({ title: "Failed", description: err.message, variant: "destructive" }) }
     finally { onNudgeEnd?.() }

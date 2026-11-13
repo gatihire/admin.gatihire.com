@@ -31,7 +31,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
   try {
     const ctx = await getInternalAuthContext(request)
     if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-    if (!hasPermission(ctx, "applications.manage")) {
+    if (!hasPermission(ctx, "applications.manage") && !hasPermission(ctx, "outreach.send")) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     }
 
