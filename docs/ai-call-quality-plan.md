@@ -854,6 +854,21 @@ call left open, not a to-do list for another interviewer. `next_round_ready` was
 displayed and is no longer produced by the prompt; the parser still accepts it because it
 is part of Bolna's payload vocabulary, not ours.
 
+**f. The placement query was reading columns that no longer exist.** While checking the
+Nikhil card against the live row, the retry path turned out to be dead: `placeCallForParticipant`
+selected `jobs.key_responsibilities`, `daily_work_summary` and `work_type`, all dropped by
+`supabase/migrations/trim_job_fields.sql` in February. PostgREST answers `42703` and the
+caller reads any error as *"participant not found"*, so from `d4dc1bb` (deployed 10:44 UTC)
+retries and inbound callbacks placed nothing. The same three columns were in the inbound
+lookup, which is why a candidate calling back could not be matched to their row.
+
+The JD text is still in `jobs.description`, so `jobContextFromRow()` and
+`responsibilitiesFromDescription()` rebuild what the columns held — six real responsibility
+sentences for this job, headings and `Position: …` field lines excluded. The template
+fallback also strips the leading action verb, because *"Handle Sea Export freight pricing
+for …"* is not a question anyone can answer well. Same class of bug as `9c194b6`; the
+lesson is that a PostgREST projection is a schema contract and nothing tests it.
+
 
 
 ---
