@@ -157,14 +157,20 @@ function checkAsk(
   }
   // "Aapne dispatch kaise plan kiya aur kitni gaadiyan thi?" has one "?" but two
   // asks, so the model would answer whichever half it heard. Counting marks is
-  // not enough: require two interrogatives joined by "aur". A single
-  // interrogative with two objects ("dispatch aur tracking kaise manage ki?")
-  // is one ask and must stay legal.
-  if (
-    /\baur\b/i.test(ask) &&
-    (ask.match(/(kaise|kaun|kaunsa|kaunsi|kaunse|kab|kahan|kahaan|kyun|kyu|kitna|kitni|kitne|kya)\b/gi) || []).length >= 2
-  ) {
+  // not enough: require two DIFFERENT interrogatives joined by "aur". Distinct,
+  // because "kya kya tasks kiye" is one ask (the reduplication is idiomatic), and
+  // "dispatch aur tracking kaise manage ki?" is one ask with two objects.
+  const interrogatives = new Set(
+    (ask.match(/(kaise|kaun|kaunsa|kaunsi|kaunse|kab|kahan|kahaan|kyun|kyu|kitna|kitni|kitne|kya)\b/gi) || [])
+      .map((w) => w.toLowerCase())
+  )
+  if (/\baur\b/i.test(ask) && interrogatives.size >= 2) {
     errors.push(`stacked question (two asks joined by "aur"): ${ask}`)
+  }
+  // The voice is Hinglish in Latin script. A stray Devanagari word (Gemini does
+  // this) changes pronunciation for the TTS voice and reads as broken on screen.
+  if (/[\u0900-\u097F]/.test(ask)) {
+    errors.push(`non-Latin script (Devanagari) in question: ${ask}`)
   }
   for (const rule of BANNED_ASK) {
     if (rule.re.test(ask)) errors.push(`banned ${rule.label}: ${ask}`)

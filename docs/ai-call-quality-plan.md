@@ -646,6 +646,35 @@ words**. Below that: `ai_score = null`, `_insufficient_evidence: true`, `needs_m
 and the transcript is kept for a human. The 87-second call in Appendix B has one substantive
 answer, so it is now `not_screened` instead of a 6.
 
+### 6.3 Production backfill, 18 Nov
+
+The rule above was applied to existing rows, not only to new calls:
+
+| Cards | Found | Action |
+|---|---|---|
+| 6/10 on thin evidence | 65 | score cleared |
+| 2/10 on thin evidence | 91 | score cleared — mostly failed calls stamped "not a fit" |
+| 8/10 on thin evidence | 8 | score cleared — worst of the set: shortlisted off a call that did not happen |
+| 4/10 on thin evidence | 13 | score cleared |
+| **Total** | **177** | `ai_score` and `ai_recommendation` → `null`, `verdict_json._insufficient_evidence: true` |
+
+Left alone on purpose: `ai_summary` (a real note like "asked to be called back at 6 PM" is worth more
+than a blank), `status`, and `needs_manual_followup`. Bands `0` and `7` were not produced by the
+derivation code and are being investigated separately.
+
+Questionnaires for rows that can still be dialled were rebuilt as well, so the card matches what the
+agent will say: **616 rows** (15 active pre-call, 601 in retry states). The active ones were generated
+fresh with Gemini; retry rows used the deterministic bridge/template, which is exactly what the
+dialler would have built for them at call time.
+
+Two rule bugs surfaced while generating those plans, and are now fixed:
+
+- `"kya kya"` counted as two interrogatives, so a legitimate question (*"GST aur TDS ke liye kya kya
+  tasks kiye?"*) was rejected as stacked. Detection now compares **distinct** interrogatives.
+- One generated question contained a Devanagari word (`दौरान`) inside Hinglish. Non-Latin script is
+  now a validation error: it changes TTS pronunciation and looks broken on the card.
+
+
 New: the scorer receives the transcript **and the plan**, and returns per-topic evidence.
 
 ```json
