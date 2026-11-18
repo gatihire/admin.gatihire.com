@@ -76,8 +76,16 @@ function buildAgentPayload(webhookBase: string, opts?: { agentName?: string; lan
             output: { provider: "plivo", format: "wav" },
           },
           task_config: {
+            // 7 minutes: the plan promises 5 and the prompt hard-stops at 7.
             call_terminate: 420,
-            hangup_after_silence: 10,
+            // 20 s, not the old 12: a candidate thinking or standing in a noisy
+            // cabin was being hung up on mid-thought.
+            hangup_after_silence: 20,
+            // Asked at 10 s, not 7 — at 7 it fired right after the candidate
+            // started a sentence.
+            trigger_user_online_message_after: 10,
+            // 300 ms, not 0: the agent talked over the candidate.
+            interruption_backoff_period: 300,
           },
         },
       ],

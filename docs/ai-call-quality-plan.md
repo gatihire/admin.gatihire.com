@@ -627,16 +627,32 @@ When a client disputes a rejection, the evidence is the answer.
 
 These are console changes, not code. They are the cheapest wins on the list.
 
-| Setting | Current | Recommended | Why |
+| Setting | Before | Recommended | Why |
 |---|---|---|---|
 | `hangup_after_silence` | 12 s | **20 s** | 12 s cuts off a candidate who is thinking or in a noisy truck cabin. |
 | "are you still there?" prompt | 7 s | **10 s** | Two sample calls show it firing right after the candidate started a thought. |
 | Interruption backoff | 0 ms | **300 ms** | Agent talks over the candidate. 4.7 interruptions/call is still high. |
+| `call_terminate` | 1200 s | **420 s** | A dead call could sit for 20 minutes. The plan promises 5, caps at 7. |
 | Retry count | 0 on every call | **2** | See §9. No automatic retries are running at the provider level. |
 | Model | `gemini-3.1-flash-lite-preview` | test a stronger model | Time to first word 510 → 966 ms. Cheapest quality lever we have not tried. |
 
-The first three are a five-minute dashboard change and should happen **before** any code ships, so
-the question-plan change is measured against a stable voice pipeline.
+**Applied on 18 Nov** (the first four, via `PUT /v2/agent/{id}` — the deprecated `PATCH`
+silently ignores `tasks`, so verify with a `GET` after any change). The prompt and welcome
+message were pushed from `lib/bolna.ts` in the same operation; the voice, transcriber,
+voicemail detection and noise cancellation were left exactly as the dashboard had them.
+
+Two notes for whoever touches this next:
+
+- **`agent_config.composition_by_language` is now null.** It held the dashboard's block-editor
+  copy of the prompt, which had drifted from the code prompt. `agent_prompts.task_1.system_prompt`
+  is the source of truth for calls; clearing the block copy removes the chance of the two
+  disagreeing. If someone edits the prompt in the dashboard again, expect that field to come back.
+- **`BOLNA_MASTER_PROMPT` in code and the dashboard prompt must stay identical.** The dashboard
+  wins at runtime until someone re-syncs with `POST /api/bolna/agent {force:true}`, or with the
+  `PUT` above. `docs/ai-screener-prompt.md` is the human-readable copy — update all three together.
+
+The model experiment is not applied; it needs an A/B, not a switch.
+
 
 ---
 
