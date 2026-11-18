@@ -4,6 +4,7 @@ import { evaluateCallQuality } from "@/lib/ai-learning"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { scheduleBolnaCall, MAX_CALL_ATTEMPTS } from "@/lib/scheduled-call"
 import { enrichTranscript } from "@/lib/transcript-enrichment"
+import { deriveFallbackScore } from "@/lib/call-scoring"
 import { logCandidateActivity } from "@/lib/activity-logger"
 import { toE164 } from "@/lib/phone"
 import { appendWhatsappHistory } from "@/lib/whatsapp-history"
@@ -1016,33 +1017,33 @@ async function enrichTranscriptAsync(
   const enriched = await enrichTranscript(transcript, candidate, job, bolnaVerdict)
   if (!enriched) return
 
-  // Derive a score/recommendation when this call never produced one (e.g. the
-  // Bolna verdict was rejected or never emitted). Never overwrite a real one.
-  const ratingAlias: Record<string, string> = {
-    strong_fit: "advance", good_fit: "further_review",
-    possible_fit: "further_review", not_fit: "not_a_fit",
-  }
-  const recommendation = ratingAlias[enriched.overall_verdict] ?? "further_review"
-  // Derive an internally consistent score from the verdict band (not the model's
-  // confidence, which is a separate measure): advance ~8, further_review ~6,
-  // not_a_fit ~2. Keeps "8/10 advance" style labels coherent on the card.
+  // Derive a score/recommendation only when this call never produced one (e.g.
+  // the Bolna verdict was rejected or never emitted) AND the call was a real,
+  // completed screening. This block previously wrote the score when the
+  // condition was *false*, so every failed or partial call without a score was
+  // defaulted to 6/10 "further review" — a real-looking judgement on a call
+  // that never happened. See lib/call-scoring.ts.
   //
-  // For incomplete calls (wife picked up, auto-cut, too short) never assign a
-  // default score — a 6/10 "further_review" implies a real screening happened.
-  const derivedScore = { advance: 8, further_review: 6, not_a_fit: 2 }[recommendation]
-  const hasScore = typeof participant.ai_score === "number" || typeof participant.ai_recommendation === "string"
-  const shouldScore = hasScore || !isIncompleteCall
+  // The summary is also left alone for incomplete calls: the verdict path has
+  // already written "Not enough conversation to assess this candidate", and
+  // overwriting it with a narrative summary hides that from HR.
+  const hasScore =
+    typeof participant.ai_score === "number" || typeof participant.ai_recommendation === "string"
+  const derived = deriveFallbackScore({
+    hasScore,
+    isIncomplete: isIncompleteCall,
+    verdict: enriched.overall_verdict,
+  })
 
   // Store enriched summary
   await supabaseAdmin
     .from("phone_screening_participants")
     .update({
       enriched_summary: enriched,
-      ai_summary: enriched.comprehensive_summary,
-      ...(shouldScore ? {} : {
-        ai_score: derivedScore,
-        ai_recommendation: recommendation,
-      }),
+      ...(isIncompleteCall ? {} : { ai_summary: enriched.comprehensive_summary }),
+      ...(derived
+        ? { ai_score: derived.score, ai_recommendation: derived.recommendation }
+        : {}),
       updated_at: new Date().toISOString(),
     })
     .eq("id", participantId)
@@ -1050,8 +1051,9 @@ async function enrichTranscriptAsync(
   logger.info(`Transcript enriched for participant ${participantId}`, {
     verdict: enriched.overall_verdict,
     confidence: enriched.confidence_score,
-    derivedScore: !hasScore ? derivedScore : undefined,
-    skippedDefaultScore: isIncompleteCall && !hasScore,
+    derivedScore: derived?.score,
+    keptExistingScore: hasScore,
+    skippedDefaultScore: !derived && !hasScore,
   })
 }
 

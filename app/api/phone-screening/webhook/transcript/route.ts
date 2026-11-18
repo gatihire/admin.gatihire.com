@@ -29,19 +29,38 @@ export async function POST(request: NextRequest) {
     const transcript = body.transcript || body.transcription
     const structuredOutput = body.structured_output || body.ai_summary
 
+    let transcriptRows: Array<{ speaker: string; text: string }> = []
+
     if (Array.isArray(transcript)) {
-      const transcriptRows = transcript.map((segment: any) => ({
+      const rows = transcript.map((segment: any) => ({
         participant_id: participantId,
         speaker: segment.speaker === "agent" || segment.speaker === "ai" ? "ai" : "candidate",
         text: segment.text || "",
         start_time_sec: segment.start_time || segment.start,
         end_time_sec: segment.end_time || segment.end,
       }))
+      transcriptRows = rows
 
-      if (transcriptRows.length > 0) {
-        await supabaseAdmin.from("call_transcripts").insert(transcriptRows)
+      if (rows.length > 0) {
+        await supabaseAdmin.from("call_transcripts").insert(rows)
       }
     }
+
+    // Same evidence rule as the main webhook (lib/bolna-execution.ts): a score
+    // needs two substantive candidate answers and 60+ candidate words. This
+    // route used to write whatever score arrived, so a call with three words of
+    // transcript could still land on the board as 6/10 "further review".
+    const candidateTexts = transcriptRows
+      .filter((r) => r.speaker === "candidate" && r.text && r.text.trim())
+      .map((r) => r.text.trim())
+    const substantiveAnswers = candidateTexts.filter(
+      (t) => t.split(/\s+/).filter(Boolean).length >= 10
+    ).length
+    const candidateWords = candidateTexts.reduce(
+      (total, t) => total + t.split(/\s+/).filter(Boolean).length,
+      0
+    )
+    const evidenceTooThin = substantiveAnswers < 2 || candidateWords < 60
 
     if (structuredOutput) {
       const parsed = typeof structuredOutput === "string" ? JSON.parse(structuredOutput) : structuredOutput
@@ -54,8 +73,20 @@ export async function POST(request: NextRequest) {
         .update({
           ...(verdict
             ? {
-                ai_score: verdict.score,
+                ai_score: evidenceTooThin ? null : verdict.score,
                 ai_recommendation: verdict.recommendation,
+                ...(evidenceTooThin
+                  ? {
+                      needs_manual_followup: true,
+                      verdict_json: {
+                        ...(parsed as Record<string, unknown>),
+                        score: null,
+                        _insufficient_evidence: true,
+                        _substantive_answers: substantiveAnswers,
+                        _candidate_words: candidateWords,
+                      },
+                    }
+                  : {}),
               }
             : {}),
           ai_summary: typeof structuredOutput === "string" ? structuredOutput : JSON.stringify(structuredOutput),

@@ -580,6 +580,48 @@ is fine if the resume says GRIR; it is a dead end if it does not. The model cann
 Today: `advance → 8`, `further_review → 6`, `not_a_fit → 2`, assigned from a band. The score says
 nothing about what was said.
 
+### 6.1 Where the fake 6/10s came from
+
+Three separate code paths derive a score from a verdict band, and one of them had its condition
+inverted:
+
+```ts
+// lib/bolna-execution.ts, before
+const hasScore = typeof participant.ai_score === "number" || typeof participant.ai_recommendation === "string"
+const shouldScore = hasScore || !isIncompleteCall
+...
+...(shouldScore ? {} : { ai_score: derivedScore, ai_recommendation: recommendation })
+```
+
+The spread writes the score when `shouldScore` is **false** — i.e. exactly when the call is
+incomplete and has no score. The comment directly above it says the opposite ("never assign a
+default score to an incomplete call"). So a failed, partial or cut-off call with a few lines of
+transcript was labelled **6/10 · further review**, which is the card that makes HR open a
+transcript of a conversation that never happened.
+
+The same 6 could arrive from the legacy transcript webhook, which wrote `verdict.score` with no
+evidence check at all.
+
+Fixed on 18 Nov:
+
+| Path | Before | After |
+|---|---|---|
+| Enrichment pass (`bolna-execution.ts`) | 6/10 on incomplete calls with no score | score only for a **completed** call with a real verdict band |
+| Enrichment pass, summary | overwrote "Not enough conversation to assess" | leaves the honest line in place |
+| Legacy transcript webhook | wrote any score the payload carried | skips the score below the evidence threshold, flags for review |
+| Rule location | written three times, one inverted | `lib/call-scoring.ts`, one function, tested |
+
+`deriveFallbackScore()` returns `null` for: an incomplete call, a call that already has a
+score/band (never second-guess), and an unrecognised verdict. Only a completed call with a real
+band gets a derived score.
+
+### 6.2 The evidence gate
+
+A score now requires **two substantive candidate answers (10+ words each) and 60+ candidate
+words**. Below that: `ai_score = null`, `_insufficient_evidence: true`, `needs_manual_followup`,
+and the transcript is kept for a human. The 87-second call in Appendix B has one substantive
+answer, so it is now `not_screened` instead of a 6.
+
 New: the scorer receives the transcript **and the plan**, and returns per-topic evidence.
 
 ```json
