@@ -13,6 +13,13 @@ import { getProviderPause, pauseCallsForBalance, clearProviderPauseIfPaused } fr
 import { buildAlreadyCollectedUserData } from "@/lib/prompt-user-data"
 import { buildResumeInfo } from "@/lib/prompt-user-data"
 import {
+  buildPlanFromQuestions,
+  buildTemplatePlan,
+  renderInterviewPlan,
+  renderLegacyQuestions,
+  toBolnaUserData,
+} from "@/lib/interview-plan"
+import {
   buildCandidateInfoFromCollected,
   buildJobRequirementsFromJob,
   evaluatePreScreenWithAI,
@@ -313,6 +320,27 @@ interface ParticipantRow {
     phone?: string | null
     total_experience?: string | number | null
     location?: string | null
+    current_role?: string | null
+    resume_text?: string | null
+  } | null
+  job_id?: string | null
+  jobs?: {
+    id: string
+    title?: string | null
+    client_name?: string | null
+    skills_must_have?: string[] | null
+    key_responsibilities?: string[] | null
+    daily_work_summary?: string | null
+    license_type?: string | null
+    role_category?: string | null
+    city?: string | null
+    work_type?: string | null
+    employment_type?: string | null
+    experience_min_years?: number | null
+    experience_max_years?: number | null
+    salary_min?: number | null
+    salary_max?: number | null
+    salary_type?: string | null
   } | null
 }
 
@@ -336,8 +364,12 @@ export async function placeCallForParticipant(
     .select(`
       id, status, call_attempts, call_payload_json, info_data,
       whatsapp_sent_at, next_retry_at, scheduled_call_at, campaign_id,
-      placement_attempts, next_placement_retry_at,
-      candidates: candidate_id (id, name, phone, total_experience, location)
+      placement_attempts, next_placement_retry_at, job_id,
+      candidates: candidate_id (id, name, phone, total_experience, location, current_role, resume_text),
+      jobs: job_id (id, title, client_name, skills_must_have, key_responsibilities,
+        daily_work_summary, license_type, role_category, city, work_type,
+        employment_type, experience_min_years, experience_max_years,
+        salary_min, salary_max, salary_type)
     `)
     .eq("id", participantId)
     .maybeSingle()
@@ -479,14 +511,70 @@ export async function placeCallForParticipant(
     total_experience: candidate.total_experience ?? undefined,
     location: candidate.location ?? undefined,
   })
-  const userData =
-    payload && Object.keys(payload).length > 0
-      ? { ...payload, ...collected, participant_id: participantId }
+  const stored = toBolnaUserData(payload)
+  let userData: Record<string, unknown> =
+    stored && Object.keys(stored).length > 0
+      ? { ...stored, ...collected, participant_id: participantId }
       : { candidate_name: candidate.name || "", ...collected, participant_id: participantId }
+
+  // A retry with an empty payload used to dial anyway: the candidate heard
+  // "logistics role" for an HR job and was screened with no questions at all
+  // (see docs/ai-call-quality-plan.md Appendix B). Never dial context-free, and
+  // never dial with a plan-less payload now that the prompt reads
+  // {interview_plan}. Keep recruiter-edited questions by wrapping them.
+  if (!String(userData.interview_plan || "").trim()) {
+    const existingQuestions = String(userData.questions || "")
+    const plan = existingQuestions.trim()
+      ? buildPlanFromQuestions(existingQuestions, (row.jobs || { id: row.job_id || "" }) as any, {
+          id: candidate.id,
+          name: candidate.name,
+          current_role: candidate.current_role,
+          resume_text: candidate.resume_text,
+          total_experience: candidate.total_experience != null ? Number(candidate.total_experience) : null,
+          location: candidate.location,
+        })
+      : buildTemplatePlan((row.jobs || { id: row.job_id || "" }) as any, {
+          id: candidate.id,
+          name: candidate.name,
+          current_role: candidate.current_role,
+          resume_text: candidate.resume_text,
+          total_experience: candidate.total_experience != null ? Number(candidate.total_experience) : null,
+          location: candidate.location,
+        })
+    const legacy = renderLegacyQuestions(plan)
+      .split("\n")
+      .map((q, i) => `${i + 1}. ${q.replace(/^\d+\.\s*/, "")}`)
+      .join("\n")
+    userData = {
+      ...userData,
+      job_title: userData.job_title || row.jobs?.title || "",
+      client_name: userData.client_name || row.jobs?.client_name || "",
+      hiring_company_name: userData.hiring_company_name || row.jobs?.client_name || "",
+      interview_plan: renderInterviewPlan(plan),
+      // The legacy placeholder is rendered from the plan too, so a question the
+      // plan dropped (joining, client name, CLRA) cannot survive in a queue row
+      // that is still read by the old dashboard prompt.
+      questions: legacy,
+    }
+    logger.warn("Call payload had no interview plan — built one before dialling", {
+      participantId,
+      jobId: row.job_id,
+      topics: plan.topics.length,
+      fromExistingQuestions: Boolean(existingQuestions.trim()),
+    })
+    // Persist it so the next attempt asks exactly the same thing.
+    await supabaseAdmin
+      .from("phone_screening_participants")
+      .update({
+        call_payload_json: { ...(payload || {}), ...userData, _interview_plan: plan },
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", participantId)
+  }
 
   const result = await placeBolnaCall({
     to: candidate.phone,
-    userData,
+    userData: toBolnaUserData(userData),
   })
 
   if (!result.success || !result.executionId) {

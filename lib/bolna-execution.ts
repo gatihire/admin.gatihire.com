@@ -386,11 +386,24 @@ async function buildFallbackVerdictPatch(
     // Penalize very short conversations
     const wordCount = transcript.split(/\s+/).filter(w => w.length > 0).length
     const unavailablePattern = /unavailable|not available|couldn't speak|immediately terminated|hung up|disconnected|call back later/i.test(transcript)
+    // Same evidence rule as the verdict path: two substantive answers (10+ words)
+    // and 60+ candidate words. One answer cannot evidence two topics.
+    const candidateSegments = transcriptToSegments(transcript).filter(
+      (s) => s.speaker === "candidate" && s.text && s.text.trim()
+    )
+    const substantiveAnswers = candidateSegments.filter(
+      (s) => s.text.trim().split(/\s+/).filter(Boolean).length >= 10
+    ).length
+    const candidateWordCount = candidateSegments.reduce(
+      (total, s) => total + s.text.trim().split(/\s+/).filter(Boolean).length,
+      0
+    )
     let derivedScore = recommendation === "advance" ? 8 : recommendation === "further_review" ? 6 : 2
     if (wordCount < 50 || unavailablePattern) derivedScore = 2
     else if (wordCount < 100) derivedScore = Math.min(derivedScore, 4)
     const score = derivedScore
-    const insufficient = wordCount < 50 || unavailablePattern
+    const insufficient =
+      wordCount < 50 || unavailablePattern || substantiveAnswers < 2 || candidateWordCount < 60
     const vj: any = { ...(fallback as any) }
     const cls = insufficient ? "not_screened" : undefined
     if (cls) {
@@ -682,10 +695,21 @@ export async function handleCompletedExecution(
     // Don't trust scores from very short calls with minimal engagement
     const segmentsForCountCheck = transcriptToSegments(transcript)
     const userTurnCountCheck = segmentsForCountCheck.filter(s => s.speaker === "candidate").filter(s => s.text && s.text.trim().length > 0).length
+    // A score needs evidence from at least two topics. One long answer cannot
+    // cover two topics, so a call with a single substantive answer is not
+    // screenable however long it ran (a live 87s call had exactly one).
+    const substantiveAnswers = segmentsForCountCheck
+      .filter(s => s.speaker === "candidate" && s.text)
+      .filter(s => s.text.trim().split(/\s+/).filter(Boolean).length >= 10)
+      .length
+    const candidateWordCount = segmentsForCountCheck
+      .filter(s => s.speaker === "candidate" && s.text)
+      .reduce((total, s) => total + s.text.trim().split(/\s+/).filter(Boolean).length, 0)
+    const evidenceTooThin = substantiveAnswers < 2 || candidateWordCount < 60
     const durationSecCheck = rawDuration ? Number(rawDuration) : 0
     const unavailablePatternCheck = /unavailable|not available|couldn't speak|immediately terminated|hung up|disconnected|cannot hear|can't hear|not able to listen|audio issue|voice not audible|inaudible|no audio/i.test(transcript)
     if (typeof effectiveVerdict.score === "number") {
-      if (durationSecCheck < 60 || userTurnCountCheck < 2 || (unavailablePatternCheck && durationSecCheck < 90)) {
+      if (durationSecCheck < 60 || userTurnCountCheck < 2 || evidenceTooThin || (unavailablePatternCheck && durationSecCheck < 90)) {
         // A call too short to hold a conversation cannot support a verdict.
         // This used to write score 2 / "not a fit", which is a real-looking
         // judgement on no evidence — recruiters reasonably rejected it
@@ -702,10 +726,14 @@ export async function handleCompletedExecution(
           recommendation: "further_review",
           _insufficient_evidence: true,
           _evidence_seconds: durationSecCheck,
+          _substantive_answers: substantiveAnswers,
+          _candidate_words: candidateWordCount,
           notes:
             durationSecCheck < 60
               ? `Call was ${durationSecCheck}s — too short to assess. No score given. HR should review the transcript and send the call again.`
-              : "The candidate could not be heard clearly. No score given — HR should review the transcript and send the call again.",
+              : evidenceTooThin
+                ? `Only ${substantiveAnswers} substantive answer(s) and ${candidateWordCount} candidate words — not enough evidence for two topics. No score given. HR should review the transcript and send the call again.`
+                : "The candidate could not be heard clearly. No score given — HR should review the transcript and send the call again.",
         }
         patch.ai_summary = "Not enough conversation to assess this candidate. No score was given."
       } else {

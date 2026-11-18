@@ -4,6 +4,13 @@ import { logger } from "@/lib/logger"
 import { verifyBolnaWebhook } from "@/lib/bolna"
 import { placeBolnaCall } from "@/lib/bolna"
 import { logCandidateActivity } from "@/lib/activity-logger"
+import {
+  buildPlanFromQuestions,
+  buildTemplatePlan,
+  renderInterviewPlan,
+  renderLegacyQuestions,
+  toBolnaUserData,
+} from "@/lib/interview-plan"
 
 export const runtime = "nodejs"
 
@@ -21,8 +28,25 @@ async function findParticipantByPhone(phone: string): Promise<{
   candidate_id: string
   status: string
   call_attempts: number
-  candidates: { id: string; name: string; phone: string } | null
-  jobs: { id: string; title: string; client_name: string } | null
+  candidates: { id: string; name: string; phone: string; current_role?: string | null } | null
+  jobs: {
+    id: string
+    title: string
+    client_name: string
+    skills_must_have?: string[] | null
+    key_responsibilities?: string[] | null
+    daily_work_summary?: string | null
+    license_type?: string | null
+    role_category?: string | null
+    city?: string | null
+    work_type?: string | null
+    employment_type?: string | null
+    experience_min_years?: number | null
+    experience_max_years?: number | null
+    salary_min?: number | null
+    salary_max?: number | null
+    salary_type?: string | null
+  } | null
 } | null> {
   const e164Phone = phone.startsWith("+") ? phone : `+${phone.replace(/\D/g, "")}`
 
@@ -34,8 +58,11 @@ async function findParticipantByPhone(phone: string): Promise<{
       candidate_id,
       status,
       call_attempts,
-      candidates:candidate_id (id, name, phone),
-      jobs:job_id (id, title, client_name)
+      candidates:candidate_id (id, name, phone, current_role),
+      jobs:job_id (id, title, client_name, skills_must_have, key_responsibilities,
+        daily_work_summary, license_type, role_category, city, work_type,
+        employment_type, experience_min_years, experience_max_years,
+        salary_min, salary_max, salary_type)
     `)
     .eq("candidates.phone", e164Phone)
     .in("status", ["failed", "call_scheduled", "not_interested", "unreachable", "completed"])
@@ -50,8 +77,25 @@ async function findParticipantByPhone(phone: string): Promise<{
     candidate_id: string
     status: string
     call_attempts: number
-    candidates: { id: string; name: string; phone: string } | null
-    jobs: { id: string; title: string; client_name: string } | null
+    candidates: { id: string; name: string; phone: string; current_role?: string | null } | null
+    jobs: {
+      id: string
+      title: string
+      client_name: string
+      skills_must_have?: string[] | null
+      key_responsibilities?: string[] | null
+      daily_work_summary?: string | null
+      license_type?: string | null
+      role_category?: string | null
+      city?: string | null
+      work_type?: string | null
+      employment_type?: string | null
+      experience_min_years?: number | null
+      experience_max_years?: number | null
+      salary_min?: number | null
+      salary_max?: number | null
+      salary_type?: string | null
+    } | null
   }
 }
 
@@ -110,9 +154,51 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ status: "ok" })
     }
 
-    const userData = participant.call_payload_json && Object.keys(participant.call_payload_json).length > 0
-      ? { ...participant.call_payload_json, participant_id: participant.id, inbound_resume: true }
-      : { candidate_name: candidate.name || "", participant_id: participant.id, inbound_resume: true }
+    const stored = participant.call_payload_json ? toBolnaUserData(participant.call_payload_json) : {}
+    let userData: Record<string, unknown> =
+      Object.keys(stored).length > 0
+        ? { ...stored, participant_id: participant.id, inbound_resume: true }
+        : { candidate_name: candidate.name || "", participant_id: participant.id, inbound_resume: true }
+
+    // Same assertion as the outbound path: an inbound callback for a row whose
+    // payload was never written must not be screened with no questions, and the
+    // prompt now reads {interview_plan}.
+    if (!String(userData.interview_plan || "").trim()) {
+      const existingQuestions = String(userData.questions || "")
+      const planSource = existingQuestions.trim()
+        ? buildPlanFromQuestions(existingQuestions, (participant.jobs || { id: "" }) as any, {
+            id: candidate.id,
+            name: candidate.name,
+            current_role: candidate.current_role ?? null,
+          })
+        : buildTemplatePlan((participant.jobs || { id: "" }) as any, {
+            id: candidate.id,
+            name: candidate.name,
+            current_role: candidate.current_role ?? null,
+          })
+      userData = {
+        ...userData,
+        job_title: userData.job_title || participant.jobs?.title || "",
+        client_name: userData.client_name || participant.jobs?.client_name || "",
+        hiring_company_name: userData.hiring_company_name || participant.jobs?.client_name || "",
+        interview_plan: renderInterviewPlan(planSource),
+        questions: renderLegacyQuestions(planSource)
+          .split("\n")
+          .map((q, i) => `${i + 1}. ${q.replace(/^\d+\.\s*/, "")}`)
+          .join("\n"),
+      }
+      logger.warn("Bolna inbound: payload had no interview plan — built one", {
+        participantId: participant.id,
+        fromExistingQuestions: Boolean(existingQuestions.trim()),
+      })
+      await supabaseAdmin
+        .from("phone_screening_participants")
+        .update({
+          call_payload_json: { ...(participant.call_payload_json || {}), ...userData, _interview_plan: planSource },
+          updated_at: now,
+        })
+        .eq("id", participant.id)
+    }
 
     const result = await placeBolnaCall({
       to: candidate.phone,

@@ -9,6 +9,7 @@ import { placeBolnaCall } from "@/lib/bolna"
 import { pauseCallsForBalance, getProviderPause } from "@/lib/provider-health"
 import { getWhatsAppService, talentOutreachTemplateName } from "@/lib/whatsapp"
 import { generateJDQuestions } from "@/lib/jd-questions"
+import { renderInterviewPlan, toBolnaUserData } from "@/lib/interview-plan"
 import { buildAlreadyCollectedUserData, buildResumeInfo } from "@/lib/prompt-user-data"
 import { scheduleOutreachFollowup, scheduleBolnaCall, outreachNudgeHours, outreachEscalateHours, prepareScheduleOffer, markScheduleOffer } from "@/lib/scheduled-call"
 import { type CandidateOrigin, type CandidateFlow, deriveCandidateFlow } from "@/lib/origin"
@@ -501,11 +502,20 @@ function buildBusinessTypeContext(job: any, client: any): string {
 }
 
 function buildJobGist(job: any): string {
-  if (job?.daily_work_summary) return String(job.daily_work_summary)
+  const summary = String(job?.daily_work_summary || "").trim()
+  if (summary) return summary
   if (Array.isArray(job?.key_responsibilities) && job.key_responsibilities.length) {
     return job.key_responsibilities.slice(0, 3).map(String).join(". ")
   }
-  return `A ${job?.employment_type || ""} ${job?.work_type || ""} role`.trim() || job?.title || ""
+  // "A full_time  role" told the agent nothing about the job, which is how a
+  // manager screening ended up with no people-management question. Skills at
+  // least describe the work; the title alone is the last resort.
+  const skills = Array.isArray(job?.skills_must_have)
+    ? job.skills_must_have.filter(Boolean).slice(0, 4).map(String)
+    : []
+  if (skills.length > 0) return `${String(job?.title || "Role").trim()} — ${skills.join(", ")}`
+  const fallback = `A ${job?.employment_type || ""} ${job?.work_type || ""} role`.replace(/\s+/g, " ").trim()
+  return fallback || String(job?.title || "")
 }
 
 /**
@@ -604,7 +614,7 @@ async function buildCallUserData(
   participantId?: string,
   infoData?: Record<string, unknown> | null
 ): Promise<CallUserDataResult> {
-  const { questions, promptUsed } = await generateJDQuestions(job, candidate as any, infoData)
+  const { questions, plan, promptUsed } = await generateJDQuestions(job, candidate as any, infoData)
   const candidateName = toTitleCase(candidate.name || "")
   const candidateFirstName = getFirstName(candidate.name || "")
   const limitedQuestions = questions.slice(0, 5)
@@ -635,6 +645,10 @@ async function buildCallUserData(
     experience_max: job.experience_max_years != null ? String(job.experience_max_years) : "",
     origin: origin === "inbound" || origin === "outbound" ? origin : origin,
     questions: limitedQuestions.map((q, i) => `${i + 1}. ${q}`).join("\n"),
+    // What the agent runs (prose) and what the scorer/editor read (structure).
+    // `_interview_plan` is stripped before the payload reaches Bolna.
+    interview_plan: renderInterviewPlan(plan),
+    _interview_plan: plan,
     timezone: "",
     participant_id: participantId || "",
   }
@@ -1010,7 +1024,7 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
 
     const result = await placeBolnaCall({
       to: candidate.phone as string,
-      userData,
+      userData: toBolnaUserData(userData),
     })
 
     if (result.success && result.executionId) {
