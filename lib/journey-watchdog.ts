@@ -151,7 +151,7 @@ export async function sweepJourney(opts?: {
     const past = new Date(Date.now() - BOOKED_CALL_GRACE_MINUTES * 60 * 1000).toISOString()
     const oldest = new Date(Date.now() - BOOKED_CALL_MAX_AGE_HOURS * 3600 * 1000).toISOString()
 
-    const { data } = await supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from("phone_screening_participants")
       .select("id, status, call_attempts, scheduled_call_at, next_retry_at, placement_attempts, next_placement_retry_at, whatsapp_sent_at, updated_at")
       .in("status", ["call_scheduled", "scheduled"])
@@ -166,6 +166,10 @@ export async function sweepJourney(opts?: {
       .or(`placement_attempts.is.null,placement_attempts.lt.6`)
       .order("scheduled_call_at", { ascending: true, nullsFirst: true })
       .limit(MAX_PER_BUCKET)
+
+    if (error) {
+      logger.error("Watchdog booked_not_fired query failed", { error: error.message, code: (error as any).code })
+    }
 
     for (const row of (data || []) as Row[]) {
       result.scanned++
@@ -188,17 +192,19 @@ export async function sweepJourney(opts?: {
   if (want.has("retry_overdue")) {
     const sweepIso = new Date().toISOString()
 
-    const { data } = await supabaseAdmin
+    const { data, error } = await supabaseAdmin
       .from("phone_screening_participants")
       .select("id, status, call_attempts, scheduled_call_at, next_retry_at, placement_attempts, next_placement_retry_at, whatsapp_sent_at, updated_at")
       .eq("status", "failed")
       .not("next_retry_at", "is", null)
       .lt("next_retry_at", new Date(Date.now() - BOOKED_CALL_GRACE_MINUTES * 60 * 1000).toISOString())
-      // PostgREST's negated `is` maps to SQL `IS DISTINCT FROM`, so a NULL
-      // bolna_status (the attempt never got a provider verdict) is included.
-      // A plain `<>` would skip every such row — which is exactly the set that
-      // needed rescuing.
-      .not("bolna_status", "is", "max_retries")
+      // A NULL bolna_status means the attempt never got a provider verdict, and
+      // those are exactly the rows that need rescuing. `not.is.max_retries` is
+      // NOT valid PostgREST (is only accepts null/not_null/true/false/unknown);
+      // it errored the whole query, and because the error was discarded this
+      // bucket silently rescued nobody — the queue looked empty while 50 rows
+      // sat overdue.
+      .or("bolna_status.is.null,bolna_status.neq.max_retries")
       .lt("call_attempts", MAX_TOTAL_CALL_ATTEMPTS)
       // Starvation guard. A refused placement never increments call_attempts, so
       // these rows used to stay at the head of the queue forever. Now each
@@ -209,6 +215,10 @@ export async function sweepJourney(opts?: {
       .order("next_placement_retry_at", { ascending: true, nullsFirst: true })
       .order("next_retry_at", { ascending: true })
       .limit(MAX_PER_BUCKET)
+
+    if (error) {
+      logger.error("Watchdog retry_overdue query failed", { error: error.message, code: (error as any).code })
+    }
 
     for (const row of (data || []) as Row[]) {
       result.scanned++
