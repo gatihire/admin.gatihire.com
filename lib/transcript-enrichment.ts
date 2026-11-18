@@ -16,8 +16,13 @@ export interface EnrichedSummary {
     notes: string
   }
   relocation_assessment: string
-  recommended_next_steps: string
-  interview_focus_areas: string[]
+  /**
+   * What this call did NOT establish. Evidence, not homework: it replaces the
+   * old `recommended_next_steps` / `interview_focus_areas` pair, which told HR to
+   * verify in the *next* round what this call should have asked. The card shows
+   * it as "Not confirmed on this call".
+   */
+  not_confirmed: string[]
   overall_verdict: "strong_fit" | "good_fit" | "possible_fit" | "not_fit"
   confidence_score: number
 }
@@ -104,8 +109,7 @@ Return ONLY a JSON object (no markdown, no commentary) with exactly this structu
     "notes": "any red flags or observations about salary discussion"
   },
   "relocation_assessment": "Candidate's willingness to relocate/commute, as stated in the call",
-  "recommended_next_steps": "Specific next action: advance to interview / schedule callback / reject, with reasoning",
-  "interview_focus_areas": ["area 1 the next interviewer should probe deeper", "area 2", "..."],
+  "not_confirmed": ["a qualification, skill or claim the call did not establish", "..."],
   "overall_verdict": "strong_fit/good_fit/possible_fit/not_fit",
   "confidence_score": 0.85
 }
@@ -114,7 +118,12 @@ RULES:
 - Base EVERY claim on what was actually said in the transcript. Do not infer or fabricate.
 - If the candidate declined to answer something, note it as "declined to share" not a guess.
 - If the call was very short (under 60s), note that the assessment has limited confidence.
-- Score: strong_fit (8-10), good_fit (6-7), possible_fit (4-5), not_fit (0-3).
+- "not_confirmed" is evidence of what the call left open — "no example of rate
+  negotiation with a shipping line", "never said how many shipments a month".
+  It is NOT a to-do list for another interviewer: never write "next round should
+  verify", "ask about", "probe deeper", or a recommendation to advance/reject.
+  Empty array if the call covered everything material.
+- Score: strong_fit 9, good_fit 7, possible_fit 5, not_fit 2.
 
 Job:
 ${jobBlock}

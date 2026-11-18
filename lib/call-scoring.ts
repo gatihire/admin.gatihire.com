@@ -10,8 +10,15 @@
  * webhook) and one of them had the condition inverted, so every failed or
  * partial call with no score was labelled 6/10 "further review" — the exact
  * card that makes HR open a transcript of a call that never took place.
+ *
+ * Why the bands are not 8/6/2 any more: `good_fit` and `possible_fit` both used
+ * to land on 6, so a strong-but-not-exceptional call was mathematically unable
+ * to score above 6 no matter how long it ran or how well it went. HR read that
+ * as "6 minutes on the phone for a 6/10". The verdict vocabulary has four
+ * levels; the score now has four too.
  */
 
+/** The board's three recommendation values. The column has a CHECK constraint. */
 export const SCORE_BANDS = {
   advance: 8,
   further_review: 6,
@@ -20,20 +27,35 @@ export const SCORE_BANDS = {
 
 export type ScoreBand = keyof typeof SCORE_BANDS
 
-/** Gemini's enrichment vocabulary → the board's three bands. */
-const VERDICT_ALIAS: Record<string, ScoreBand> = {
-  strong_fit: "advance",
-  good_fit: "further_review",
-  possible_fit: "further_review",
-  not_fit: "not_a_fit",
-  advance: "advance",
-  further_review: "further_review",
-  not_a_fit: "not_a_fit",
+/**
+ * Verdict → (score, board band). Four levels in, four levels out.
+ *
+ * `advance` / `further_review` / `not_a_fit` without a finer verdict fall back
+ * to the mid-point of the band (8 / 6 / 2) because nothing more is known.
+ */
+export const VERDICT_SCORES: Record<string, { score: number; recommendation: ScoreBand }> = {
+  strong_fit: { score: 9, recommendation: "advance" },
+  good_fit: { score: 7, recommendation: "further_review" },
+  possible_fit: { score: 5, recommendation: "further_review" },
+  not_fit: { score: 2, recommendation: "not_a_fit" },
+  advance: { score: 8, recommendation: "advance" },
+  further_review: { score: 6, recommendation: "further_review" },
+  not_a_fit: { score: 2, recommendation: "not_a_fit" },
+  // the fallback summariser's own vocabulary
+  pass: { score: 8, recommendation: "advance" },
+  review: { score: 6, recommendation: "further_review" },
+  fail: { score: 2, recommendation: "not_a_fit" },
 }
 
 export function bandFromVerdict(verdict: string | null | undefined): ScoreBand | null {
   if (!verdict) return null
-  return VERDICT_ALIAS[String(verdict).trim().toLowerCase()] ?? null
+  return VERDICT_SCORES[String(verdict).trim().toLowerCase()]?.recommendation ?? null
+}
+
+/** Score for a verdict word, or null when the word is not recognised. */
+export function scoreFromVerdict(verdict: string | null | undefined): number | null {
+  if (!verdict) return null
+  return VERDICT_SCORES[String(verdict).trim().toLowerCase()]?.score ?? null
 }
 
 /**
@@ -53,7 +75,8 @@ export function deriveFallbackScore(opts: {
 }): { score: number; recommendation: ScoreBand } | null {
   if (opts.hasScore) return null
   if (opts.isIncomplete) return null
-  const recommendation = bandFromVerdict(opts.verdict)
-  if (!recommendation) return null
-  return { score: SCORE_BANDS[recommendation], recommendation }
+  if (!opts.verdict) return null
+  const row = VERDICT_SCORES[String(opts.verdict).trim().toLowerCase()]
+  if (!row) return null
+  return { score: row.score, recommendation: row.recommendation }
 }

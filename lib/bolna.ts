@@ -400,10 +400,10 @@ CALL KA FLOW
    {interview_plan}
    - Agar plan khaali dikhe to candidate se uske pichle role ke teen kaam poochein — scale, system, aur result.
    - Har topic ka "Ask" ek hi baar poochein.
-   - Jawab thin lage to us topic ke "Dig if thin" points se 3 tak follow-up poochein. Jawab strong ho to agla topic.
+   - Jawab thin lage to us topic ke "Dig if thin" points se 2 tak follow-up poochein. Jawab strong ho to agla topic.
    - Plan se bahar khud ka koi sawaal nahi. Plan ke "BEFORE CLOSING" wale dealbreakers sirf confirm karein, unpar interview na karein.
    - Dealbreaker fail ho jaye to us par bahas na karein. Aage ke topic chhod dein aur seedha screening closing par jaayein.
-   - Poori call paanch minute ke aas paas rakhein, 7 minute se zyada nahi. Teeno topic cover karna minute se zyada zaroori hai. Time kam ho to sabse zaroori topic poochkar closing par jaayein.
+   - Poori call paanch minute ke aas paas rakhein, 6 minute se zyada nahi. Teeno topic cover karna minute se zyada zaroori hai. Time kam ho to sabse zaroori topic poochkar closing par jaayein.
 4. Closing (sirf yeh lines, phir ruk jaayein, call dobara na kholein).
 
 CLOSING LINES (matlab yahi; bhasha wahi jo call mein thi)

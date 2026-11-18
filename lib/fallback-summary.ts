@@ -1,5 +1,6 @@
 import { logger } from "@/lib/logger"
 import { updateParticipantSafely } from "@/lib/participant-update"
+import { bandFromVerdict, scoreFromVerdict } from "@/lib/call-scoring"
 
 export interface FallbackSummary {
   comprehensive_summary: string
@@ -232,13 +233,10 @@ export async function storeFallbackSummary(
   const now = new Date().toISOString()
   // The column has a CHECK constraint: ai_recommendation IN
   // ('advance','further_review','not_a_fit') — translate the internal wording.
-  const ratingAlias: Record<string, string> = {
-    pass: "advance", fail: "not_a_fit", review: "further_review",
-  }
-  const recommendation =
-    ratingAlias[String(summary.overall_verdict).toLowerCase()] ?? "further_review"
-  // Derive score from recommendation for consistency (not from confidence)
-  const score = recommendation === "advance" ? 8 : recommendation === "further_review" ? 6 : 2
+  // Verdict → (score, band) from the one shared table: pass 8/advance,
+  // review 6/further_review, fail 2/not_a_fit.
+  const recommendation = bandFromVerdict(String(summary.overall_verdict)) ?? "further_review"
+  const score = scoreFromVerdict(String(summary.overall_verdict)) ?? 6
   // `fallback_summary_used` lives inside verdict_json: there is no such column,
   // and writing it top-level made PostgREST reject the entire update
   // (PGRST204), silently dropping the summary. The safe writer also strips any

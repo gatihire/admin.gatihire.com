@@ -38,7 +38,7 @@ The first live review (Appendix B) exposed three gaps in this plan. They are now
 
 | Question | Recommendation |
 |---|---|
-| Do we still want the 4–6 minute target? | **Yes, but for real conversations only, and phrased as 5 minutes everywhere.** Minutes are an *output* of covering 3 topics with follow-ups, not a target the agent should chase. Hard cap 7 minutes. A candidate who gives one-line answers gets a short call and a weak score — that is the correct outcome, not a failure. |
+| Do we still want the 4–6 minute target? | **Yes, but for real conversations only, and phrased as 5 minutes everywhere.** Minutes are an *output* of covering 3 topics with follow-ups, not a target the agent should chase. Hard cap **6 minutes** (§7.2 tightened it from 7: three topics x three digs is 6.6 minutes of speech, so the old shape could not finish in five). A candidate who gives one-line answers gets a short call and a weak score — that is the correct outcome, not a failure. |
 | How many topics? | **3**, as you specified: two from the JD's must-haves, one that verifies a claim from the resume. |
 | Which model? | Keep `gemini-3.1-flash-lite-preview` on the main agent for now; **test a stronger model on a separate test agent** before switching. Latency already went 510 ms → 966 ms to first word. |
 | Where do dealbreakers go? | **Confirm-only, at the end**, not as interview topics. "HMV licence hai na?" is a yes/no, not a conversation. |
@@ -197,9 +197,9 @@ rollout.
   "language": "hinglish",
   "call_shape": {
     "target_seconds": 300,
-    "hard_cap_seconds": 420,
+    "hard_cap_seconds": 360,
     "topics": 3,
-    "max_digs_per_topic": 3
+    "max_digs_per_topic": 2
   },
   "topics": [
     {
@@ -340,8 +340,9 @@ HOW TO RUN THIS
 
 Three things to notice:
 
-- **`Dig if thin`** is the depth ladder that replaces "one follow-up". Three digs per topic × 3
-  topics is how a 2.5-minute call becomes 5 minutes *when the candidate is worth it*.
+- **`Dig if thin`** is the depth ladder that replaces "one follow-up". Two digs per topic × 3
+  topics is 9 spoken questions, about 5 minutes — the budget the plan promises. Three digs per
+  topic was the arithmetic bug behind 6.6-minute calls; see §7.2.
 - **`If the answer is already strong, move on`** is what stops us padding to hit a minute target. A
   strong candidate should finish at 4 minutes and score high; a vague one should finish at 3 and
   score low.
@@ -356,8 +357,8 @@ text mirrored into `docs/ai-screener-prompt.md`.
 | Line (today) | Now | Change to |
 |---|---|---|
 | 400 | `{questions}` | `{interview_plan}` |
-| 401 | "Jawab vague ho to sirf ek follow-up poochein" | "Jawab thin ho to us topic ke 'Dig if thin' points se **3 tak** follow-up poochein. Jawab strong ho to agla topic." |
-| 402 | "Poori call 4 se 6 minute mein khatam karein" | "Poori call **5 minute** ke aas paas rakhein, 7 minute se zyada nahi. Teeno topic cover karna minute se zyada zaroori hai." |
+| 401 | "Jawab vague ho to sirf ek follow-up poochein" | "Jawab thin ho to us topic ke 'Dig if thin' points se **2 tak** follow-up poochein. Jawab strong ho to agla topic." (§7.2: 3 was too many for a 5-minute call) |
+| 402 | "Poori call 4 se 6 minute mein khatam karein" | "Poori call **5 minute** ke aas paas rakhein, 6 minute se zyada nahi. Teeno topic cover karna minute se zyada zaroori hai." |
 | 393 | "Kya abhi do minute baat ho sakti hai?" | Remove. The welcome message already asks. |
 | 397 | "teen-chaar minute lagenge" | "paanch minute lagenge" |
 | 412 | Joining question forbidden | Keep, and add "plan ke bahar koi sawaal nahi" |
@@ -746,7 +747,7 @@ These are console changes, not code. They are the cheapest wins on the list.
 | `hangup_after_silence` | 12 s | **20 s** | 12 s cuts off a candidate who is thinking or in a noisy truck cabin. |
 | "are you still there?" prompt | 7 s | **10 s** | Two sample calls show it firing right after the candidate started a thought. |
 | Interruption backoff | 0 ms | **300 ms** | Agent talks over the candidate. 4.7 interruptions/call is still high. |
-| `call_terminate` | 1200 s | **420 s** | A dead call could sit for 20 minutes. The plan promises 5, caps at 7. |
+| `call_terminate` | 1200 s | **360 s** | A dead call could sit for 20 minutes. The plan promises 5, caps at 6 (§7.2). |
 | Retry count | 0 on every call | **2** | See §9. No automatic retries are running at the provider level. |
 | Model | `gemini-3.1-flash-lite-preview` | test a stronger model | Time to first word 510 → 966 ms. Cheapest quality lever we have not tried. |
 
@@ -785,6 +786,73 @@ behavioural gaps. All were fixed in `lib/bolna.ts` and pushed to the agent the s
 
 `docs/ai-screener-prompt.md`'s "Hinglish" block was a stale English prompt; it is now the
 exact live text, generated from `lib/bolna.ts`. The English block got the same rules.
+
+### 7.2 The 6-minute round: score bands, budget, and the question that should not be deferred
+
+Four changes, all driven by the same card — Nikhil Gupta, *Sea Export Pricing Executive*.
+The call ran 375 s, covered 3 of 3 topics, and came back **6/10, further review**, with
+*"Schedule callback. He shows foundational knowledge relevant to the role, but the next
+interviewer should verify if he can transition his procurement-focused mindset to a pure
+sales/pricing-support environment."*
+
+That sentence is the defect. HR's answer was blunt: *ask that in the call, not later.*
+
+**a. The 6/10 was arithmetic, not judgement.** Gemini returned `good_fit`, and
+`good_fit` mapped to 6. So did `possible_fit`. A completed, well-run call was
+mathematically incapable of scoring 7 under that table — the verdict vocabulary has four
+levels, the score had three.
+
+| Verdict | Before | Now | Board band |
+|---|---|---|---|
+| `strong_fit` | 8 | **9** | advance |
+| `good_fit` | 6 | **7** | further_review |
+| `possible_fit` | 6 | **5** | further_review |
+| `not_fit` | 2 | **2** | not_a_fit |
+| bare band (`advance` / `further_review` / `not_a_fit`) | 8 / 6 / 2 | 8 / 6 / 2 | unchanged |
+
+The table lives in `lib/call-scoring.ts` (`VERDICT_SCORES`, `scoreFromVerdict`,
+`bandFromVerdict`) and is the only one: `normalizeVerdict` in `lib/bolna-execution.ts`
+and the fallback summariser both call it. Before, the rule was written out three times
+and the copies disagreed. Existing rows were not rewritten — a score already on a card
+is a human judgement and is never second-guessed.
+
+**b. The old budget could not fit in five minutes.** 3 topics x (1 ask + 3 digs) is
+twelve questions. At the observed ~33 s per exchange that is 6.6 minutes — and the call
+ran 6:15. The prompt promised five and was arithmetically unable to deliver it.
+
+| | Before | Now |
+|---|---|---|
+| Target | 300 s | 300 s |
+| Hard cap (`HARD_CAP_SECONDS`, `call_terminate`) | 420 s | **360 s** |
+| Digs per topic | 3 | **2** (3 x 2 + 3 asks = 9 questions) |
+| Prompt wording | "7 minute se zyada nahi" | "6 minute se zyada nahi" |
+
+`renderInterviewPlan` **clamps** rather than trusts: 600+ plans already in the database
+stored `hard_cap_seconds: 420` and `max_digs_per_topic: 3`, and the renderer is the one
+place every plan passes through, so the current budget wins without a regeneration pass.
+
+**c. The third topic now tests the shift, not a resume number.** `detectRoleShift(job,
+candidate)` compares the domains in the JD against the domains in the candidate's current
+role plus resume. When they do not overlap, the plan prompt switches topic 3 from
+"verify a resume claim" to "ask for one real instance of the destination domain's work".
+For this card that is procurement → freight pricing, which is exactly the verification
+the enrichment had deferred.
+
+**d. Procedure questions are rejected.** *"Ek baar export quotation se final shipment tak
+ka process step-by-step bataiye"* invites a narrated walkthrough: the candidate reads out
+a process, the clock runs, and no evidence of skill is produced. `checkAsk` now rejects
+`step-by-step`, `end to end`, `pura/poora process`, and `process bataiye`. Plans must ask
+for one real instance — what they did, at what volume, with what result. Topic 1 and 2
+must test different must-haves; the old plan asked about rates twice.
+
+**e. The deferred recommendation fields are gone.** `recommended_next_steps` and
+`interview_focus_areas` were removed from the enrichment schema, the `EnrichedSummary`
+type, and the results sheet. They are replaced by one honest block, **"Not confirmed on
+this call"** (`not_confirmed: string[]`), whose prompt rule explicitly forbids
+"next round should verify", "ask about", and "probe deeper". It is evidence of what the
+call left open, not a to-do list for another interviewer. `next_round_ready` was never
+displayed and is no longer produced by the prompt; the parser still accepts it because it
+is part of Bolna's payload vocabulary, not ours.
 
 
 
@@ -924,7 +992,7 @@ attempt, and a question that breaks the rules is refused with a reason rather th
 | `lib/scheduled-call.ts:511` | Placement: merges `info_data`, asserts a plan exists (bridged or template), persists it, strips `_interview_plan` before sending |
 | `app/api/bolna/webhook/inbound/route.ts:154` | Same assertion for inbound callbacks |
 | `app/api/bolna/agent/route.ts:80` | `POST {force:true}` re-syncs prompt + welcome + tuning from code |
-| `lib/bolna.ts:361` | `BOLNA_MASTER_PROMPT` — `{interview_plan}`, 3 digs, one timing number; `BOLNA_WELCOME_MESSAGE` — 5 minutes |
+| `lib/bolna.ts:361` | `BOLNA_MASTER_PROMPT` — `{interview_plan}`, 2 digs, one timing number; `BOLNA_WELCOME_MESSAGE` — 5 minutes |
 | `docs/ai-screener-prompt.md` | Mirror of the live prompt; must be updated in the same commit |
 | `lib/bolna-execution.ts:960` | Evidence scorer; replace band constants at `:1004` and `:389` |
 | `lib/journey-watchdog.ts` | Calling window + retry ladder |

@@ -4,7 +4,7 @@ import { evaluateCallQuality } from "@/lib/ai-learning"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { scheduleBolnaCall, MAX_CALL_ATTEMPTS } from "@/lib/scheduled-call"
 import { enrichTranscript } from "@/lib/transcript-enrichment"
-import { deriveFallbackScore } from "@/lib/call-scoring"
+import { deriveFallbackScore, bandFromVerdict, scoreFromVerdict } from "@/lib/call-scoring"
 import { logCandidateActivity } from "@/lib/activity-logger"
 import { toE164 } from "@/lib/phone"
 import { appendWhatsappHistory } from "@/lib/whatsapp-history"
@@ -93,26 +93,16 @@ export function looksLikeVerdict(value: unknown): boolean {
  *  value the column's CHECK constraint accepts. */
 export function normalizeVerdict(pending: ParsedVerdict | Record<string, unknown>): ParsedVerdict {
   const raw = pending as ParsedVerdict
-  const alias: Record<string, string> = {
-    pass: "advance", fail: "not_a_fit", review: "further_review",
-    strong_fit: "advance", good_fit: "further_review",
-    possible_fit: "further_review", not_fit: "not_a_fit",
-    advance: "advance", further_review: "further_review", not_a_fit: "not_a_fit",
-  }
   const recommendation = raw.recommendation
-    ? alias[String(raw.recommendation).toLowerCase()]
+    ? bandFromVerdict(String(raw.recommendation)) ?? undefined
     : undefined
   const score =
     typeof raw.score === "number" ? Math.max(0, Math.min(10, Number(raw.score))) : undefined
 
-  // One present implies the other, per the scoring band in the prompt:
-  // advance = 8–10, further_review = 5–7, not_a_fit = 0–4.
+  // One present implies the other. The band score comes from the shared table so
+  // "good_fit" is 7, not the 6 that used to make every decent call look mediocre.
   const resolvedScore =
-    score ??
-    (recommendation === "advance" ? 8
-      : recommendation === "further_review" ? 6
-      : recommendation === "not_a_fit" ? 2
-      : raw.score)
+    score ?? scoreFromVerdict(raw.recommendation ? String(raw.recommendation) : undefined) ?? undefined
   const resolvedRecommendation =
     recommendation ??
     (score !== undefined ? (score >= 8 ? "advance" : score >= 5 ? "further_review" : "not_a_fit")
@@ -378,13 +368,10 @@ async function buildFallbackVerdictPatch(
     if (!fallback) return null
 
     await writeScreeningAnswers(participantId, fallback as any)
-    const ratingAlias: Record<string, string> = {
-      pass: "advance", fail: "not_a_fit", review: "further_review",
-    }
     const rating = String(fallback.overall_verdict).toLowerCase()
-    const recommendation = ratingAlias[rating] ?? ("further_review")
-    // Derive score from recommendation for consistency (not from confidence)
-    // Penalize very short conversations
+    const recommendation = bandFromVerdict(rating) ?? "further_review"
+    // Score comes from the verdict table, not from confidence: "pass" is 8,
+    // "review" 6, "fail" 2. Short-call penalties are applied below.
     const wordCount = transcript.split(/\s+/).filter(w => w.length > 0).length
     const unavailablePattern = /unavailable|not available|couldn't speak|immediately terminated|hung up|disconnected|call back later/i.test(transcript)
     // Same evidence rule as the verdict path: two substantive answers (10+ words)
@@ -399,7 +386,7 @@ async function buildFallbackVerdictPatch(
       (total, s) => total + s.text.trim().split(/\s+/).filter(Boolean).length,
       0
     )
-    let derivedScore = recommendation === "advance" ? 8 : recommendation === "further_review" ? 6 : 2
+    let derivedScore = scoreFromVerdict(rating) ?? 6
     if (wordCount < 50 || unavailablePattern) derivedScore = 2
     else if (wordCount < 100) derivedScore = Math.min(derivedScore, 4)
     const score = derivedScore

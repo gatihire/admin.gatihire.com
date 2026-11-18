@@ -17,7 +17,13 @@ import type { JobContext, CandidateContext } from "@/lib/jd-questions"
 
 export const PLAN_VERSION = 1
 export const TARGET_SECONDS = 300
-export const HARD_CAP_SECONDS = 420
+export const HARD_CAP_SECONDS = 360
+/**
+ * Two digs, not three. Three topics x (1 ask + 3 digs) is twelve questions, which
+ * at ~33s an exchange is 6.6 minutes — the plan promised five and could not
+ * deliver it. 3 x (1 + 2) = 9 questions is about five minutes.
+ */
+export const MAX_DIGS_PER_TOPIC = 2
 export const MAX_ASK_WORDS = 15
 export const MAX_DIG_WORDS = 12
 export const MAX_DEALBREAKER_WORDS = 12
@@ -175,6 +181,13 @@ function checkAsk(
   for (const rule of BANNED_ASK) {
     if (rule.re.test(ask)) errors.push(`banned ${rule.label}: ${ask}`)
   }
+  // A procedure question ("export quotation se final shipment tak ka process
+  // step-by-step bataiye") invites a narrated walkthrough. It fills the call and
+  // produces no evidence of skill — the candidate reads out a process, not their
+  // own work. Ask for an instance instead.
+  if (/\b(step[-\s]?by[-\s]?step|end[-\s]to[-\s]end|pura\s+process|poora\s+process|process\s+bataiye)\b/i.test(ask)) {
+    errors.push(`procedure ask, not an evidence ask: ${ask}`)
+  }
   const leakedName = mentionsName(ask, clientNames)
   if (leakedName) errors.push(`client name "${leakedName}" inside question: ${ask}`)
   const leakedAcronym = hasAcronymOutsideContext(ask, allowedText)
@@ -215,7 +228,7 @@ export function validateInterviewPlan(
     const digs = (Array.isArray(raw.digs) ? raw.digs : [])
       .map((d) => ({ key: slug(String(d?.key || "dig")), prompt: String(d?.prompt || "").trim() }))
       .filter((d) => d.prompt)
-      .slice(0, 4)
+      .slice(0, MAX_DIGS_PER_TOPIC)
     if (digs.length === 0) errors.push(`topic has no digs: ${label || ask}`)
     for (const d of digs) {
       if (wordCount(d.prompt) > MAX_DIG_WORDS) {
@@ -289,7 +302,7 @@ export function validateInterviewPlan(
         target_seconds: TARGET_SECONDS,
         hard_cap_seconds: HARD_CAP_SECONDS,
         topics: topics.length,
-        max_digs_per_topic: 3,
+        max_digs_per_topic: MAX_DIGS_PER_TOPIC,
       },
     },
   }
@@ -330,6 +343,70 @@ export function findResumeClaims(resumeText?: string | null): string[] {
 
 export function findResumeClaim(resumeText?: string | null): string | null {
   return findResumeClaims(resumeText)[0] ?? null
+}
+
+/**
+ * The domains we can tell apart cheaply, used only to decide whether a candidate
+ * is crossing into a different kind of work.
+ *
+ * The first place this mattered: a procurement executive screened for a sea
+ * export *pricing* desk. The call asked three pricing questions, the enrichment
+ * then told HR "the next interviewer should verify he can move from procurement
+ * to pricing" — a question the call should have asked. See docs §7.2.
+ */
+const ROLE_DOMAINS: Array<{ key: string; label: string; re: RegExp }> = [
+  { key: "procurement", label: "procurement / purchasing", re: /procurement|purchasing|sourcing|vendor development|buyer|supplier management/i },
+  { key: "pricing", label: "freight pricing / quotations", re: /pricing|quotation|quote|rate sheet|freight rate|ocean freight|rate negotiation/i },
+  { key: "import", label: "import / customs clearance", re: /\bimport\b|customs|icegate|bill of entry/i },
+  { key: "export", label: "export documentation", re: /\bexport\b|shipping bill|bill of lading/i },
+  { key: "sales", label: "sales / business development", re: /\bsales\b|business development|client acquisition|key account/i },
+  { key: "warehouse", label: "warehouse / inventory", re: /warehouse|inventory|\bstores?\b|\bstock\b|3pl|fulfil/i },
+  { key: "transport", label: "transport / fleet", re: /\bfleet\b|transport|\bdrivers?\b|\bvehicles?\b|\btrucks?\b|dispatch/i },
+  { key: "accounting", label: "accounts / finance", re: /accounts\b|payable|receivable|\bgst\b|\btds\b|tally|ledger/i },
+  { key: "hr", label: "HR / recruitment", re: /recruit|\bhr\b|payroll|talent/i },
+  { key: "tracking", label: "tracking / MIS", re: /tracking|\bmis\b|\bgps\b|telematics|dashboard/i },
+]
+
+function domainsIn(text: string): string[] {
+  const hay = String(text || "")
+  return ROLE_DOMAINS.filter((d) => d.re.test(hay)).map((d) => d.key)
+}
+
+function domainLabel(key: string): string {
+  return ROLE_DOMAINS.find((d) => d.key === key)?.label ?? key
+}
+
+/**
+ * Non-null when the candidate's own work and the role's work share no domain —
+ * i.e. the candidate is switching lanes, which is exactly what a screening call
+ * must test rather than defer to the next interviewer.
+ */
+export function detectRoleShift(
+  job: JobContext,
+  candidate?: CandidateContext | null
+): { from: string; to: string } | null {
+  // Title and must-haves only. Responsibilities are full of counterparties —
+  // "share quotations with sales and operations teams" would read as a sales
+  // domain and put the wrong words in topic 3.
+  const jobText = [job.title, job.role_category, (job.skills_must_have || []).join(" ")]
+    .filter(Boolean)
+    .join(" ")
+  const candText = [
+    candidate?.current_role,
+    String(candidate?.resume_text || "").slice(0, 1200),
+  ]
+    .filter(Boolean)
+    .join(" ")
+  const jobDomains = domainsIn(jobText)
+  const candDomains = domainsIn(candText)
+  if (jobDomains.length === 0 || candDomains.length === 0) return null
+  const overlap = jobDomains.filter((d) => candDomains.includes(d))
+  if (overlap.length > 0) return null
+  // Two labels at most: the prompt is a sentence, not an inventory.
+  return {
+    from: candDomains.slice(0, 2).map(domainLabel).join(", "),
+    to: jobDomains.slice(0, 2).map(domainLabel).join(", "),
+  }
 }
 
 const COMMON_DIGS: InterviewPlanDig[] = [
@@ -511,7 +588,7 @@ export function buildTemplatePlan(
       target_seconds: TARGET_SECONDS,
       hard_cap_seconds: HARD_CAP_SECONDS,
       topics: Math.min(topics.length, 3),
-      max_digs_per_topic: 3,
+      max_digs_per_topic: MAX_DIGS_PER_TOPIC,
     },
     topics: topics.slice(0, 3),
     dealbreakers,
@@ -581,7 +658,7 @@ export function buildPlanFromQuestions(
       target_seconds: TARGET_SECONDS,
       hard_cap_seconds: HARD_CAP_SECONDS,
       topics: topics.length,
-      max_digs_per_topic: 3,
+      max_digs_per_topic: MAX_DIGS_PER_TOPIC,
     },
     topics,
     dealbreakers: [],
@@ -625,6 +702,19 @@ function buildPlanPrompt(
     ? `Already collected on WhatsApp (never ask): ${Object.keys(infoData || {}).join(", ")}`
     : "Nothing collected yet."
 
+  // When the candidate is crossing lanes, the third topic has to test that move.
+  // Otherwise the call scores the old job and the enrichment has to tell HR to
+  // "verify in the next round" what this round should have asked.
+  const shift = detectRoleShift(job, candidate)
+  const shiftHint = shift
+    ? `ROLE SHIFT: the candidate's background is ${shift.from}; this role is ${shift.to}.`
+    : ""
+  const topic3Rule = shift
+    ? `Topic 3 MUST test that shift: ask for one real instance where they did ${shift.to} work,
+  or how they handled a move from ${shift.from} into it. An opinion about being a
+  fast learner is a weak answer; a real instance is the point.`
+    : `Topic 3 MUST verify one concrete claim from the resume; copy the phrase into resume_hook.`
+
   return `You are designing a 3-topic interview plan for a 5-minute Hinglish phone screening.
 Return ONLY a JSON object, no markdown, matching exactly this shape:
 
@@ -637,7 +727,7 @@ Return ONLY a JSON object, no markdown, matching exactly this shape:
       "must_have": true,
       "order": 1,
       "ask": "one open question",
-      "digs": [{"key":"scale","prompt":"..."},{"key":"system","prompt":"..."},{"key":"ownership","prompt":"..."},{"key":"result","prompt":"..."}],
+      "digs": [{"key":"scale","prompt":"..."},{"key":"ownership","prompt":"..."}],
       "strong": "what a strong answer contains",
       "weak": "what a weak answer looks like",
       "resume_hook": null
@@ -656,18 +746,26 @@ ${profile || "(no candidate profile available)"}
 
 ${collected}
 
+${shiftHint}
+
 HARD RULES — a plan that breaks any of these is rejected and regenerated:
-- Exactly 3 topics. Topic 1 and 2 come from the JD's must-have skills/responsibilities.
-  Topic 3 MUST verify one concrete claim from the resume; copy the phrase into resume_hook.
+- Exactly 3 topics. Topic 1 and 2 come from the JD's must-have skills/responsibilities
+  and must test DIFFERENT skills — never two questions about the same thing.
+- ${topic3Rule}
 - Every "ask" is OPEN: start with "Kaise", "Kya kiya", "Ek baar bataiye", "Bataiye".
   Never "kya aapne kabhi", "kya aap", "comfortable hain", "idea hai", "kar sakte hain".
 - "ask" is 15 words or fewer, ONE ask, at most one "?".
+- Never ask for a procedure or a walkthrough: no "step-by-step", "pura process",
+  "end to end", "process bataiye". Ask for one REAL instance instead — what they
+  actually did, at what volume, with what result. A process narration fills five
+  minutes and proves nothing.
 - Never ask about salary/CTC, notice period, joining date, total experience, city,
   relocation, or reason for switching. They are already collected.
 - Never put a client or company name in an "ask". Never say "hamare"/"humare".
 - No acronyms (PF, ESIC, GRIR, P2P, FEFO, WMS, TMS, CLRA, SKU...) unless the resume
   or JD above uses them.
-- Each dig is 12 words or fewer and digs deeper into ONE thing (scale, system,
+- At most 2 digs per topic (3 x 2 digs + 3 asks = 9 spoken questions, ~5 minutes).
+  Each dig is 12 words or fewer and digs deeper into ONE thing (scale, system,
   own role vs team, result).
 - "strong" and "weak" are one line each, in English, describing EVIDENCE not
   personality. They are never spoken aloud.
@@ -727,7 +825,7 @@ function normalizePlan(
       target_seconds: TARGET_SECONDS,
       hard_cap_seconds: HARD_CAP_SECONDS,
       topics: Math.min(topics.length, 3),
-      max_digs_per_topic: 3,
+      max_digs_per_topic: MAX_DIGS_PER_TOPIC,
     },
     topics: topics.slice(0, 3),
     dealbreakers: dealbreakers.slice(0, 3),
@@ -837,7 +935,12 @@ export function renderInterviewPlan(plan: InterviewPlan): string {
   const lines: string[] = []
   const topics = plan.topics || []
   const targetMin = Math.round((plan.call_shape?.target_seconds || TARGET_SECONDS) / 60)
-  const capMin = Math.round((plan.call_shape?.hard_cap_seconds || HARD_CAP_SECONDS) / 60)
+  // Clamp, do not trust: plans generated before this round stored 420 s and
+  // 3 digs per topic, and there are 600+ of them queued in the database. The
+  // renderer is the one place every plan passes through, so the current budget
+  // wins over whatever the stored shape says.
+  const capMin = Math.round(Math.min(plan.call_shape?.hard_cap_seconds || HARD_CAP_SECONDS, HARD_CAP_SECONDS) / 60)
+  const maxDigs = Math.min(plan.call_shape?.max_digs_per_topic || MAX_DIGS_PER_TOPIC, MAX_DIGS_PER_TOPIC)
 
   lines.push(
     `INTERVIEW PLAN — ${topics.length} topic${topics.length === 1 ? "" : "s"}, about ${targetMin} minutes (hard stop ${capMin})`
@@ -850,7 +953,7 @@ export function renderInterviewPlan(plan: InterviewPlan): string {
     lines.push(`Ask: ${t.ask}`)
     if (t.digs?.length) {
       const digs = t.digs
-        .slice(0, plan.call_shape?.max_digs_per_topic || 3)
+        .slice(0, maxDigs)
         .map((d) => d.prompt.replace(/\?+$/, ""))
         .join(" · ")
       lines.push(`Dig if thin: ${digs}`)
@@ -874,7 +977,7 @@ export function renderInterviewPlan(plan: InterviewPlan): string {
 
   lines.push("HOW TO RUN THIS")
   lines.push("- One topic at a time, in this order. Easy first, hardest last.")
-  lines.push(`- Ask the topic question once. Dig up to ${plan.call_shape?.max_digs_per_topic || 3} times, only when the answer is thin.`)
+  lines.push(`- Ask the topic question once. Dig up to ${maxDigs} times, only when the answer is thin.`)
   lines.push("- If the answer is already strong, move to the next topic. Do not pad.")
   lines.push("- Never read this plan out loud. It is your notes, not your script.")
 

@@ -103,8 +103,7 @@ interface ParticipantDetail {
     concerns?: string[]
     salary_analysis?: { current?: string; expected?: string; risk?: string; notes?: string }
     relocation_assessment?: string
-    recommended_next_steps?: string
-    interview_focus_areas?: string[]
+    not_confirmed?: string[]
     overall_verdict?: string
     confidence_score?: number
   } | null
@@ -512,8 +511,10 @@ export function PhoneScreeningResultsSheet({
   const fitAssessment = (enriched?.fit_assessment as string) || ""
   const salaryAnalysis = (enriched?.salary_analysis as { current?: string; expected?: string; risk?: string; notes?: string }) || null
   const relocationAssessment = (enriched?.relocation_assessment as string) || ""
-  const nextSteps = (enriched?.recommended_next_steps as string) || ""
-  const interviewFocus = (enriched?.interview_focus_areas as string[]) || []
+  // Replaces Recommended Next Steps / Interview Focus Areas. Those asked the
+  // next interviewer to verify what this call should have asked; HR wants that
+  // question asked in the call, so the card only reports open evidence now.
+  const notConfirmed = (enriched?.not_confirmed as string[]) || []
   const overallVerdict = (enriched?.overall_verdict as string) || ""
   const confidenceScore = (enriched?.confidence_score as number) || null
 
@@ -852,20 +853,14 @@ export function PhoneScreeningResultsSheet({
                         <p className="text-xs text-zinc-600">{relocationAssessment}</p>
                       </div>
                     )}
-                    {nextSteps && (
+                    {notConfirmed.length > 0 && (
                       <div className="pt-2 border-t border-zinc-200">
-                        <p className="text-[10px] font-bold text-zinc-400 uppercase mb-1">Recommended Next Steps</p>
-                        <p className="text-xs text-zinc-600">{nextSteps}</p>
-                      </div>
-                    )}
-                    {interviewFocus.length > 0 && (
-                      <div className="pt-2 border-t border-zinc-200">
-                        <p className="text-[10px] font-bold text-zinc-400 uppercase mb-1">Interview Focus Areas</p>
+                        <p className="text-[10px] font-bold text-zinc-400 uppercase mb-1">Not Confirmed On This Call</p>
                         <ul className="text-xs text-zinc-600 space-y-0.5">
-                          {interviewFocus.map((area, i) => (
+                          {notConfirmed.map((item, i) => (
                             <li key={i} className="flex items-start gap-1.5">
                               <span className="text-zinc-400 shrink-0">•</span>
-                              {area}
+                              {item}
                             </li>
                           ))}
                         </ul>
