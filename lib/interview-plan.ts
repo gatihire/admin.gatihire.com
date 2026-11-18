@@ -155,6 +155,17 @@ function checkAsk(
   if ((ask.match(/\?/g) || []).length > 1) {
     errors.push(`stacked question (more than one "?"): ${ask}`)
   }
+  // "Aapne dispatch kaise plan kiya aur kitni gaadiyan thi?" has one "?" but two
+  // asks, so the model would answer whichever half it heard. Counting marks is
+  // not enough: require two interrogatives joined by "aur". A single
+  // interrogative with two objects ("dispatch aur tracking kaise manage ki?")
+  // is one ask and must stay legal.
+  if (
+    /\baur\b/i.test(ask) &&
+    (ask.match(/(kaise|kaun|kaunsa|kaunsi|kaunse|kab|kahan|kahaan|kyun|kyu|kitna|kitni|kitne|kya)\b/gi) || []).length >= 2
+  ) {
+    errors.push(`stacked question (two asks joined by "aur"): ${ask}`)
+  }
   for (const rule of BANNED_ASK) {
     if (rule.re.test(ask)) errors.push(`banned ${rule.label}: ${ask}`)
   }
@@ -502,6 +513,23 @@ export function buildTemplatePlan(
 }
 
 /**
+ * Everything wrong with one spoken question, under exactly the rules the
+ * generator and the bridge apply. Exported so the manual editor can tell HR
+ * which of their edits were refused — and why — instead of silently replacing
+ * their wording with something else.
+ */
+export function questionRuleErrors(
+  ask: string,
+  job: JobContext,
+  candidate?: CandidateContext | null
+): string[] {
+  const allowedText = `${candidate?.resume_text || ""}\n${(job.skills_must_have || []).join(" ")}\n${
+    (job.key_responsibilities || []).join(" ")
+  }`
+  return checkAsk(ask, [job.client_name, "Truckinzy", "GatiHire"], allowedText)
+}
+
+/**
  * Bridge for rows queued before plans existed, and for recruiters who edited the
  * old numbered list by hand. Their wording is kept — but only the questions that
  * would pass today's rules, because the whole point of the plan is that the
@@ -516,16 +544,11 @@ export function buildPlanFromQuestions(
   job: JobContext,
   candidate?: CandidateContext | null
 ): InterviewPlan {
-  const allowedText = `${candidate?.resume_text || ""}\n${(job.skills_must_have || []).join(" ")}\n${
-    (job.key_responsibilities || []).join(" ")
-  }`
-  const clientNames = [job.client_name, "Truckinzy", "GatiHire"]
-
   const asks = String(questionsText || "")
     .split("\n")
     .map((q) => q.replace(/^\d+\.\s*/, "").trim())
     .filter(Boolean)
-    .filter((q) => checkAsk(q, clientNames, allowedText).length === 0)
+    .filter((q) => questionRuleErrors(q, job, candidate).length === 0)
     .slice(0, 3)
 
   if (asks.length < 2) return buildTemplatePlan(job, candidate)

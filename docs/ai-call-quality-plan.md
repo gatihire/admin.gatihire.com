@@ -497,24 +497,48 @@ Editing the Plan tab re-renders both strings. Editing the Text tab sets an `manu
 flag so a later regeneration does not silently overwrite a recruiter's wording. The existing
 `generated_questions` column keeps being written (mirrored) so no list view breaks.
 
-### 4.8a Known gap: that editor saves nothing today
+### 4.8a The question editor — fixed 18 Nov
 
-Checked against production on 18 Nov:
+The editor used to PATCH a route that had no handler:
 
 ```text
-PATCH /api/phone-screening/participants/{id}  →  405
+PATCH /api/phone-screening/participants/{id}  →  405   (before)
 GET   /api/phone-screening/participants/{id}  →  401 (handler exists)
 ```
 
-There is no `PATCH` handler on that route. `candidate-profile-sidebar.tsx` calls it anyway and shows
-**"Questions updated"**, because `fetch` does not reject on a 405 — so a recruiter who edits a
-question sees a success toast and the edit is gone on refresh. That is worse than having no editor.
+`candidate-profile-sidebar.tsx` called it anyway and showed **"Questions updated"**, because
+`fetch` does not reject on a 405. A recruiter could rewrite a question, be told it was saved, and
+then listen to a call that asked the old one. That is worse than having no editor.
 
-Until the handler exists, treat the plan and the questions as **generated, not editable**. The
-handler needed: authenticate (`applications.edit`), accept only `generated_questions` and
-`call_payload_json.questions`, merge into the stored payload rather than replacing it, and — because
-the prompt now reads `interview_plan` — rebuild the plan from the new text (or clear it so placement
-rebuilds it, §4.7a). Otherwise an edit changes nothing the agent says.
+`PATCH` now exists and is deliberately strict:
+
+| Rule | Why |
+|---|---|
+| Requires `applications.manage` | Editing changes what a candidate is asked |
+| Accepts only `generated_questions` | A client-supplied `call_payload_json` is ignored — the plan is rebuilt server-side |
+| Rebuilds the plan from the edited text via `buildPlanFromQuestions` | The prompt reads `interview_plan`; writing only `questions` would change nothing the agent says |
+| Writes `generated_questions`, `questions`, `interview_plan` and `_interview_plan` together | Card and call cannot disagree |
+| Returns `questions`, `dropped[]`, `used_template`, `applies_to` | The UI shows what was saved, not what was typed |
+| Edits during a live call return `applies_to: "next_call"` | A payload already sent to the provider cannot be changed |
+
+`questionRuleErrors()` is exported from `lib/interview-plan.ts` and used by the generator, the
+editor, and the legacy-row bridge, so all three apply the same rules.
+
+The UI no longer toasts on a failed save: it checks `res.ok`, shows the server's error, and renders
+the returned list. If the server replaced the edit (banned question, client name), the toast says
+so and the box shows the replacement.
+
+**Stacked-question detection was also too weak.** It counted `?` marks, so
+*"Aapne dispatch kaise plan kiya aur kitni gaadiyan thi?"* passed with one mark and two asks. It now
+requires two interrogatives joined by "aur". *"Aapne dispatch aur tracking kaise manage ki?"* is
+still legal — one interrogative, two objects.
+
+#### 4.8b The card now follows the call
+
+A plan rebuilt at placement time (`§4.7a`) used to update `call_payload_json` only. The card kept
+the old numbered list, so HR saw questions the agent would not ask. Both rebuild paths
+(`lib/scheduled-call.ts`, `app/api/bolna/webhook/inbound/route.ts`) now write the rendered questions
+back to `generated_questions` in the same update.
 
 ### 4.9 What this looks like for the Vehicle Tracking & MIS Executive role
 
@@ -819,8 +843,9 @@ we are measuring away from.
 Rollback is still a prompt edit, not a deploy: every payload carries both `interview_plan` and the
 legacy numbered `questions`, so pasting the previous prompt back works immediately.
 
-The one thing phase 1 did **not** fix: manual question editing has no save endpoint (§4.8a). Plan on
-regenerating a plan by re-running the job's screening trigger, not on hand-editing a call.
+Manual question editing now saves: `PATCH /api/phone-screening/participants/{id}` rebuilds the plan from
+the edited text and returns what it stored (§4.8a). Editing during a live call applies to the next
+attempt, and a question that breaks the rules is refused with a reason rather than silently replaced.
 
 
 ---

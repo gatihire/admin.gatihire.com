@@ -9,6 +9,12 @@ import {
   handleFailedExecution,
 } from "@/lib/bolna-execution"
 import { updateParticipantSafely } from "@/lib/participant-update"
+import {
+  buildPlanFromQuestions,
+  renderInterviewPlan,
+  renderLegacyQuestions,
+  questionRuleErrors,
+} from "@/lib/interview-plan"
 
 export const runtime = "nodejs"
 
@@ -255,5 +261,132 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     answers: answers || [],
     call_attempt_history: history,
     call_results: callResults,
+  })
+}
+
+/**
+ * Save recruiter-edited screening questions.
+ *
+ * This route did not exist: the sidebar's "Edit questions" box PATCHed here,
+ * got a 405, and still showed "Questions updated" — so HR could rewrite the
+ * questions, be told the change was saved, and then listen to a call that asked
+ * the old ones. Two rules keep that from coming back:
+ *
+ *  1. The call payload is rebuilt HERE, from the edited text, through the same
+ *     rule checker the generator uses. The client is never trusted to hand us a
+ *     plan, and an edited question that breaks a rule (client name, joining
+ *     question, two asks in one) is reported back rather than spoken.
+ *  2. What was actually saved is what the response returns, so the UI can show
+ *     the real list instead of the draft HR typed.
+ */
+export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const ctx = await getInternalAuthContext(request)
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+  if (!hasPermission(ctx, "applications.manage")) {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+  }
+
+  const { id } = await params
+  const body = await request.json().catch(() => null)
+  if (!body || typeof body !== "object") {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 })
+  }
+
+  // Questions are the only editable field. Anything else in the body — notably
+  // a client-supplied `call_payload_json` — is ignored on purpose.
+  const raw = (body as any).generated_questions ?? (body as any).questions
+  if (typeof raw !== "string" || !raw.trim()) {
+    return NextResponse.json({ error: "generated_questions is required" }, { status: 400 })
+  }
+
+  const { data: participant, error: loadError } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .select(`
+      id, status, call_payload_json, generated_questions,
+      jobs: job_id (*),
+      candidates: candidate_id (id, name, current_role, total_experience, location, resume_text)
+    `)
+    .eq("id", id)
+    .maybeSingle()
+
+  if (loadError || !participant) {
+    return NextResponse.json({ error: "Participant not found" }, { status: 404 })
+  }
+
+  const job = (participant as any).jobs || {}
+  const candidate = (participant as any).candidates || null
+
+  const edited = raw
+    .split("\n")
+    .map((q: string) => q.replace(/^\d+\.\s*/, "").trim())
+    .filter(Boolean)
+
+  if (edited.length === 0) {
+    return NextResponse.json({ error: "At least one question is required" }, { status: 400 })
+  }
+
+  // Tell HR exactly which lines the rules refused, and why, before we replace
+  // them. Silently dropping a question is how someone ends up believing their
+  // wording is on the call when it is not.
+  const dropped = edited
+    .map((question: string) => ({ question, reasons: questionRuleErrors(question, job, candidate) }))
+    .filter((row) => row.reasons.length > 0)
+
+  const plan = buildPlanFromQuestions(edited.join("\n"), job, candidate)
+  const finalQuestions = renderLegacyQuestions(plan)
+  const usedTemplate = plan.topics.every(
+    (t) => !edited.some((q) => q.toLowerCase() === t.ask.toLowerCase())
+  )
+
+  const { error: writeError } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .update({
+      generated_questions: finalQuestions,
+      call_payload_json: {
+        ...((participant as any).call_payload_json || {}),
+        // Both placeholders are rendered from the same plan, so the call and the
+        // card cannot disagree even if the old dashboard prompt is still installed.
+        questions: finalQuestions,
+        interview_plan: renderInterviewPlan(plan),
+        _interview_plan: plan,
+      },
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", id)
+
+  if (writeError) {
+    logger.error("Failed to save edited screening questions", {
+      participantId: id,
+      error: writeError.message,
+    })
+    return NextResponse.json({ error: "Failed to save questions" }, { status: 500 })
+  }
+
+  const questions = finalQuestions
+    .split("\n")
+    .map((q) => q.replace(/^\d+\.\s*/, ""))
+    .filter(Boolean)
+
+  const status = String((participant as any).status || "")
+  const callInProgress = ["calling", "in_progress", "in-progress", "initiated", "queued", "ringing"].includes(status)
+
+  logger.info("Screening questions edited", {
+    participantId: id,
+    edited: edited.length,
+    saved: questions.length,
+    dropped: dropped.length,
+    usedTemplate,
+    callInProgress,
+  })
+
+  return NextResponse.json({
+    ok: true,
+    questions,
+    dropped,
+    used_template: usedTemplate,
+    // Edits change the payload, so they land on the next attempt — not on a call
+    // that is already connected.
+    applies_to: callInProgress ? "next_call" : "this_call",
+    call_in_progress: callInProgress,
   })
 }

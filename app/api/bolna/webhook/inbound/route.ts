@@ -195,6 +195,9 @@ export async function POST(request: NextRequest) {
         .from("phone_screening_participants")
         .update({
           call_payload_json: { ...(participant.call_payload_json || {}), ...userData, _interview_plan: planSource },
+          // Same reason as the outbound path: the card must show the questions
+          // that were actually dialled, not the pre-plan list it was built from.
+          generated_questions: String(userData.questions || ""),
           updated_at: now,
         })
         .eq("id", participant.id)

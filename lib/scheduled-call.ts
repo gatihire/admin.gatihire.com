@@ -567,6 +567,11 @@ export async function placeCallForParticipant(
       .from("phone_screening_participants")
       .update({
         call_payload_json: { ...(payload || {}), ...userData, _interview_plan: plan },
+        // Keep the card in step with the call. The plan can differ from the old
+        // queued list (banned questions are dropped, a template may replace it),
+        // and a card that shows questions the agent will not ask is how HR stops
+        // trusting the screen.
+        generated_questions: legacy,
         updated_at: new Date().toISOString(),
       })
       .eq("id", participantId)

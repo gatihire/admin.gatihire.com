@@ -181,6 +181,10 @@ export function CandidateProfileSidebar({
   const [resumeExpanded, setResumeExpanded] = useState(false)
   const [questionsEditing, setQuestionsEditing] = useState(false)
   const [questionsDraft, setQuestionsDraft] = useState<string>(participant?.generated_questions || "")
+  // What the server actually stored after the last save. The `participant` prop
+  // is owned by the parent and does not refresh on save, so without this the box
+  // would keep showing the draft HR typed even when the server replaced it.
+  const [savedQuestions, setSavedQuestions] = useState<string | null>(null)
   const [fitAnalysis, setFitAnalysis] = useState<any>(null)
   const [fitLoading, setFitLoading] = useState(false)
   const [jobDescExpanded, setJobDescExpanded] = useState(false)
@@ -404,21 +408,48 @@ export function CandidateProfileSidebar({
   const saveQuestions = async () => {
     if (!participant?.id) return
     try {
-      // Update both generated_questions and call_payload_json.questions
-      const payload: Record<string, any> = { generated_questions: questionsDraft }
-      if (participant.call_payload_json) {
-        payload.call_payload_json = {
-          ...participant.call_payload_json,
-          questions: questionsDraft.split("\n").filter((q: string) => q.trim()).map((q: string, i: number) => `${i + 1}. ${q.replace(/^\d+\.\s*/, "")}`).join("\n")
-        }
-      }
-      await fetch(`/api/phone-screening/participants/${participant.id}`, {
+      // Send only the text. The server rebuilds the call payload from it through
+      // the same rule checker the generator uses, and returns what it saved.
+      const res = await fetch(`/api/phone-screening/participants/${participant.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({ generated_questions: questionsDraft })
       })
+
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        toast({
+          title: "Questions not saved",
+          description: data?.error || `Save failed (${res.status})`,
+          variant: "destructive",
+        })
+        return
+      }
+
+      // Show the saved list, not the draft: a banned question is refused by the
+      // server, and the old code toasted success anyway while the call kept the
+      // old questions.
+      const saved: string[] = Array.isArray(data.questions) ? data.questions : []
+      setSavedQuestions(saved.length > 0 ? saved.map((q, i) => `${i + 1}. ${q}`).join("\n") : questionsDraft)
       setQuestionsEditing(false)
-      toast({ title: "Questions updated" })
+
+      const dropped = Array.isArray(data.dropped) ? data.dropped : []
+      if (data.used_template) {
+        toast({
+          title: "Saved as a safe template",
+          description: "None of the edited questions passed the screening rules, so the role's default plan was used instead.",
+        })
+      } else if (dropped.length > 0) {
+        toast({
+          title: "Saved, with changes",
+          description: `${dropped.length} question${dropped.length > 1 ? "s" : ""} could not be asked and ${dropped.length > 1 ? "were" : "was"} replaced.`,
+        })
+      } else {
+        toast({
+          title: "Questions updated",
+          description: data.applies_to === "next_call" ? "This call is already running — the change applies to the next attempt." : undefined,
+        })
+      }
     } catch {
       toast({ title: "Failed to save", variant: "destructive" })
     }
@@ -982,7 +1013,7 @@ export function CandidateProfileSidebar({
               )}
 
               {/* Generated Questions */}
-              {participant?.generated_questions && (
+              {(savedQuestions || participant?.generated_questions) && (
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <SectionLabel text="AI-Generated Questions" />
@@ -997,7 +1028,7 @@ export function CandidateProfileSidebar({
                       </div>
                     ) : (
                       <button 
-                        onClick={() => { setQuestionsDraft(participant.generated_questions); setQuestionsEditing(true) }}
+                        onClick={() => { setQuestionsDraft(savedQuestions || participant.generated_questions); setQuestionsEditing(true) }}
                         className="text-xs font-semibold text-blue-600 hover:text-blue-700"
                       >
                         Edit
@@ -1014,7 +1045,7 @@ export function CandidateProfileSidebar({
                       />
                     ) : (
                       <ol className="space-y-2">
-                        {participant.generated_questions.split("\n").filter((q: string) => q.trim()).map((question: string, i: number) => (
+                        {(savedQuestions || participant.generated_questions).split("\n").filter((q: string) => q.trim()).map((question: string, i: number) => (
                           <li key={i} className="flex gap-2 text-sm">
                             <span className="font-mono text-[10px] font-bold text-zinc-400 mt-0.5">{i + 1}.</span>
                             <span className="text-zinc-700">{question.replace(/^\d+\.\s*/, "")}</span>
