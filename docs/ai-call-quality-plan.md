@@ -767,6 +767,26 @@ Two notes for whoever touches this next:
 
 The model experiment is not applied; it needs an A/B, not a switch.
 
+### 7.1 Prompt safeguards added after the first live call
+
+The 11:39 call on 18 Nov (375 s, 569 candidate words, 3 of 3 topics) exposed the last
+behavioural gaps. All were fixed in `lib/bolna.ts` and pushed to the agent the same day
+(983 → 1153 words):
+
+| Gap | What the call showed | Rule added |
+|---|---|---|
+| Closing repeated | "Dhanyavaad, goodbye" said three times, once per "thank you" | Closing line once; after it, stay silent — even for a thank-you |
+| Bad line improvised | Candidate said the voice was breaking; the agent made up an apology line that happened to work | Scripted: repeat once slowly, then RESCHEDULE closing |
+| Failed dealbreaker | Plan said confirm them, never said what happens on a fail | Do not argue; skip remaining topics, go to closing |
+| Client name | Prompt gave `{hiring_company_name}` in context but only banned it *in questions* | Never speak it — not in a question, not in an answer; scripted reply for "kaunsi company?" |
+| English closing | "If the candidate speaks English, switch" contradicted exact Hinglish closings | Closings keep the call's language |
+| Name in closing | Instruction said use the name in closing; closings have no name | Name only in the welcome message |
+| "kya?" / "repeat" | Agent re-asked a different question instead of the same one | Repeat the same question slowly, never a new one |
+
+`docs/ai-screener-prompt.md`'s "Hinglish" block was a stale English prompt; it is now the
+exact live text, generated from `lib/bolna.ts`. The English block got the same rules.
+
+
 
 ---
 
