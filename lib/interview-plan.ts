@@ -320,6 +320,19 @@ function short(text: string, maxWords = 5): string {
     .join(" ")
 }
 
+/** A JD bullet starts with an action verb ("Handle …", "Obtain …"); a spoken
+ *  topic needs the object of that verb, not the verb. */
+const LEADING_ACTION =
+  /^(handle|handling|manage|managing|prepare|preparing|maintain|maintaining|coordinate|coordinating|obtain|obtaining|negotiate|negotiating|ensure|ensuring|support|supporting|oversee|overseeing|process|processing|monitor|monitoring|create|creating|develop|developing|execute|executing|plan|planning|track|tracking|check|checking|submit|submitting|verify|verifying|update|updating|arrange|arranging|follow|following|assist|assisting|responsible for)\b\s*/i
+
+function responsibilityPhrase(text: string, maxWords: number): string {
+  const cleaned = String(text || "")
+    .replace(/\.$/, "")
+    .replace(LEADING_ACTION, "")
+    .trim()
+  return short(cleaned, maxWords)
+}
+
 function isManagerRole(job: JobContext): boolean {
   const hay = `${job.title || ""} ${job.role_category || ""}`.toLowerCase()
   return /(manager|head|lead|supervisor|incharge|in-charge|director|avp|vp|chief)/.test(hay)
@@ -343,6 +356,57 @@ export function findResumeClaims(resumeText?: string | null): string[] {
 
 export function findResumeClaim(resumeText?: string | null): string | null {
   return findResumeClaims(resumeText)[0] ?? null
+}
+
+/** A `jobs` row the way PostgREST returns it — `description` holds the JD text. */
+export type JobRowLike = Partial<JobContext> & {
+  id?: string
+  description?: string | null
+}
+
+const JD_HEADINGS =
+  /^(key responsibilities|responsibilities|roles? (and|&) responsibilities|requirements|qualifications|desired|skills|about|job description|position|department|industry|budget|location|salary|benefits|why join|company|candidate profile)\b/i
+
+/**
+ * Pull the responsibility sentences out of a free-form JD.
+ *
+ * Why this exists: `jobs.key_responsibilities` and `jobs.daily_work_summary` were
+ * dropped in `supabase/migrations/trim_job_fields.sql` (Feb), but the call
+ * placement query still asked for them. PostgREST answers 42703, and the caller
+ * reads any error as "participant not found" — so every retry and every inbound
+ * callback silently stopped placing. The JD text is still in `jobs.description`,
+ * so the plan generator reads it from there instead of from a column that no
+ * longer exists.
+ */
+export function responsibilitiesFromDescription(description: string): string[] {
+  return String(description || "")
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^[\s•·‣▪◦*\-–—]+/, "").trim())
+    .filter((line) => {
+      if (line.length < 20 || line.length > 160) return false
+      if (JD_HEADINGS.test(line)) return false
+      if (line.endsWith(":")) return false
+      // "Position: Sea Export Pricing Executive" — a field, not a responsibility.
+      if (line.slice(0, 30).includes(":")) return false
+      if (/^[A-Z\s&/]+$/.test(line)) return false
+      return /^[A-Za-z]/.test(line)
+    })
+    .filter((line, i, all) => all.indexOf(line) === i)
+    .slice(0, 6)
+}
+
+/**
+ * Normalise a `jobs` row into the shape the plan generator expects, filling the
+ * dropped columns from the JD text when the row still carries them.
+ */
+export function jobContextFromRow(row: JobRowLike | null | undefined): JobContext {
+  if (!row) return { id: "" }
+  const context = { ...row } as JobContext & { description?: string | null }
+  if (!context.key_responsibilities?.length) {
+    const parsed = responsibilitiesFromDescription(String(row.description || ""))
+    if (parsed.length) context.key_responsibilities = parsed
+  }
+  return context
 }
 
 /**
@@ -470,14 +534,14 @@ export function buildTemplatePlan(
       resume_hook: null,
     })
   } else if (responsibilities[0]) {
-    const resp = short(String(responsibilities[0]), 6)
+    const resp = responsibilityPhrase(String(responsibilities[0]), 8)
     topics.push({
       id: slug(resp),
-      label: `Daily work: ${resp}`,
+      label: `Daily work: ${responsibilityPhrase(String(responsibilities[0]), 5)}`,
       source: "jd_must_have",
       must_have: true,
       order: topics.length + 1,
-      ask: `${resp} — aapne yeh kaam pehle kiya hai? Ek example bataiye.`,
+      ask: `${resp} ka ek real example bataiye?`,
       digs: COMMON_DIGS,
       strong: "Describes a real instance, the system used, and the outcome",
       weak: "Generic yes, cannot describe one instance",

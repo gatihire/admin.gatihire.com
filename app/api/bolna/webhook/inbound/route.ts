@@ -7,6 +7,7 @@ import { logCandidateActivity } from "@/lib/activity-logger"
 import {
   buildPlanFromQuestions,
   buildTemplatePlan,
+  jobContextFromRow,
   renderInterviewPlan,
   renderLegacyQuestions,
   toBolnaUserData,
@@ -34,12 +35,12 @@ async function findParticipantByPhone(phone: string): Promise<{
     title: string
     client_name: string
     skills_must_have?: string[] | null
-    key_responsibilities?: string[] | null
-    daily_work_summary?: string | null
+    /** The JD text. `key_responsibilities` and `daily_work_summary` were dropped
+     *  from the table in Feb; the plan generator reads them from here. */
+    description?: string | null
     license_type?: string | null
     role_category?: string | null
     city?: string | null
-    work_type?: string | null
     employment_type?: string | null
     experience_min_years?: number | null
     experience_max_years?: number | null
@@ -59,8 +60,8 @@ async function findParticipantByPhone(phone: string): Promise<{
       status,
       call_attempts,
       candidates:candidate_id (id, name, phone, current_role),
-      jobs:job_id (id, title, client_name, skills_must_have, key_responsibilities,
-        daily_work_summary, license_type, role_category, city, work_type,
+      jobs:job_id (id, title, client_name, skills_must_have, description,
+        license_type, role_category, city,
         employment_type, experience_min_years, experience_max_years,
         salary_min, salary_max, salary_type)
     `)
@@ -166,12 +167,12 @@ export async function POST(request: NextRequest) {
     if (!String(userData.interview_plan || "").trim()) {
       const existingQuestions = String(userData.questions || "")
       const planSource = existingQuestions.trim()
-        ? buildPlanFromQuestions(existingQuestions, (participant.jobs || { id: "" }) as any, {
+        ? buildPlanFromQuestions(existingQuestions, jobContextFromRow(participant.jobs || { id: "" }), {
             id: candidate.id,
             name: candidate.name,
             current_role: candidate.current_role ?? null,
           })
-        : buildTemplatePlan((participant.jobs || { id: "" }) as any, {
+        : buildTemplatePlan(jobContextFromRow(participant.jobs || { id: "" }), {
             id: candidate.id,
             name: candidate.name,
             current_role: candidate.current_role ?? null,
