@@ -42,6 +42,17 @@ export async function POST(request: NextRequest) {
           { status: 409 }
         )
       }
+      if (result.reason === "provider_paused") {
+        return NextResponse.json(
+          {
+            error: result.error || "Outbound calling is paused — the voice provider is unavailable",
+            callPlaced: false,
+            reason: "provider_paused",
+            paused: true,
+          },
+          { status: 503 }
+        )
+      }
       const status = result.reason === "not_found" ? 404 : 502
       return NextResponse.json(
         { error: result.error || "Failed to place call", callPlaced: false, reason: result.reason || "provider_rejected" },

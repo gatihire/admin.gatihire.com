@@ -9,6 +9,7 @@
 import { Client } from "@upstash/qstash"
 import { supabaseAdmin } from "@/lib/supabase"
 import { placeBolnaCall, BOLNA_TERMINAL_STATUSES } from "@/lib/bolna"
+import { getProviderPause, pauseCallsForBalance, clearProviderPauseIfPaused } from "@/lib/provider-health"
 import { buildAlreadyCollectedUserData } from "@/lib/prompt-user-data"
 import { buildResumeInfo } from "@/lib/prompt-user-data"
 import {
@@ -82,6 +83,102 @@ const DIRECT_PLACE_WINDOW_SECONDS = 60
 
 // When a direct placement fails, how long until the queued callback retries.
 const CALLBACK_RETRY_DELAY_SECONDS = 5 * 60
+
+/**
+ * How many times we will try to CREATE a call before handing the row to HR.
+ *
+ * Separate from `call_attempts` (which only counts calls the provider
+ * accepted). Without this ceiling, a row whose creation is refused can be
+ * retried forever: the placement never increments anything, so it never leaves
+ * the queue and starves every row behind it.
+ */
+export const MAX_PLACEMENT_ATTEMPTS = 6
+
+/**
+ * How often a paused provider is probed with a single real placement.
+ * Without this the pause would deadlock: every path refuses to call, so nothing
+ * ever discovers that the account was topped up.
+ */
+const PROVIDER_PAUSE_PROBE_MS = 10 * 60 * 1000
+
+/** 2m, 5m, 15m, 30m, 1h, 2h — enough to ride out a provider blip without
+ *  hammering it, and short enough that a topped-up account recovers quickly. */
+function placementBackoffMs(attempt: number): number {
+  const minutes = [2, 5, 15, 30, 60, 120]
+  return (minutes[Math.min(Math.max(attempt - 1, 0), minutes.length - 1)] || 15) * 60 * 1000
+}
+
+/**
+ * Persist why a call was never created.
+ *
+ * This is the row that turns "the provider has no balance" from a support
+ * mystery into a fact on the candidate card. It also advances the retry clock,
+ * which is what stops the queue from retrying the same head forever.
+ */
+export async function recordPlacementFailure(
+  participantId: string,
+  failure: {
+    error: string
+    kind?: string
+    retryable?: boolean
+    attempt: number
+  }
+): Promise<void> {
+  const now = new Date()
+  const nowIso = now.toISOString()
+  const exhausted = !failure.retryable || failure.attempt >= MAX_PLACEMENT_ATTEMPTS
+
+  const patch: Record<string, unknown> = {
+    placement_attempts: failure.attempt,
+    last_placement_error: failure.error.slice(0, 1000),
+    last_placement_error_at: nowIso,
+    provider_error: failure.error.slice(0, 1000),
+    updated_at: nowIso,
+  }
+
+  if (exhausted) {
+    patch.status = "needs_manual_followup"
+    patch.needs_manual_followup = true
+    patch.next_placement_retry_at = null
+    patch.next_retry_at = null
+  } else {
+    patch.next_placement_retry_at = new Date(now.getTime() + placementBackoffMs(failure.attempt)).toISOString()
+  }
+
+  const { error } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .update(patch)
+    .eq("id", participantId)
+
+  if (error) {
+    logger.error("Could not persist placement failure", { participantId, error: error.message })
+  }
+
+  logger.warn("Call placement refused", {
+    participantId,
+    attempt: failure.attempt,
+    kind: failure.kind || "unknown",
+    exhausted,
+    error: failure.error,
+  })
+}
+
+/** A placement worked — clear the error trail so the card stops apologising. */
+async function clearPlacementFailure(participantId: string): Promise<void> {
+  const { error } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .update({
+      last_placement_error: null,
+      last_placement_error_at: null,
+      next_placement_retry_at: null,
+      provider_error: null,
+    })
+    .eq("id", participantId)
+
+  if (error) {
+    logger.warn("Could not clear placement failure", { participantId, error: error.message })
+  }
+}
 
 /** Provider statuses after which a new execution is legitimate. */
 function isTerminalProviderStatus(status?: string | null): boolean {
@@ -191,6 +288,7 @@ export interface PlaceCallResult {
     | "not_found"
     | "no_phone"
     | "provider_rejected"
+    | "provider_paused"
     | "no_longer_waiting"
     /** The eligibility gate refused. Permanent for this tap: retrying the same
      *  request can never succeed, so callers must not treat it as transient. */
@@ -207,6 +305,8 @@ interface ParticipantRow {
   next_retry_at?: string | null
   scheduled_call_at?: string | null
   campaign_id?: string | null
+  placement_attempts?: number | null
+  next_placement_retry_at?: string | null
   candidates?: {
     id: string
     name?: string | null
@@ -236,6 +336,7 @@ export async function placeCallForParticipant(
     .select(`
       id, status, call_attempts, call_payload_json, info_data,
       whatsapp_sent_at, next_retry_at, scheduled_call_at, campaign_id,
+      placement_attempts, next_placement_retry_at,
       candidates: candidate_id (id, name, phone, total_experience, location)
     `)
     .eq("id", participantId)
@@ -259,6 +360,30 @@ export async function placeCallForParticipant(
     candidatePhone: candidate?.phone,
     candidateName: candidate?.name
   })
+
+  // A provider-wide outage is not this candidate's problem. Refuse placement
+  // without spending their attempt budget, so topping up the provider account
+  // resumes them exactly where they were.
+  //
+  // The pause must not deadlock: nothing else ever attempts a placement while
+  // it is set, so after PROBE_INTERVAL_MS we let ONE attempt through. A success
+  // clears the switch; a fresh refusal rewrites it (with a new `since`), which
+  // schedules the next probe.
+  const pause = await getProviderPause()
+  if (pause.paused) {
+    const sinceMs = pause.since ? new Date(pause.since).getTime() : NaN
+    const staleEnoughToProbe =
+      !Number.isFinite(sinceMs) || Date.now() - sinceMs > PROVIDER_PAUSE_PROBE_MS
+    if (!staleEnoughToProbe) {
+      return {
+        success: false,
+        skipped: true,
+        reason: "provider_paused",
+        error: pause.reason || "Outbound calling is paused — the voice provider is unavailable",
+      }
+    }
+    logger.info("Probing the voice provider after a pause", { participantId, since: pause.since })
+  }
 
   // Hard attempt budget, checked before anything else so an exhausted budget is
   // never reported as "already calling" or "not due". Applies to every path —
@@ -299,7 +424,10 @@ export async function placeCallForParticipant(
     // call has passed (failed). whatsapp_sent alone NEVER triggers a call.
     if (row.status === "call_scheduled" || row.status === "scheduled") {
       const scheduledTime = row.scheduled_call_at || row.next_retry_at
-      if (!scheduledTime || new Date(scheduledTime).getTime() > Date.now()) {
+      // A booking with NO time used to be refused forever ("Callback not due
+      // yet"), which is how a row sat in "Call booked" for weeks. If no time
+      // was recorded, the honest reading is "it should already have happened".
+      if (scheduledTime && new Date(scheduledTime).getTime() > Date.now()) {
         return { success: false, skipped: true, reason: "not_due", error: "Callback not due yet" }
       }
     } else if (row.status === "failed") {
@@ -313,6 +441,20 @@ export async function placeCallForParticipant(
       }
       if (!row.next_retry_at || new Date(row.next_retry_at).getTime() > Date.now()) {
         return { success: false, skipped: true, reason: "not_due", error: "Retry not due yet" }
+      }
+      // A refused placement has its own clock. Respecting it is what lets the
+      // queue move past a row that keeps failing instead of retrying the same
+      // oldest five every sweep.
+      if (row.next_placement_retry_at && new Date(row.next_placement_retry_at).getTime() > Date.now()) {
+        return { success: false, skipped: true, reason: "not_due", error: "Placement retry not due yet" }
+      }
+      if (Number(row.placement_attempts || 0) >= MAX_PLACEMENT_ATTEMPTS) {
+        return {
+          success: false,
+          skipped: true,
+          reason: "provider_rejected",
+          error: "Call creation failed too many times — flagged for a human",
+        }
       }
     } else {
       return {
@@ -348,10 +490,32 @@ export async function placeCallForParticipant(
   })
 
   if (!result.success || !result.executionId) {
-    // Leave the participant untouched so an at-least-once QStash retry can re-run
-    // this step cleanly. Nothing was dialled, so the budget is untouched.
-    return { success: false, reason: "provider_rejected", error: result.error || "Failed to place call" }
+    // Nothing was dialled, so `call_attempts` stays untouched — but the reason
+    // is now written down, the retry clock advances, and a provider-wide balance
+    // failure pauses outbound calling instead of silently failing every row.
+    const attempt = Number(row.placement_attempts || 0) + 1
+
+    if (result.kind === "credit_exhausted") {
+      await pauseCallsForBalance(result.error || "Voice provider account has no balance")
+    }
+
+    await recordPlacementFailure(participantId, {
+      error: result.error || "Failed to place call",
+      kind: result.kind,
+      retryable: result.retryable !== false,
+      attempt,
+    })
+
+    return {
+      success: false,
+      reason: result.kind === "credit_exhausted" ? "provider_paused" : "provider_rejected",
+      error: result.error || "Failed to place call",
+    }
   }
+
+  // The provider accepted it — clear the failure trail and lift a balance pause.
+  await clearPlacementFailure(participantId)
+  await clearProviderPauseIfPaused()
 
   const now = new Date().toISOString()
   const attempts = row.call_attempts + 1
@@ -766,6 +930,7 @@ export async function scheduleOrPlaceCall(
         status: "call_scheduled",
         scheduled_call_at: dueAt,
         next_retry_at: dueAt,
+        booking_source: "candidate_requested",
         updated_at: new Date().toISOString(),
       })
       .eq("id", participantId)
@@ -783,7 +948,7 @@ export async function scheduleOrPlaceCall(
           status: "failed",
           scheduled_call_at: null,
           next_retry_at: null,
-          callback_preference: `Call callback could not be queued: ${scheduled.error || "QStash publish failed"}`,
+          provider_error: `Call callback could not be queued: ${scheduled.error || "QStash publish failed"}`,
           updated_at: new Date().toISOString(),
         })
         .eq("id", participantId)
@@ -814,6 +979,7 @@ export async function scheduleOrPlaceCall(
     .update({
       status: "call_scheduled",
       scheduled_call_at: dueAt,
+      booking_source: "candidate_requested",
       updated_at: new Date().toISOString(),
     })
     .eq("id", participantId)
@@ -828,7 +994,7 @@ export async function scheduleOrPlaceCall(
       .update({
         status: "failed",
         scheduled_call_at: null,
-        callback_preference: `Call could not be scheduled: ${result.error || "QStash publish failed"}`,
+        provider_error: `Call could not be scheduled: ${result.error || "QStash publish failed"}`,
         updated_at: new Date().toISOString(),
       })
       .eq("id", participantId)

@@ -187,6 +187,38 @@ export function CandidateProfileSidebar({
   const [reasonExpanded, setReasonExpanded] = useState(false)
   const [callBusy, setCallBusy] = useState(false)
   const [nudgeBusy, setNudgeBusy] = useState(false)
+  // A candidate can be reachable on WhatsApp with no number on file (the CV had
+  // none). Without an edit here the nudge simply failed forever and the only
+  // advice we could give was "the number is missing".
+  const [phoneEditing, setPhoneEditing] = useState(false)
+  const [phoneDraft, setPhoneDraft] = useState("")
+  const [phoneSaving, setPhoneSaving] = useState(false)
+
+  const savePhone = async () => {
+    const id = c?.id || rawCandidate?._id
+    if (!id) return
+    const value = phoneDraft.trim()
+    setPhoneSaving(true)
+    try {
+      const res = await fetch(`/api/candidates/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone: value }),
+      })
+      const json = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(json?.error || "Could not save the phone number")
+      setEnriched((prev: any) => ({ ...(prev || {}), phone: value }))
+      setPhoneEditing(false)
+      toast({
+        title: value ? "Phone number saved" : "Phone number removed",
+        description: value ? "WhatsApp nudges and AI calls can now reach this candidate." : undefined,
+      })
+    } catch (e: any) {
+      toast({ title: "Could not save", description: e?.message || "Something went wrong", variant: "destructive" })
+    } finally {
+      setPhoneSaving(false)
+    }
+  }
 
   /**
    * Place a real AI screening call. The button used to only show a toast that
@@ -602,11 +634,63 @@ export function CandidateProfileSidebar({
           {/* Contact + actions */}
           <div className="flex flex-wrap items-center justify-between gap-3 mt-4">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-600">
-              {c.phone && (
+              {phoneEditing ? (
+                <span className="flex items-center gap-1.5">
+                  <Phone className="h-3.5 w-3.5 text-zinc-400" />
+                  <input
+                    autoFocus
+                    value={phoneDraft}
+                    onChange={(e) => setPhoneDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") savePhone()
+                      if (e.key === "Escape") setPhoneEditing(false)
+                    }}
+                    placeholder="+91 98765 43210"
+                    className="h-7 w-40 rounded border border-zinc-300 px-2 text-xs focus:border-indigo-400 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={savePhone}
+                    disabled={phoneSaving}
+                    className="text-xs font-semibold text-indigo-700 disabled:opacity-50"
+                  >
+                    {phoneSaving ? "Saving…" : "Save"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPhoneEditing(false)}
+                    className="text-xs text-zinc-500"
+                  >
+                    Cancel
+                  </button>
+                </span>
+              ) : c.phone ? (
                 <span className="flex items-center gap-1.5">
                   <Phone className="h-3.5 w-3.5 text-zinc-400" />
                   {c.phone}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPhoneDraft(String(c.phone || ""))
+                      setPhoneEditing(true)
+                    }}
+                    className="text-[11px] text-indigo-600 hover:underline"
+                  >
+                    Edit
+                  </button>
                 </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPhoneDraft("")
+                    setPhoneEditing(true)
+                  }}
+                  className="flex items-center gap-1.5 rounded border border-dashed border-amber-300 bg-amber-50 px-2 py-1 font-medium text-amber-800 hover:bg-amber-100"
+                >
+                  <Phone className="h-3.5 w-3.5" />
+                  Add phone number
+                </button>
               )}
               {c.email && (
                 <span className="flex items-center gap-1.5">

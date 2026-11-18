@@ -147,17 +147,24 @@ export async function sweepJourney(opts?: {
 
   // ── 1. A call was booked for a time that has passed, but no call happened ──
   if (want.has("booked_not_fired")) {
+    const sweepIso = new Date().toISOString()
+    const past = new Date(Date.now() - BOOKED_CALL_GRACE_MINUTES * 60 * 1000).toISOString()
+    const oldest = new Date(Date.now() - BOOKED_CALL_MAX_AGE_HOURS * 3600 * 1000).toISOString()
+
     const { data } = await supabaseAdmin
       .from("phone_screening_participants")
-      .select("id, status, call_attempts, scheduled_call_at, next_retry_at, whatsapp_sent_at, updated_at")
+      .select("id, status, call_attempts, scheduled_call_at, next_retry_at, placement_attempts, next_placement_retry_at, whatsapp_sent_at, updated_at")
       .in("status", ["call_scheduled", "scheduled"])
-      .not("scheduled_call_at", "is", null)
-      .lt("scheduled_call_at", new Date(Date.now() - BOOKED_CALL_GRACE_MINUTES * 60 * 1000).toISOString())
-      // Older than this the candidate has moved on — that is a cold call, and
-      // the gone_cold bucket below closes it out instead.
-      .gt("scheduled_call_at", new Date(Date.now() - BOOKED_CALL_MAX_AGE_HOURS * 3600 * 1000).toISOString())
+      // A booking with NO time is the worst case, not a non-case: nothing will
+      // ever fire it and the old filter skipped it entirely. Those rows sat in
+      // "Call booked" for weeks.
+      .or(`scheduled_call_at.is.null,and(scheduled_call_at.lt.${past},scheduled_call_at.gt.${oldest})`)
       .lt("call_attempts", MAX_TOTAL_CALL_ATTEMPTS)
-      .order("scheduled_call_at", { ascending: true })
+      // Respect the placement backoff and the placement cap, otherwise the same
+      // five rows are retried every sweep and nothing behind them moves.
+      .or(`next_placement_retry_at.is.null,next_placement_retry_at.lte.${sweepIso}`)
+      .or(`placement_attempts.is.null,placement_attempts.lt.6`)
+      .order("scheduled_call_at", { ascending: true, nullsFirst: true })
       .limit(MAX_PER_BUCKET)
 
     for (const row of (data || []) as Row[]) {
@@ -179,9 +186,11 @@ export async function sweepJourney(opts?: {
 
   // ── 2. A retry was booked for a time that has passed, but never fired ──
   if (want.has("retry_overdue")) {
+    const sweepIso = new Date().toISOString()
+
     const { data } = await supabaseAdmin
       .from("phone_screening_participants")
-      .select("id, status, call_attempts, scheduled_call_at, next_retry_at, whatsapp_sent_at, updated_at")
+      .select("id, status, call_attempts, scheduled_call_at, next_retry_at, placement_attempts, next_placement_retry_at, whatsapp_sent_at, updated_at")
       .eq("status", "failed")
       .not("next_retry_at", "is", null)
       .lt("next_retry_at", new Date(Date.now() - BOOKED_CALL_GRACE_MINUTES * 60 * 1000).toISOString())
@@ -191,6 +200,13 @@ export async function sweepJourney(opts?: {
       // needed rescuing.
       .not("bolna_status", "is", "max_retries")
       .lt("call_attempts", MAX_TOTAL_CALL_ATTEMPTS)
+      // Starvation guard. A refused placement never increments call_attempts, so
+      // these rows used to stay at the head of the queue forever. Now each
+      // refusal sets a backoff clock and eventually hits the cap, which lets
+      // today's failures get a turn.
+      .or(`next_placement_retry_at.is.null,next_placement_retry_at.lte.${sweepIso}`)
+      .or(`placement_attempts.is.null,placement_attempts.lt.6`)
+      .order("next_placement_retry_at", { ascending: true, nullsFirst: true })
       .order("next_retry_at", { ascending: true })
       .limit(MAX_PER_BUCKET)
 

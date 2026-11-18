@@ -609,6 +609,23 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
   })
   const [detailApplicationId, setDetailApplicationId] = useState<string | null>(null)
 
+  // A provider-wide outage is one fact shown once. The 16–18 Nov outage made
+  // every card say "failed", which reads as twenty unresponsive candidates.
+  const [providerPause, setProviderPause] = useState<{ paused: boolean; reason?: string | null; since?: string | null } | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const load = () => {
+      fetch("/api/phone-screening/provider-health")
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => { if (!cancelled && d) setProviderPause(d) })
+        .catch(() => {})
+    }
+    load()
+    const timer = setInterval(load, 60_000)
+    return () => { cancelled = true; clearInterval(timer) }
+  }, [])
+
   // ── The one filter bar ─────────────────────────────────────────────────
   //
   // The old page had EIGHT filter dimensions across four stacked bars:
@@ -1265,11 +1282,10 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
    * points behave identically.
    */
   const nudgeCandidate = async (candidateId: string) => {
-    const participantId = participantIdByCandidate[candidateId]
-    if (!participantId) {
-      toast({ title: "No screening record", description: "This candidate has no phone-screening entry yet", variant: "destructive" })
-      return
-    }
+    // No participant row is not a reason to refuse: the trigger creates one and
+    // sends the nudge. The old guard made the card button fail with "No
+    // screening record" while the profile button worked — which is why the team
+    // learned to "nudge from the profile instead".
     // The candidate's REAL origin. Forcing "outbound" here made the
     // trigger route send the outbound talent-outreach template instead of
     // a details request — while the toast said the candidate had been
@@ -1291,7 +1307,20 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
         }),
       })
       const data = await res.json()
-      if (!res.ok) throw new Error(data.error || "Failed to send WhatsApp")
+      if (!res.ok) {
+        if (data?.code === "NO_PHONE") {
+          const names: string[] = data?.skippedNoPhone || []
+          toast({
+            title: "No phone number",
+            description:
+              (data.error || "This candidate has no phone number on file.") +
+              (names.length ? "" : " Add one in the candidate profile, then try again."),
+            variant: "destructive",
+          })
+          return
+        }
+        throw new Error(data.error || "Failed to send WhatsApp")
+      }
       toast({
         title: "WhatsApp sent",
         description:
@@ -1697,6 +1726,20 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
         )}
 
 
+        {/* ── Provider outage banner ── */}
+        {providerPause?.paused && (
+          <div className="mb-3 flex items-start gap-2 rounded-xl border border-rose-300 bg-rose-50 px-3 py-2.5 text-sm text-rose-900">
+            <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+            <div>
+              <p className="font-semibold">Calls are paused — the voice provider is unavailable</p>
+              <p className="text-xs text-rose-800 leading-relaxed">
+                {providerPause.reason || "The provider rejected our last call request."}
+                {" "}Candidates in this state were <span className="font-semibold">not</span> marked unreachable; they resume automatically once a call is accepted again.
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* ── Bulk Action Bar ── */}
         <AnimatePresence>
           {selectedApplications.length > 0 && (
@@ -1704,9 +1747,9 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
               initial={{ opacity: 0, height: 0 }}
               animate={{ opacity: 1, height: "auto" }}
               exit={{ opacity: 0, height: 0 }}
-              className="overflow-hidden"
+              className="overflow-hidden sticky bottom-0 z-30"
             >
-              <div className="flex flex-wrap items-center gap-2 p-3 rounded-2xl border border-cyan-200 bg-cyan-50/50">
+              <div className="flex flex-wrap items-center gap-2 p-3 rounded-2xl border border-cyan-200 bg-cyan-50/95 backdrop-blur shadow-lg">
                 <span className="text-sm font-bold text-cyan-800">{selectedApplications.length} selected</span>
                 <div className="flex flex-wrap items-center gap-1.5">
                   {/* Direct nudge buttons with tooltips */}
@@ -2593,10 +2636,29 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                 </Tooltip>
               )}
 
+              {/* No phone on file — the single most common reason a nudge or call
+                  silently fails. Say it on the card and open the editor. */}
+              {!c.phone && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      onClick={() => onViewProfile(c, application, participant, aiInfo, fitScore)}
+                      className="inline-flex items-center gap-1.5 h-8 px-2.5 rounded-lg border border-amber-300 bg-amber-50 text-xs font-semibold text-amber-800 hover:bg-amber-100 transition-colors cursor-pointer"
+                    >
+                      <AlertCircle className="h-3.5 w-3.5" />
+                      Add phone
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-xs">
+                    No phone number on file — WhatsApp nudges and AI calls cannot reach this candidate. Open the profile to add one.
+                  </TooltipContent>
+                </Tooltip>
+              )}
+
               {/* Nudge dropdown */}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button variant="outline" size="sm" className="h-8 px-2.5 text-xs rounded-lg gap-1" disabled={nudgeBusy}>
+                  <Button variant="outline" size="sm" className="h-8 px-2.5 text-xs rounded-lg gap-1" disabled={nudgeBusy || !c.phone} title={!c.phone ? "Add a phone number to the candidate profile first" : undefined}>
                     {nudgeBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MessageCircle className="h-3.5 w-3.5" />}
                     Nudge
                   </Button>

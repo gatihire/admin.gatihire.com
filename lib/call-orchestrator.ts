@@ -6,6 +6,7 @@
 
 import { supabaseAdmin } from "@/lib/supabase"
 import { placeBolnaCall } from "@/lib/bolna"
+import { pauseCallsForBalance, getProviderPause } from "@/lib/provider-health"
 import { getWhatsAppService, talentOutreachTemplateName } from "@/lib/whatsapp"
 import { generateJDQuestions } from "@/lib/jd-questions"
 import { buildAlreadyCollectedUserData, buildResumeInfo } from "@/lib/prompt-user-data"
@@ -707,6 +708,22 @@ export interface OrchestrateScreeningResult {
   errors?: string[]
 }
 
+/**
+ * How many times creation of a call has already been refused for this row.
+ *
+ * `call_attempts` counts calls the provider ACCEPTED, so it never moves when
+ * creation is refused. Without a separate counter a row can be refused forever.
+ */
+async function currentPlacementAttempts(participantId: string | undefined): Promise<number> {
+  if (!participantId) return 1
+  const { data } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .select("placement_attempts")
+    .eq("id", participantId)
+    .maybeSingle()
+  return Number(data?.placement_attempts || 0) + 1
+}
+
 export async function orchestrateScreening(input: OrchestrateScreeningInput): Promise<OrchestrateScreeningResult> {
   const { job, client, candidates, originByCandidate, fallbackOrigin, createdBy } = input
   const callMode: "call_now" | "quick_screen" | "collect_info_first" = input.callMode || "call_now"
@@ -745,7 +762,18 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
     .filter(Boolean)
 
   if (validCandidates.length === 0) {
-    throw new Error("No candidates with phone numbers found")
+    // Name the candidates in the error. The generic "No candidates with phone
+    // numbers found" left a recruiter staring at a button that did nothing;
+    // "Nilesh Kumar has no phone number" tells them what to fix.
+    const names = skippedNoPhone.join(", ")
+    const err: any = new Error(
+      names
+        ? `No phone number for ${names}. Add a phone number to the candidate profile, then retry.`
+        : "No candidates with phone numbers found"
+    )
+    err.code = "NO_PHONE"
+    err.skippedNoPhone = skippedNoPhone
+    throw err
   }
 
   const { data: campaign, error: campaignError } = await supabaseAdmin
@@ -969,6 +997,15 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
 
     // ==================== CALL NOW MODE ====================
     // Place AI call immediately with no WhatsApp pre-message
+
+    // Pre-flight: if the provider already refused a placement for balance, do
+    // not fire nine more doomed requests. One banner beats twenty failures.
+    const pauseState = await getProviderPause()
+    if (pauseState.paused) {
+      errors.push(`Calls paused — ${pauseState.reason || "voice provider unavailable"}`)
+      continue
+    }
+
     const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(candidate, job, client, origin, participantId)
 
     const result = await placeBolnaCall({
@@ -988,6 +1025,11 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
           call_payload_json: userData,
           generated_questions: generatedQuestions.join("\n"),
           gemini_prompt_used: geminiPromptUsed,
+          booking_source: "recruiter",
+          last_placement_error: null,
+          last_placement_error_at: null,
+          next_placement_retry_at: null,
+          provider_error: null,
           screening_context: {
             jobTitle: job.title,
             clientName: job.client_name || client?.name || "",
@@ -1012,8 +1054,17 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
         .eq("candidate_id", candidate.id)
       triggered++
     } else {
-      // Store call_payload_json even on failure so retries via QStash have full context
+      // Store call_payload_json even on failure so retries via QStash have full context.
+      //
+      // The reason is stored too. Before this, a refusal only produced a log line
+      // and an entry in this request's error array — so a provider balance outage
+      // looked exactly like a candidate who never picked up, and the row was
+      // retried forever with no explanation on the card.
       const retryMinutes = 15
+      const placementAttempt = await currentPlacementAttempts(participantId)
+      const retryable = result.retryable !== false
+      const paused = result.kind === "credit_exhausted"
+
       await supabaseAdmin
         .from("phone_screening_participants")
         .update({
@@ -1021,7 +1072,13 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
           call_payload_json: userData,
           generated_questions: generatedQuestions.join("\n"),
           gemini_prompt_used: geminiPromptUsed,
-          next_retry_at: new Date(Date.now() + retryMinutes * 60 * 1000).toISOString(),
+          placement_attempts: placementAttempt,
+          last_placement_error: (result.error || "Failed to place call").slice(0, 1000),
+          last_placement_error_at: new Date().toISOString(),
+          provider_error: (result.error || "Failed to place call").slice(0, 1000),
+          next_retry_at: retryable && !paused
+            ? new Date(Date.now() + retryMinutes * 60 * 1000).toISOString()
+            : null,
           screening_context: {
             jobTitle: job.title,
             clientName: job.client_name || client?.name || "",
@@ -1043,12 +1100,28 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
         .eq("campaign_id", campaign.id)
         .eq("candidate_id", candidate.id)
 
-      // Schedule retry via QStash
-      if (participantId) {
+      // A provider-wide balance failure is not this candidate's fault: pause
+      // outbound calling so every other surface stops too, rather than marking
+      // twenty candidates "failed" one request at a time.
+      if (paused) {
+        await pauseCallsForBalance(result.error || "Voice provider account has no balance")
+      }
+
+      // Schedule retry via QStash — only when a retry could actually help and
+      // calling is not paused. A paused queue is resumed by the watchdog once a
+      // placement succeeds again.
+      if (participantId && retryable && !paused) {
         const scheduled = await scheduleBolnaCall(participantId, retryMinutes * 60)
         if (!scheduled.scheduled) {
           logger.warn("Failed to schedule retry for call_now failure", { participantId, error: scheduled.error })
         }
+      }
+
+      if (paused) {
+        // Not a candidate failure: nothing was attempted. Counting it as failed
+        // would mark the whole campaign "completed" during an outage.
+        errors.push(`${candidate.name}: calls paused — ${result.error || "provider has no balance"}`)
+        continue
       }
 
       failed++

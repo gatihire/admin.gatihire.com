@@ -585,8 +585,15 @@ export async function POST(request: NextRequest) {
       renudgeErrors: renudgeFailures.length > 0 ? renudgeFailures : undefined,
     })
   } catch (error: any) {
-    if (error?.message === "No candidates with phone numbers found") {
-      return NextResponse.json({ error: error.message }, { status: 400 })
+    if (error?.code === "NO_PHONE" || error?.message === "No candidates with phone numbers found") {
+      return NextResponse.json(
+        {
+          error: error.message,
+          code: "NO_PHONE",
+          skippedNoPhone: error?.skippedNoPhone || [],
+        },
+        { status: 400 }
+      )
     }
     console.error("[TRIGGER] Error:", error)
     logger.error("Trigger screening failed", { error: error?.message, stack: error?.stack })

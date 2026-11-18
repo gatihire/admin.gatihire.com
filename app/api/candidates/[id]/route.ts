@@ -203,12 +203,26 @@ export async function PATCH(
     console.log("Update data:", body)
 
     // Validate update data
-    const allowedFields = ['status', 'notes', 'rating']
+    // `phone` is here because a candidate can reach WhatsApp and calls with no
+    // number on file (the CV had none), and there was no way for a recruiter to
+    // supply one — the nudge button simply failed forever. Candidate service
+    // recomputes phone_e164 on write.
+    const allowedFields = ['status', 'notes', 'rating', 'phone', 'email']
     const updates: any = {}
-    
+
     for (const field of allowedFields) {
       if (body[field] !== undefined) {
-        updates[field] = body[field]
+        updates[field] = typeof body[field] === "string" ? body[field].trim() : body[field]
+      }
+    }
+
+    if (updates.phone !== undefined) {
+      const digits = String(updates.phone).replace(/[^\d]/g, "")
+      if (updates.phone && (digits.length < 10 || digits.length > 15)) {
+        return NextResponse.json(
+          { error: "Enter a phone number with 10–15 digits (include the country code if outside India)" },
+          { status: 400 }
+        )
       }
     }
 

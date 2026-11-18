@@ -27,10 +27,69 @@ export interface BolnaCallParams {
   scheduledAt?: string
 }
 
+/**
+ * Why a placement was refused.
+ *
+ * This exists because every failure used to look the same: `success: false`
+ * with a message that was printed into a request log and then dropped. A
+ * balance outage and a bad phone number need opposite responses (pause
+ * everything vs. flag one candidate), so they cannot share one bucket.
+ */
+export type BolnaFailureKind =
+  | "credit_exhausted" // provider account has no balance / quota
+  | "invalid_number"   // number cannot be dialled — retrying will not help
+  | "not_configured"   // missing API key / agent id
+  | "provider_error"   // 5xx, timeout, rate limit — worth retrying
+  | "rejected"         // any other refusal
+
 export interface BolnaCallResult {
   success: boolean
   executionId?: string
   error?: string
+  kind?: BolnaFailureKind
+  /** False when a retry cannot possibly succeed without a human changing something. */
+  retryable?: boolean
+  httpStatus?: number
+}
+
+const CREDIT_PATTERN =
+  /insufficient|out of (balance|credit|funds)|no (balance|credit)|not enough (balance|credit|funds)|balance|credit|wallet|quota|payment|recharge|top[\s-]?up|exhaust/i
+
+const INVALID_NUMBER_PATTERN =
+  /invalid (phone|number|recipient)|not a valid|unverified|number (is )?(invalid|not valid|blocked)|dnd|do not disturb|not reachable/i
+
+/** Map a provider refusal onto an actionable cause. */
+export function classifyPlacementFailure(
+  httpStatus: number | undefined,
+  rawMessage: string | undefined
+): { kind: BolnaFailureKind; retryable: boolean } {
+  const message = String(rawMessage || "").trim()
+
+  if (httpStatus === 402) {
+    return { kind: "credit_exhausted", retryable: false }
+  }
+  if (httpStatus === 401) {
+    return { kind: "not_configured", retryable: false }
+  }
+  if (CREDIT_PATTERN.test(message)) {
+    return { kind: "credit_exhausted", retryable: false }
+  }
+  if (httpStatus === 403) {
+    // 403 is only a balance signal when it SAYS so; otherwise it is an auth
+    // problem and pausing every campaign would be the wrong response.
+    return { kind: "rejected", retryable: false }
+  }
+  if (INVALID_NUMBER_PATTERN.test(message)) {
+    return { kind: "invalid_number", retryable: false }
+  }
+  if (httpStatus === 429 || (typeof httpStatus === "number" && httpStatus >= 500)) {
+    return { kind: "provider_error", retryable: true }
+  }
+  if (!httpStatus) {
+    // Network exception — no status at all.
+    return { kind: "provider_error", retryable: true }
+  }
+  return { kind: "rejected", retryable: false }
 }
 
 export async function placeBolnaCall(params: BolnaCallParams): Promise<BolnaCallResult> {
@@ -48,11 +107,16 @@ export async function placeBolnaCall(params: BolnaCallParams): Promise<BolnaCall
 
   if (!apiKey || !agentId) {
     logger.error("Bolna not configured", { hasApiKey: !!apiKey, hasAgentId: !!agentId })
-    return { success: false, error: "Bolna not configured (BOLNA_API_KEY / BOLNA_AGENT_ID)" }
+    return {
+      success: false,
+      error: "Bolna not configured (BOLNA_API_KEY / BOLNA_AGENT_ID)",
+      kind: "not_configured",
+      retryable: false,
+    }
   }
   if (!recipient) {
     logger.error("Invalid phone number", { to: params.to, recipient })
-    return { success: false, error: "Invalid phone number" }
+    return { success: false, error: "Invalid phone number", kind: "invalid_number", retryable: false }
   }
 
   const body: Record<string, unknown> = {
@@ -80,8 +144,10 @@ export async function placeBolnaCall(params: BolnaCallParams): Promise<BolnaCall
 
     const data = await res.json().catch(() => ({}))
     if (!res.ok) {
-      logger.error("Bolna call failed", { status: res.status, error: data, recipient })
-      return { success: false, error: data?.message || data?.error || `HTTP ${res.status}` }
+      const message = data?.message || data?.error || data?.detail || `HTTP ${res.status}`
+      const { kind, retryable } = classifyPlacementFailure(res.status, message)
+      logger.error("Bolna call failed", { status: res.status, kind, error: data, recipient })
+      return { success: false, error: message, kind, retryable, httpStatus: res.status }
     }
 
     if (data?.execution_id) {
@@ -89,10 +155,17 @@ export async function placeBolnaCall(params: BolnaCallParams): Promise<BolnaCall
       return { success: true, executionId: data.execution_id }
     }
 
-    return { success: false, error: "Bolna call accepted but no execution_id returned" }
+    return {
+      success: false,
+      error: "Bolna call accepted but no execution_id returned",
+      kind: "provider_error",
+      retryable: true,
+      httpStatus: res.status,
+    }
   } catch (err: any) {
     logger.error("Bolna call exception", { recipient, error: err.message })
-    return { success: false, error: err.message }
+    const { kind, retryable } = classifyPlacementFailure(undefined, err.message)
+    return { success: false, error: err.message, kind, retryable }
   }
 }
 

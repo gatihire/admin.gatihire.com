@@ -324,9 +324,11 @@ export function getCallTruth(p: any): CallTruth {
 
   if (bolnaStatus === "failed" || bolnaStatus === "error") {
     const detail =
-      p.callback_preference?.startsWith("Bolna error")
-        ? p.callback_preference.replace("Bolna error: ", "")
-        : hangupReason || "Failed before the candidate was reached"
+      p.provider_error
+        ? String(p.provider_error)
+        : p.callback_preference?.startsWith("Bolna error")
+          ? p.callback_preference.replace("Bolna error: ", "")
+          : hangupReason || "Failed before the candidate was reached"
     return truth(
       "our_side_failed",
       "Failed on our side",
@@ -382,12 +384,48 @@ export function getCallTruth(p: any): CallTruth {
     )
   }
 
+  // ── 3b. The provider refused to CREATE the call, and we wrote down why. ──
+  // Before this existed the row just said "failed", which is indistinguishable
+  // from a candidate who ignored us. It is what let a 40-hour balance outage
+  // look like 24 unresponsive candidates.
+  const placementError = typeof p.last_placement_error === "string" ? p.last_placement_error : null
+  if (placementError) {
+    const credit = /balance|credit|quota|payment|recharge|top[\s-]?up|exhaust|fund/i.test(placementError)
+    return truth(
+      "not_placed",
+      credit ? "No call credit — calling paused" : "Call rejected by provider",
+      credit
+        ? "The voice provider account has no balance, so no call was created. Top up the account, then retry — the candidate was not marked unreachable."
+        : `${placementError} — no call was created`,
+      { tone: "danger", bucket: "failed" }
+    )
+  }
+
   // ── 4. No execution id: we never got a call accepted by the provider. ──
   // Be explicit about why, because "waiting" vs "broken" is exactly what HR
   // could not tell apart before.
   if (status === "call_scheduled" || status === "scheduled") {
     const due = scheduledAt
-    if (due && new Date(due).getTime() <= Date.now()) {
+    const bookedBy =
+      p.booking_source === "candidate_requested"
+        ? "Booked by the candidate"
+        : p.booking_source === "auto_retry"
+          ? "Auto-retry booked"
+          : p.booking_source === "recruiter"
+            ? "Booked by a recruiter"
+            : "Call booked"
+
+    if (!due) {
+      // No due time means nothing will ever fire it. Saying "Call booked" here
+      // is how a row sat in that column for weeks.
+      return truth(
+        "not_placed",
+        "Booked with no time — will not fire",
+        "This booking has no due time, so no call will ever be placed. Call now or rebook.",
+        { tone: "danger", bucket: "failed" }
+      )
+    }
+    if (new Date(due).getTime() <= Date.now()) {
       return truth(
         "not_placed",
         "Call missed — not placed",
@@ -397,16 +435,21 @@ export function getCallTruth(p: any): CallTruth {
     }
     return truth(
       "scheduled",
-      "Call booked",
+      bookedBy,
       `Call scheduled for ${fmtTime(due) || "a chosen slot"}`,
       { tone: "info", bucket: "engaged" }
     )
   }
 
   if (status === "failed" && retryAt) {
+    // "Retry booked" and "schedule callback" used to be the same label, so a
+    // recruiter could not tell a candidate-requested callback from our own
+    // retry after a missed call. callback_preference is 0 across 14 days of
+    // data — every one of these was an internal retry.
+    const label = p.booking_source === "candidate_requested" ? "Callback booked" : "Auto-retry booked"
     return truth(
       "retry_pending",
-      "Retry booked",
+      label,
       `Attempt ${attempts} of ${maxAttempts} failed · retry ${fmtTime(retryAt)}`,
       { tone: "info", bucket: "calling" }
     )

@@ -390,9 +390,18 @@ async function buildFallbackVerdictPatch(
     if (wordCount < 50 || unavailablePattern) derivedScore = 2
     else if (wordCount < 100) derivedScore = Math.min(derivedScore, 4)
     const score = derivedScore
-    const cls = (wordCount < 50 || unavailablePattern) ? "not_screened" : undefined
+    const insufficient = wordCount < 50 || unavailablePattern
     const vj: any = { ...(fallback as any) }
-    if (cls) vj._classification_outcome = cls
+    const cls = insufficient ? "not_screened" : undefined
+    if (cls) {
+      // Do not hand out a real-looking score for a call that never became a
+      // conversation. Score 2 / "not a fit" is a judgement, and there is no
+      // evidence for it — recruiters rightly rejected those cards.
+      vj._classification_outcome = cls
+      vj._insufficient_evidence = true
+      vj.score = null
+      vj.recommendation = "further_review"
+    }
     // NOTE: `fallback_summary_used` is deliberately stored INSIDE verdict_json.
     // phone_screening_participants has no such column, and writing it top-level
     // made PostgREST reject the whole update (PGRST204) — which silently left
@@ -400,15 +409,17 @@ async function buildFallbackVerdictPatch(
     vj._fallback_summary_used = true
     const result: Record<string, unknown> = {
       verdict_json: vj,
-      ai_summary: fallback.comprehensive_summary,
-      ai_recommendation: (wordCount < 50 || unavailablePattern) ? "not_a_fit" : recommendation,
-      ai_score: score,
+      ai_summary: insufficient
+        ? "Not enough conversation to assess this candidate. No score was given."
+        : fallback.comprehensive_summary,
+      ai_recommendation: insufficient ? "further_review" : recommendation,
+      ai_score: insufficient ? null : score,
     }
     // Only include `status` when it must change. Returning `status: undefined`
     // and merging it with Object.assign used to overwrite the terminal
     // "completed" status set by the caller, leaving finished calls stuck as
     // "in_progress"/"on the call now" even though every other field saved.
-    if (wordCount < 50 || unavailablePattern) result.status = "failed"
+    if (insufficient) result.status = "failed"
     return result
   } catch (err: any) {
     logger.warn("Fallback summary generation failed", { participantId, error: err.message })
@@ -674,14 +685,29 @@ export async function handleCompletedExecution(
     const durationSecCheck = rawDuration ? Number(rawDuration) : 0
     const unavailablePatternCheck = /unavailable|not available|couldn't speak|immediately terminated|hung up|disconnected|cannot hear|can't hear|not able to listen|audio issue|voice not audible|inaudible|no audio/i.test(transcript)
     if (typeof effectiveVerdict.score === "number") {
-      if (durationSecCheck < 30 || userTurnCountCheck < 2 || (hangupBy === "user" && durationSecCheck < 60) || (unavailablePatternCheck && durationSecCheck < 90)) {
-        // For very short calls, be conservative - mark as not screened (1st screening incomplete)
+      if (durationSecCheck < 60 || userTurnCountCheck < 2 || (unavailablePatternCheck && durationSecCheck < 90)) {
+        // A call too short to hold a conversation cannot support a verdict.
+        // This used to write score 2 / "not a fit", which is a real-looking
+        // judgement on no evidence — recruiters reasonably rejected it
+        // ("too short to properly assess"). Say "not enough evidence" instead
+        // and leave scoring to a human or a second call.
         classification = "not_screened"
         if (patch.status === "completed") patch.status = "failed"
         patch.needs_manual_followup = true
-        patch.ai_score = Math.min(effectiveVerdict.score, 2)
-        patch.ai_recommendation = "not_a_fit"
-        patch.verdict_json = { ...(effectiveVerdict as any), score: 2, recommendation: "not_a_fit", notes: "1st screening incomplete (call ended/couldn’t hear/auto-cut or too short). Assessment not based on a completed conversation. HR should review transcript and send call again." }
+        patch.ai_score = null
+        patch.ai_recommendation = "further_review"
+        patch.verdict_json = {
+          ...(effectiveVerdict as any),
+          score: null,
+          recommendation: "further_review",
+          _insufficient_evidence: true,
+          _evidence_seconds: durationSecCheck,
+          notes:
+            durationSecCheck < 60
+              ? `Call was ${durationSecCheck}s — too short to assess. No score given. HR should review the transcript and send the call again.`
+              : "The candidate could not be heard clearly. No score given — HR should review the transcript and send the call again.",
+        }
+        patch.ai_summary = "Not enough conversation to assess this candidate. No score was given."
       } else {
         patch.ai_score = effectiveVerdict.score
         if (effectiveVerdict.recommendation) patch.ai_recommendation = effectiveVerdict.recommendation
@@ -789,6 +815,7 @@ export async function handleCompletedExecution(
     const callbackPatch: Record<string, unknown> = {
       status: callbackAt ? "call_scheduled" : "failed",
       callback_preference: callbackText,
+      booking_source: "candidate_requested",
       updated_at: now,
     }
     if (callbackAt) {
@@ -805,6 +832,7 @@ export async function handleCompletedExecution(
     } else {
       callbackPatch.next_retry_at = new Date(Date.now() + 15 * 60 * 1000).toISOString()
       callbackPatch.call_attempts = 1
+      callbackPatch.booking_source = "auto_retry"
       const scheduled = await scheduleBolnaCall(participantId, 15 * 60)
       if (!scheduled.scheduled) {
         logger.error("Failed to schedule callback retry", { participantId, error: scheduled.error })
@@ -1295,10 +1323,16 @@ export async function handleFailedExecution(
   // Only set next_retry_at if we haven't reached max retries
   if (!maxRetriesReached) {
     patch.next_retry_at = new Date(Date.now() + retryMinutes * 60 * 1000).toISOString()
+    // Retries we schedule ourselves are auto-retries, not candidate callbacks.
+    // Without this, "Call booked" meant both things at once.
+    patch.booking_source = "auto_retry"
   }
 
   if (execution.error_message) {
-    patch.callback_preference = `Bolna error: ${execution.error_message}`
+    // Provider errors belong to us, not to the candidate. Writing them into
+    // callback_preference made a carrier failure look like something the
+    // candidate had asked for, and put an internal error string on their card.
+    patch.provider_error = String(execution.error_message).slice(0, 1000)
   }
 
   // Store cost and hangup reason even on failed calls
