@@ -497,6 +497,25 @@ Editing the Plan tab re-renders both strings. Editing the Text tab sets an `manu
 flag so a later regeneration does not silently overwrite a recruiter's wording. The existing
 `generated_questions` column keeps being written (mirrored) so no list view breaks.
 
+### 4.8a Known gap: that editor saves nothing today
+
+Checked against production on 18 Nov:
+
+```text
+PATCH /api/phone-screening/participants/{id}  →  405
+GET   /api/phone-screening/participants/{id}  →  401 (handler exists)
+```
+
+There is no `PATCH` handler on that route. `candidate-profile-sidebar.tsx` calls it anyway and shows
+**"Questions updated"**, because `fetch` does not reject on a 405 — so a recruiter who edits a
+question sees a success toast and the edit is gone on refresh. That is worse than having no editor.
+
+Until the handler exists, treat the plan and the questions as **generated, not editable**. The
+handler needed: authenticate (`applications.edit`), accept only `generated_questions` and
+`call_payload_json.questions`, merge into the stored payload rather than replacing it, and — because
+the prompt now reads `interview_plan` — rebuild the plan from the new text (or clear it so placement
+rebuilds it, §4.7a). Otherwise an edit changes nothing the agent says.
+
 ### 4.9 What this looks like for the Vehicle Tracking & MIS Executive role
 
 A real worked example, because the abstract version is easy to nod at and hard to build.
@@ -742,16 +761,25 @@ measure coverage and dig counts from the text and accept that timing stays provi
 
 ## 11. Rollout
 
-| Phase | What ships | Reversible by | Gate |
+| Phase | What ships | Status | Gate |
 |---|---|---|---|
-| **0 — Console** | 20 s silence, 10 s still-there, 300 ms backoff, model test agent | dashboard | none, do now |
-| **1 — Plan** | `lib/interview-plan.ts`, renderer, validator, `{interview_plan}` in prompt, template fallback | flag per job (`use_interview_plan`) | 3 dry runs on real jobs, validator clean |
-| **2 — Scoring** | evidence scorer, per-topic verdicts, client report skeleton | flag | 20 scored calls reviewed by HR |
-| **3 — Timing** | calling window, retry ladder, voicemail/silent-pickup rules | revert commit | one week of connect-rate data |
-| **4 — Measure** | two-week comparison on the same rules | — | success criteria above |
+| **0 — Console** | 20 s silence, 10 s still-there, 300 ms backoff, 7-minute terminate | **done 18 Nov** | read back with `GET /v2/agent/{id}` |
+| **1 — Plan** | `lib/interview-plan.ts`, renderer, validator, `{interview_plan}` in prompt, template fallback, payload assertion | **shipped 18 Nov**, no per-job flag | first 20 calls: topics covered, digs used, banned-question rate |
+| **2 — Scoring** | evidence gate (shipped); per-topic verdicts and client report skeleton | gate shipped, evidence report pending | 20 scored calls reviewed by HR |
+| **3 — Timing** | calling window, retry ladder, voicemail/silent-pickup rules | not started | one week of connect-rate data |
+| **4 — Measure** | two-week comparison on the same rules | not started | success criteria above |
 
-Phase 1 is the only one that touches the live prompt. Keep `{questions}` working throughout so a
-rollback is a prompt paste, not a deploy.
+Phase 1 shipped without the per-job flag I first proposed. Two reasons: a template plan or a bridged
+plan is now guaranteed before every dial (§4.7a), so there is no call shape that lacks a plan to fall
+back to; and a flag would have left half the queue on the old five-question path, which is the thing
+we are measuring away from.
+
+Rollback is still a prompt edit, not a deploy: every payload carries both `interview_plan` and the
+legacy numbered `questions`, so pasting the previous prompt back works immediately.
+
+The one thing phase 1 did **not** fix: manual question editing has no save endpoint (§4.8a). Plan on
+regenerating a plan by re-running the job's screening trigger, not on hand-editing a call.
+
 
 ---
 
@@ -775,9 +803,11 @@ rollback is a prompt paste, not a deploy.
 | File | Role in this plan |
 |---|---|
 | `lib/jd-questions.ts` | Thin delegate: keeps `JobContext` / `CandidateContext`, `generateJDQuestions` now returns the plan, `NEVER_ASK` extended, fallback rebuilt from the template |
-| `lib/interview-plan.ts` (new) | Types, generator, validator, renderer, template fallback |
-| `lib/call-orchestrator.ts:599` | `buildCallUserData` — add `interview_plan`, keep `questions` |
-| `lib/scheduled-call.ts:477` | Placement merge — confirm plan string survives retries unchanged |
+| `lib/interview-plan.ts` (new) | Types, generator (Gemini + retry + template), validator, renderer, template plan, bridge for old questions, `toBolnaUserData` |
+| `lib/call-orchestrator.ts:599` | `buildCallUserData` — adds `interview_plan` + `_interview_plan`, keeps `questions`; `buildJobGist` no longer returns "A full_time role" |
+| `lib/scheduled-call.ts:511` | Placement: merges `info_data`, asserts a plan exists (bridged or template), persists it, strips `_interview_plan` before sending |
+| `app/api/bolna/webhook/inbound/route.ts:154` | Same assertion for inbound callbacks |
+| `app/api/bolna/agent/route.ts:80` | `POST {force:true}` re-syncs prompt + welcome + tuning from code |
 | `lib/bolna.ts:361` | `BOLNA_MASTER_PROMPT` — `{interview_plan}`, 3 digs, one timing number; `BOLNA_WELCOME_MESSAGE` — 5 minutes |
 | `docs/ai-screener-prompt.md` | Mirror of the live prompt; must be updated in the same commit |
 | `lib/bolna-execution.ts:960` | Evidence scorer; replace band constants at `:1004` and `:389` |
