@@ -152,10 +152,11 @@ function mentionsName(text: string, names: (string | null | undefined)[]): strin
 function checkAsk(
   ask: string,
   clientNames: (string | null | undefined)[],
-  allowedText: string
+  allowedText: string,
+  maxWords = MAX_ASK_WORDS
 ): string[] {
   const errors: string[] = []
-  if (wordCount(ask) > MAX_ASK_WORDS) {
+  if (wordCount(ask) > maxWords) {
     errors.push(`ask too long (${wordCount(ask)} words): ${ask}`)
   }
   if ((ask.match(/\?/g) || []).length > 1) {
@@ -172,6 +173,14 @@ function checkAsk(
   )
   if (/\baur\b/i.test(ask) && interrogatives.size >= 2) {
     errors.push(`stacked question (two asks joined by "aur"): ${ask}`)
+  }
+  // "Kya kiya aapne Tally ERP.9 ka use karke financial reports generate karne ke
+  // liye?" is answerable with "haan" and was answered "हां जी हां जी हां जी" on a
+  // live call. A question that opens with "Kya" and carries no other
+  // interrogative is a closed shape, even when it looks long.
+  const hasOtherInterrogative = /(kaise|kaun|kaunsa|kaunsi|kaunse|kab|kahan|kahaan|kyun|kyu|kitna|kitni|kitne)\b/i.test(ask)
+  if (/^\s*kya\b/i.test(ask) && !hasOtherInterrogative) {
+    errors.push(`yes/no question (opens with "Kya", no other interrogative): ${ask}`)
   }
   // The voice is Hinglish in Latin script. A stray Devanagari word (Gemini does
   // this) changes pronunciation for the TTS voice and reads as broken on screen.
@@ -231,9 +240,11 @@ export function validateInterviewPlan(
       .slice(0, MAX_DIGS_PER_TOPIC)
     if (digs.length === 0) errors.push(`topic has no digs: ${label || ask}`)
     for (const d of digs) {
-      if (wordCount(d.prompt) > MAX_DIG_WORDS) {
-        errors.push(`dig too long (${wordCount(d.prompt)} words): ${d.prompt}`)
-      }
+      // A dig is spoken on its own turn, so it must pass the same rules as an
+      // ask: one question, open shape, no client name, no procedure ask. This
+      // was the gap that let "Kya kiya aapne Tally ERP.9 ka use karke financial
+      // reports generate karne ke liye?" ship — and collect "हां जी हां जी हां जी".
+      errors.push(...checkAsk(d.prompt, clientNames, allowedText, MAX_DIG_WORDS))
     }
 
     const strong = String(raw?.strong || "").trim()
@@ -816,8 +827,9 @@ HARD RULES — a plan that breaks any of these is rejected and regenerated:
 - Exactly 3 topics. Topic 1 and 2 come from the JD's must-have skills/responsibilities
   and must test DIFFERENT skills — never two questions about the same thing.
 - ${topic3Rule}
-- Every "ask" is OPEN: start with "Kaise", "Kya kiya", "Ek baar bataiye", "Bataiye".
-  Never "kya aapne kabhi", "kya aap", "comfortable hain", "idea hai", "kar sakte hain".
+- Every "ask" is OPEN: start with "Kaise", "Bataiye", "Ek baar bataiye", "Kaun sa".
+  Never "Kya kiya", "kya aapne kabhi", "kya aap", "comfortable hain", "idea hai", "kar sakte hain".
+  A question that can be answered "haan" is a failed question.
 - "ask" is 15 words or fewer, ONE ask, at most one "?".
 - Never ask for a procedure or a walkthrough: no "step-by-step", "pura process",
   "end to end", "process bataiye". Ask for one REAL instance instead — what they
@@ -829,8 +841,12 @@ HARD RULES — a plan that breaks any of these is rejected and regenerated:
 - No acronyms (PF, ESIC, GRIR, P2P, FEFO, WMS, TMS, CLRA, SKU...) unless the resume
   or JD above uses them.
 - At most 2 digs per topic (3 x 2 digs + 3 asks = 9 spoken questions, ~5 minutes).
-  Each dig is 12 words or fewer and digs deeper into ONE thing (scale, system,
-  own role vs team, result).
+  Each dig is 12 words or fewer, asks for ONE thing (scale, system, own role vs
+  team, result), and is spoken on its own turn — never joined to another dig.
+  Bad: "Total kitne vendors the aur financial impact kya tha?" (two asks in one)
+  Good: "Total kitne vendors ka volume handle karte the?" then, next turn,
+        "Uska financial impact kya tha?"
+  No dig may start with "Kya" — that shape returns a yes/no answer.
 - "strong" and "weak" are one line each, in English, describing EVIDENCE not
   personality. They are never spoken aloud.
 - Dealbreakers are confirm-only, yes/no, 12 words or fewer, no "why". Only include
@@ -1016,11 +1032,13 @@ export function renderInterviewPlan(plan: InterviewPlan): string {
     lines.push(`TOPIC ${i + 1} — ${t.label}${tag}`)
     lines.push(`Ask: ${t.ask}`)
     if (t.digs?.length) {
-      const digs = t.digs
-        .slice(0, maxDigs)
-        .map((d) => d.prompt.replace(/\?+$/, ""))
-        .join(" · ")
-      lines.push(`Dig if thin: ${digs}`)
+      // Numbered, one per line. Joined with "·" they read as one long turn
+      // ("Total kitne vendors… aur iska financial impact…") and the agent spoke
+      // both at once. The dig is a turn boundary, not a list to read out.
+      lines.push("Dig if thin — ask ONE per turn, never two together:")
+      t.digs.slice(0, maxDigs).forEach((d, i) => {
+        lines.push(`  ${i + 1}) ${d.prompt}`)
+      })
     }
     if (t.strong) lines.push(`A strong answer: ${t.strong}.`)
     if (t.weak) lines.push(`A weak answer: ${t.weak}.`)
@@ -1042,6 +1060,7 @@ export function renderInterviewPlan(plan: InterviewPlan): string {
   lines.push("HOW TO RUN THIS")
   lines.push("- One topic at a time, in this order. Easy first, hardest last.")
   lines.push(`- Ask the topic question once. Dig up to ${maxDigs} times, only when the answer is thin.`)
+  lines.push("- One question per turn. Never join two digs with \"aur\" and never ask the next one while the candidate is still answering.")
   lines.push("- If the answer is already strong, move to the next topic. Do not pad.")
   lines.push("- Never read this plan out loud. It is your notes, not your script.")
 

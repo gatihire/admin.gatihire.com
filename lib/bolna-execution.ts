@@ -4,7 +4,7 @@ import { evaluateCallQuality } from "@/lib/ai-learning"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { scheduleBolnaCall, MAX_CALL_ATTEMPTS } from "@/lib/scheduled-call"
 import { enrichTranscript } from "@/lib/transcript-enrichment"
-import { deriveFallbackScore, bandFromVerdict, scoreFromVerdict } from "@/lib/call-scoring"
+import { deriveFallbackScore, bandFromVerdict, scoreFromVerdict, scoreIsHeuristic } from "@/lib/call-scoring"
 import { logCandidateActivity } from "@/lib/activity-logger"
 import { toE164 } from "@/lib/phone"
 import { appendWhatsappHistory } from "@/lib/whatsapp-history"
@@ -351,7 +351,7 @@ async function buildFallbackVerdictPatch(
     const { data: participantMeta } = await supabaseAdmin
       .from("phone_screening_participants")
       .select(`
-        candidate_id, job_id,
+        candidate_id, job_id, call_duration_seconds,
         candidates: candidate_id (id, name, phone, current_role),
         jobs: job_id (id, title, client_name)
       `)
@@ -363,7 +363,8 @@ async function buildFallbackVerdictPatch(
       participantId,
       transcript,
       participantMeta.candidates as any,
-      participantMeta.jobs as any
+      participantMeta.jobs as any,
+      (participantMeta as any).call_duration_seconds ?? null
     )
     if (!fallback) return null
 
@@ -426,6 +427,37 @@ async function buildFallbackVerdictPatch(
     logger.warn("Fallback summary generation failed", { participantId, error: err.message })
     return null
   }
+}
+
+/**
+ * An unfinished call — dropped mid-answer, lost audio, synthesizer error — is
+ * not a screening. The heuristic still produces a number from whatever words it
+ * saw (a 158s call that died with `synthesizer_error` carried 6.0), which reads
+ * on the board as a judgement nobody made. Keep the transcript and summary for
+ * the human, drop the score, and ask for a re-call.
+ */
+function applyIncompleteCallScoreRule(
+  patch: Record<string, unknown>,
+  opts: { partial?: boolean; notes: string }
+): void {
+  if (patch.ai_score == null) return
+  const verdict =
+    patch.verdict_json && typeof patch.verdict_json === "object" && !Array.isArray(patch.verdict_json)
+      ? (patch.verdict_json as Record<string, unknown>)
+      : {}
+  patch.ai_score = null
+  patch.ai_recommendation = "further_review"
+  patch.verdict_json = {
+    ...verdict,
+    score: null,
+    recommendation: "further_review",
+    _insufficient_evidence: true,
+    ...(opts.partial ? { _interrupted: true } : {}),
+    notes: opts.notes,
+  }
+  patch.ai_summary = "Not enough conversation to assess this candidate. No score was given."
+  patch.needs_manual_followup = true
+  patch.status = "failed"
 }
 
 type CallAttemptSnapshot = {
@@ -763,6 +795,16 @@ export async function handleCompletedExecution(
     }
   }
 
+  // An interrupted call is not a screening. Keep the transcript and summary for
+  // the human, but do not put a judgement on the board.
+  if (classification === "interrupted") {
+    applyIncompleteCallScoreRule(patch, {
+      partial: true,
+      notes:
+        "Call dropped or lost audio before the screening finished. No score given — HR should review the transcript and send the call again.",
+    })
+  }
+
   // Log call completed event
   logCandidateActivity({
     jobId: participantMeta?.job_id || "",
@@ -981,7 +1023,7 @@ async function enrichTranscriptAsync(
   const { data: participant } = await supabaseAdmin
     .from("phone_screening_participants")
     .select(`
-      candidate_id, job_id, ai_score, ai_recommendation, status, call_is_partial, bolna_status, call_duration_seconds,
+      candidate_id, job_id, ai_score, ai_recommendation, status, call_is_partial, bolna_status, call_duration_seconds, verdict_json,
       candidates: candidate_id (id, name, current_role, current_company, total_experience, location, technical_skills, resume_text),
       jobs: job_id (id, title, client_name, city, location, experience_min_years, experience_max_years, salary_min, salary_max, salary_type, skills_must_have, skills_good_to_have, description)
     `)
@@ -1001,26 +1043,67 @@ async function enrichTranscriptAsync(
   // "Send Call Again".
   const status = String(participant.status || "")
   const isIncompleteCall = !!(participant.call_is_partial || status === "failed_partial" || status === "failed")
-  const enriched = await enrichTranscript(transcript, candidate, job, bolnaVerdict)
-  if (!enriched) return
+  let enriched = await enrichTranscript(transcript, candidate, job, bolnaVerdict)
+  if (!enriched) {
+    // A silent null here is how call 2 kept a heuristic summary with no
+    // analysis: nothing logged, nothing retried, nobody could tell.
+    logger.warn("Transcript enrichment returned nothing — retrying once", { participantId })
+    enriched = await enrichTranscript(transcript, candidate, job, bolnaVerdict)
+  }
+  if (!enriched) {
+    logger.error("Transcript enrichment failed twice; keeping heuristic summary", { participantId })
+    return
+  }
 
-  // Derive a score/recommendation only when this call never produced one (e.g.
-  // the Bolna verdict was rejected or never emitted) AND the call was a real,
-  // completed screening. This block previously wrote the score when the
-  // condition was *false*, so every failed or partial call without a score was
-  // defaulted to 6/10 "further review" — a real-looking judgement on a call
-  // that never happened. See lib/call-scoring.ts.
+  // Derive a score/recommendation only when the call has no REAL score and was
+  // a real, completed screening. A fallback/heuristic score is not a real
+  // score: `buildFallbackVerdictPatch` writes 6/10 "further review" before this
+  // pass runs, so a bare `hasScore` check was true on every completed call and
+  // Gemini's verdict never reached the card. On 19 Nov five calls carried 6.0
+  // while the analysis said possible_fit (5) four times and not_fit (2) once.
   //
-  // The summary is also left alone for incomplete calls: the verdict path has
-  // already written "Not enough conversation to assess this candidate", and
-  // overwriting it with a narrative summary hides that from HR.
-  const hasScore =
-    typeof participant.ai_score === "number" || typeof participant.ai_recommendation === "string"
+  // The summary is left alone for incomplete calls: the verdict path has already
+  // written "Not enough conversation to assess this candidate", and overwriting
+  // it with a narrative summary hides that from HR.
+  const existingVerdict =
+    participant.verdict_json && typeof participant.verdict_json === "object" && !Array.isArray(participant.verdict_json)
+      ? (participant.verdict_json as Record<string, unknown>)
+      : {}
+  const scoreIsHeuristicScore = scoreIsHeuristic(participant.verdict_json)
+  const hasRealScore =
+    !scoreIsHeuristicScore &&
+    (typeof participant.ai_score === "number" || typeof participant.ai_recommendation === "string")
   const derived = deriveFallbackScore({
-    hasScore,
+    hasScore: hasRealScore,
     isIncomplete: isIncompleteCall,
     verdict: enriched.overall_verdict,
   })
+
+  // The scorer stores confidence as a fraction (0.85); the column and every
+  // other verdict writer use a percentage (85). Normalise so the card does not
+  // show "Confidence: 1%".
+  const confidencePct =
+    typeof enriched.confidence_score === "number"
+      ? enriched.confidence_score <= 1
+        ? Math.round(enriched.confidence_score * 100)
+        : Math.round(enriched.confidence_score)
+      : null
+
+  const nextVerdict: Record<string, unknown> = derived
+    ? {
+        ...existingVerdict,
+        overall_verdict: enriched.overall_verdict,
+        score: derived.score,
+        recommendation: derived.recommendation,
+        confidence_score: confidencePct,
+        _summary_source: "gemini",
+        _score_replaced_heuristic: scoreIsHeuristicScore,
+      }
+    : existingVerdict
+  if (derived) {
+    delete nextVerdict._fallback_summary_used
+    delete nextVerdict._insufficient_evidence
+  }
 
   // Store enriched summary
   await supabaseAdmin
@@ -1029,7 +1112,11 @@ async function enrichTranscriptAsync(
       enriched_summary: enriched,
       ...(isIncompleteCall ? {} : { ai_summary: enriched.comprehensive_summary }),
       ...(derived
-        ? { ai_score: derived.score, ai_recommendation: derived.recommendation }
+        ? {
+            ai_score: derived.score,
+            ai_recommendation: derived.recommendation,
+            verdict_json: nextVerdict,
+          }
         : {}),
       updated_at: new Date().toISOString(),
     })
@@ -1037,10 +1124,9 @@ async function enrichTranscriptAsync(
 
   logger.info(`Transcript enriched for participant ${participantId}`, {
     verdict: enriched.overall_verdict,
-    confidence: enriched.confidence_score,
+    confidence: confidencePct,
     derivedScore: derived?.score,
-    keptExistingScore: hasScore,
-    skippedDefaultScore: !derived && !hasScore,
+    replacedHeuristicScore: derived ? scoreIsHeuristic : false,
   })
 }
 
@@ -1405,6 +1491,15 @@ export async function handleFailedExecution(
       }
     }
   }
+
+  // A failed or partial attempt is never a screening, even when the transcript
+  // held enough words for the heuristic to produce a number.
+  applyIncompleteCallScoreRule(patch, {
+    partial: !!isPartialCall,
+    notes: isPartialCall
+      ? "Call ended mid-conversation. No score given — HR should review the transcript and send the call again."
+      : "Call did not connect or complete. No score given.",
+  })
 
   // Persist classification/hangup metadata for UI (who ended call, incomplete screening)
   try {

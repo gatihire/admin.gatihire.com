@@ -47,6 +47,17 @@ export const VERDICT_SCORES: Record<string, { score: number; recommendation: Sco
   fail: { score: 2, recommendation: "not_a_fit" },
 }
 
+/**
+ * True when the score on the row came from the offline heuristic rather than a
+ * real transcript analysis. Those scores are placeholders: the enrichment pass
+ * must be allowed to replace them, otherwise every completed call keeps the
+ * heuristic's 6/10 because `hasScore` is already true when it runs.
+ */
+export function scoreIsHeuristic(verdictJson: unknown): boolean {
+  if (!verdictJson || typeof verdictJson !== "object" || Array.isArray(verdictJson)) return false
+  return (verdictJson as Record<string, unknown>)._fallback_summary_used === true
+}
+
 export function bandFromVerdict(verdict: string | null | undefined): ScoreBand | null {
   if (!verdict) return null
   return VERDICT_SCORES[String(verdict).trim().toLowerCase()]?.recommendation ?? null

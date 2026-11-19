@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import {
   createBolnaAgent, updateBolnaAgent, BOLNA_MASTER_PROMPT,
-  BOLNA_WELCOME_MESSAGE, BOLNA_WELCOME_MESSAGE_HINGLISH, type BolnaAgentLanguage,
+  BOLNA_WELCOME_MESSAGE, BOLNA_WELCOME_MESSAGE_HINGLISH, BOLNA_LISTENING,
+  BOLNA_TRANSCRIBER_KEYWORDS, type BolnaAgentLanguage,
 } from "@/lib/bolna"
 import { logger } from "@/lib/logger"
 
@@ -45,23 +46,32 @@ function buildAgentPayload(webhookBase: string, opts?: { agentName?: string; lan
               agent_type: "simple_llm_agent",
               agent_flow_type: "streaming",
               llm_config: {
-                provider: "openai",
-                model: "gpt-4.1-mini",
-                max_tokens: 800,
+                provider: "google",
+                family: "openai",
+                model: process.env.GEMINI_MODEL || "gemini-3.1-flash-lite-preview",
+                max_tokens: 170,
                 temperature: 0.2,
+                top_p: 0.9,
+                top_k: 0,
+                min_p: 0.1,
                 request_json: false,
+                agent_flow_type: "streaming",
               },
             },
             synthesizer: {
-              provider: "elevenlabs",
+              provider: "sarvam",
               provider_config: {
-                voice: "Nila",
-                voice_id: "V9LCAAi4tTlqe9JadbCo",
-                model: "eleven_turbo_v2_5",
+                model: "bulbul:v3",
+                voice: "Ashutosh",
+                voice_id: "ashutosh",
+                language: language === "hinglish" ? "hi" : "en",
+                speed: 1.0,
+                loudness: 1.0,
               },
               stream: true,
-              buffer_size: 250,
+              buffer_size: 230,
               audio_format: "wav",
+              caching: true,
             },
             transcriber: {
               provider: "deepgram",
@@ -70,7 +80,15 @@ function buildAgentPayload(webhookBase: string, opts?: { agentName?: string; lan
               stream: true,
               encoding: "linear16",
               sampling_rate: 16000,
-              endpointing: 250,
+              // 900 ms, not 250: a Hinglish speaker pauses mid-sentence for
+              // 400–800 ms, and 250/350 ms made the agent answer into the pause.
+              endpointing: BOLNA_LISTENING.endpointing,
+              // Code-switched speech: without this, English domain terms are
+              // transliterated into Hindi and the analysis reads noise.
+              hinglish_mode: language === "hinglish",
+              keywords: BOLNA_TRANSCRIBER_KEYWORDS.join(","),
+              vad_threshold: 0.5,
+              delay: "medium",
             },
             input: { provider: "plivo", format: "wav" },
             output: { provider: "plivo", format: "wav" },
@@ -78,14 +96,13 @@ function buildAgentPayload(webhookBase: string, opts?: { agentName?: string; lan
           task_config: {
             // 6 minutes: the plan promises 5 and the prompt hard-stops at 6.
             call_terminate: 360,
-            // 20 s, not the old 12: a candidate thinking or standing in a noisy
-            // cabin was being hung up on mid-thought.
-            hangup_after_silence: 20,
-            // Asked at 10 s, not 7 — at 7 it fired right after the candidate
-            // started a sentence.
-            trigger_user_online_message_after: 10,
-            // 300 ms, not 0: the agent talked over the candidate.
-            interruption_backoff_period: 300,
+            // Above the online-message trigger, or the line drops before the
+            // "are you still there?" check can ever fire.
+            hangup_after_silence: BOLNA_LISTENING.hangup_after_silence,
+            trigger_user_online_message_after: BOLNA_LISTENING.trigger_user_online_message_after,
+            max_silence_repeats: BOLNA_LISTENING.max_silence_repeats,
+            interruption_backoff_period: BOLNA_LISTENING.interruption_backoff_period,
+            number_of_words_for_interruption: BOLNA_LISTENING.number_of_words_for_interruption,
           },
         },
       ],

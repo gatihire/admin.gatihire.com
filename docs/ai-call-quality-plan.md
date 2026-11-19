@@ -873,6 +873,77 @@ lesson is that a PostgREST projection is a schema contract and nothing tests it.
 
 ---
 
+### 7.3 The 19 Nov round: the score never reached the card, and the agent did not let people finish
+
+Six calls, ₹101.54. Five finished and four of them were scored wrong; the transcripts
+also showed the agent cutting candidates off mid-sentence and closing at 2–3.5 minutes
+with most of the plan unasked.
+
+**a. The score chain was inverted.** `buildFallbackVerdictPatch` runs first and writes
+`ai_score: 6`, `_fallback_summary_used: true`. It persists before `enrichTranscriptAsync`
+is called, so the enrichment pass re-read a row where `hasScore` was already true,
+`deriveFallbackScore` returned `null`, and Gemini's verdict never reached `ai_score` or
+`verdict_json`. On 19 Nov: three `possible_fit` (5), one `not_fit` (2), all shown as 6.0.
+The badge reads `enriched_summary.overall_verdict` while the number reads `ai_score`, so
+the card could show "Not a fit" next to "6/10".
+
+`scoreIsHeuristic()` in `lib/call-scoring.ts` now detects the placeholder and lets the
+real analysis replace it. When it does, `verdict_json` is rewritten too — verdict, score,
+recommendation and a normalised confidence — so the badge and the number agree. A failed
+or partial attempt is never scored at all: `applyIncompleteCallScoreRule()` clears the
+heuristic number, marks `_insufficient_evidence`, and asks for a re-call (a 158 s call
+that died with `synthesizer_error` had carried 6.0).
+
+**b. Fallback summaries invented facts.** `lib/fallback-summary.ts` estimated duration as
+`segments × 15 s`, so a 217 s call was reported as "~11 minutes". It now takes the real
+`call_duration_seconds`. Keyword matching is word-bounded — `includes("led")` matched
+"ledger" and produced the strength "• Led" — and empty lists say "None established on
+this call" instead of rendering blank. Location is no longer extracted from the
+transcript at all: the profile already owns it, and guessing produced a city name made of
+transcript noise.
+
+**c. The agent could not hear a sentence end.** Deepgram endpointing was 350 ms and any
+three words counted as a barge-in. Across five calls: 85 candidate turns, median 8 words,
+32% five words or fewer, many ending on `aur` / `to` / `mein`. "yes yes" cut the agent off
+mid-question, so the candidate heard fragments and the analysis saw fragments.
+
+| Setting | Before | Now |
+|---|---|---|
+| `transcriber.endpointing` | 350 ms | **900 ms** |
+| `number_of_words_for_interruption` | 3 | **8** |
+| `interruption_backoff_period` | 300 ms | **800 ms** |
+| `trigger_user_online_message_after` | 10 s | **30 s** |
+| `hangup_after_silence` | 20 s | **45 s** (must stay above the trigger) |
+| `max_silence_repeats` | unset | **2** |
+| `hinglish_mode` | false | **true** + domain keywords (26AS, TDS, GST, Tally…) |
+
+The values live in `BOLNA_LISTENING` / `BOLNA_TRANSCRIBER_KEYWORDS` in `lib/bolna.ts` and
+are imported by the provisioning route, so a `force:true` re-sync can no longer regress
+the agent to `endpointing: 250` and elevenlabs/gpt-4.1-mini. `language: "hi"` with
+Hinglish off is why "26AS" became "twenty six years" and "RFQ" became "adwords".
+
+**d. Digs were never validated.** `checkAsk` ran only on `topic.ask`, so
+*"Kya kiya aapne Tally ERP.9 ka use karke financial reports generate karne ke liye?"*
+shipped and collected "हां जी हां जी हां जी". Digs now pass the same rules at 12 words, and
+a question that opens with "Kya" and carries no other interrogative is rejected as a
+closed shape. The renderer prints digs as numbered turns under "ask ONE per turn, never
+two together" — joined with `·` they read as one long turn, which is exactly what the
+agent spoke.
+
+**e. Prompt rules for turn-taking.** One question per turn; "Ji, boliye" is the whole
+turn with no question and no echo of the candidate's fragment; a thin answer is defined
+as one with no number, system name or sequence; a repeat is the identical sentence, word
+for word; do not close before every topic has one real answer unless a dealbreaker fails
+or five minutes are up; after the closing line, nothing — not even an answer to
+"call kab aayegi".
+
+**f. Remaining known limits.** `synthesizer_error` is not retried automatically; the call
+is now flagged for a human re-call instead. The transcriber is still nova-3 (keywords and
+Hinglish mode, not a model change). Enrichment that fails twice keeps the heuristic
+summary and now logs an error instead of returning silently.
+
+---
+
 ## 8. Speed
 
 The model changed and the agent got slower:

@@ -20,7 +20,10 @@ export async function generateFallbackSummary(
   participantId: string,
   transcript: string,
   candidate?: { name?: string; phone?: string; current_role?: string },
-  job?: { title?: string; client_name?: string }
+  job?: { title?: string; client_name?: string },
+  /** Real call length from the provider. The old estimate multiplied transcript
+   *  lines by 15s; a 217s call was reported as "~11 minutes". */
+  durationSeconds?: number | null
 ): Promise<FallbackSummary | null> {
   if (!transcript || transcript.trim().length < 30) {
     return null
@@ -39,18 +42,23 @@ export async function generateFallbackSummary(
     const overallVerdict = determineVerdict(fullText, keyFindings, strengths, concerns)
     const confidenceScore = calculateConfidence(fullText, keyFindings, segments.length)
 
+    const durationLabel =
+      typeof durationSeconds === "number" && Number.isFinite(durationSeconds) && durationSeconds > 0
+        ? `${Math.max(1, Math.round(durationSeconds / 60))} minutes (${Math.round(durationSeconds)}s)`
+        : `${Math.max(1, Math.round(segments.length * 15 / 60))} minutes`
+
     const summaryParts = [
       `Screening call for ${candidate?.name || "candidate"} for ${job?.title || "role"} at ${job?.client_name || "company"}.`,
-      `Call duration: ~${Math.round(segments.length * 15 / 60)} minutes with ${segments.length} exchanges.`,
+      `Call duration: ~${durationLabel} with ${segments.length} exchanges.`,
       "",
       "Key Discussion Points:",
       ...keyFindings.map(f => `• ${f}`),
       "",
       "Strengths:",
-      ...strengths.map(s => `• ${s}`),
+      ...(strengths.length ? strengths.map(s => `• ${s}`) : ["• None established on this call."]),
       "",
       "Areas of Concern:",
-      ...concerns.map(c => `• ${c}`),
+      ...(concerns.length ? concerns.map(c => `• ${c}`) : ["• None recorded."]),
       "",
       `Overall Assessment: ${overallVerdict.toUpperCase()} (confidence: ${confidenceScore}%)`,
     ]
@@ -104,21 +112,36 @@ function extractCandidateInfo(candidateText: string, candidate?: { name?: string
   if (candidate?.name) info.name = candidate.name
   if (candidate?.current_role) info.current_role = candidate.current_role
 
+  // Every capture is bounded and stripped at punctuation. The old location rule
+  // triggered on the bare word "from" and captured the rest of the answer —
+  // one call stored "every icd possible आरव किस दिन हुआ था we win certain sports…"
+  // as the candidate's location.
+  // Location is deliberately not extracted here. The candidate profile already
+  // has it, and guessing it from a code-switched transcript produced
+  // "every icd possible आरव किस दिन हुआ था…" as a city name. A fallback must not
+  // invent a fact the profile already owns.
   const patterns = [
-    { key: "current_ctc", regex: /current\s+(ctc|salary|package)[:\s]+([^\n.]+)/i },
-    { key: "expected_ctc", regex: /expected\s+(ctc|salary|package)[:\s]+([^\n.]+)/i },
-    { key: "notice_period", regex: /notice\s+period[:\s]+([^\n.]+)/i },
-    { key: "total_experience", regex: /(\d+(\.\d+)?)\s*(years?|yrs?)\s*(experience|exp)/i },
-    { key: "location", regex: /(based in|located in|living in|from)\s+([^\n.]+)/i },
+    { key: "current_ctc", regex: /current\s+(ctc|salary|package)[:\s]+([^\n.,;]{1,40})/i },
+    { key: "expected_ctc", regex: /expected\s+(ctc|salary|package)[:\s]+([^\n.,;]{1,40})/i },
+    { key: "notice_period", regex: /notice\s+period[:\s]+([^\n.,;]{1,40})/i },
+    { key: "total_experience", regex: /(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\s*(?:of\s+)?(?:experience|exp)\b/i },
     { key: "willing_to_relocate", regex: /willing\s+to\s+relocate[:\s]*(yes|no|maybe)/i },
-    { key: "reason_for_switching", regex: /reason\s+(for|to)\s+(switch|change|leave)[:\s]+([^\n.]+)/i },
+    { key: "reason_for_switching", regex: /reason\s+(?:for|to)\s+(?:switch|change|leave)[:\s]+([^\n.,;]{1,60})/i },
   ]
+
+  const clean = (value: string): string | null => {
+    const trimmed = value.replace(/\s+/g, " ").trim()
+    // Reject transcript noise: a location or reason is a short noun phrase, not
+    // a sentence, and never contains an interrogative.
+    if (!trimmed || trimmed.split(/\s+/).length > 8 || /\?/.test(trimmed)) return null
+    return trimmed
+  }
 
   for (const p of patterns) {
     const match = candidateText.match(p.regex)
-    if (match) {
-      info[p.key] = match[match.length - 1].trim()
-    }
+    if (!match) continue
+    const value = clean(match[match.length - 1] || "")
+    if (value) info[p.key] = value
   }
 
   return info
@@ -153,28 +176,61 @@ function analyzeStrengthsConcerns(fullText: string, _findings: string[]): { stre
   const strengths: string[] = []
   const concerns: string[] = []
 
-  const positiveKeywords = [
-    "experience", "expert", "skilled", "proficient", "led", "managed", "achieved",
-    "improved", "increased", "reduced", "delivered", "successful", "award", "certified",
-    "flexible", "adaptable", "quick learner", "team player", "leadership", "mentor"
+  // Word-boundary matching, not `includes`. The old check matched "led" inside
+  // "ledger", so a 217s AP call whose only "strength" was the word "ledger"
+  // produced the bullet "• Led". An empty list is honest; a fabricated one is not.
+  const positive: { phrase: string; label: string }[] = [
+    { phrase: "experience", label: "Work experience discussed" },
+    { phrase: "expert", label: "Described themselves as an expert" },
+    { phrase: "skilled", label: "Described a specific skill" },
+    { phrase: "proficient", label: "Described proficiency with a tool" },
+    { phrase: "led", label: "Led a team or process" },
+    { phrase: "managed", label: "Managed a team or process" },
+    { phrase: "achieved", label: "Stated an achieved outcome" },
+    { phrase: "improved", label: "Improved a metric" },
+    { phrase: "increased", label: "Increased a metric" },
+    { phrase: "reduced", label: "Reduced a metric" },
+    { phrase: "delivered", label: "Delivered a stated outcome" },
+    { phrase: "successful", label: "Described a successful outcome" },
+    { phrase: "award", label: "Mentioned an award" },
+    { phrase: "certified", label: "Mentioned a certification" },
+    { phrase: "flexible", label: "Said they are flexible" },
+    { phrase: "adaptable", label: "Said they are adaptable" },
+    { phrase: "quick learner", label: "Said they learn quickly" },
+    { phrase: "team player", label: "Said they are a team player" },
+    { phrase: "leadership", label: "Mentioned leadership" },
+    { phrase: "mentor", label: "Mentioned mentoring" },
   ]
 
-  const negativeKeywords = [
-    "gap", "unemployed", "fired", "laid off", "conflict", "difficult", "stress",
-    "overworked", "burnout", "no experience", "limited", "basic", "learning",
-    "notice period", "long notice", "not willing", "reluctant", "salary expectation"
+  const negative: { phrase: string; label: string }[] = [
+    { phrase: "gap", label: "Mentioned an employment gap" },
+    { phrase: "unemployed", label: "Currently unemployed" },
+    { phrase: "fired", label: "Was fired" },
+    { phrase: "laid off", label: "Was laid off" },
+    { phrase: "conflict", label: "Mentioned a conflict" },
+    { phrase: "difficult", label: "Described a difficulty" },
+    { phrase: "stress", label: "Mentioned stress" },
+    { phrase: "overworked", label: "Mentioned being overworked" },
+    { phrase: "burnout", label: "Mentioned burnout" },
+    { phrase: "no experience", label: "Said they had no experience" },
+    { phrase: "limited", label: "Described limited experience" },
+    { phrase: "basic", label: "Described basic-level skills" },
+    { phrase: "learning", label: "Said they are still learning" },
+    { phrase: "long notice", label: "Long notice period" },
+    { phrase: "not willing", label: "Not willing to proceed" },
+    { phrase: "reluctant", label: "Was reluctant" },
+    { phrase: "salary expectation", label: "Salary expectation was raised" },
   ]
 
-  for (const kw of positiveKeywords) {
-    if (fullText.includes(kw)) {
-      strengths.push(kw.charAt(0).toUpperCase() + kw.slice(1))
-    }
+  const has = (phrase: string) =>
+    new RegExp(`(^|[^a-z])${phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z]|$)`, "i").test(fullText)
+
+  for (const { phrase, label } of positive) {
+    if (has(phrase)) strengths.push(label)
   }
 
-  for (const kw of negativeKeywords) {
-    if (fullText.includes(kw)) {
-      concerns.push(kw.charAt(0).toUpperCase() + kw.slice(1))
-    }
+  for (const { phrase, label } of negative) {
+    if (has(phrase)) concerns.push(label)
   }
 
   return {

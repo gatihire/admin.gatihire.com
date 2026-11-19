@@ -74,7 +74,7 @@ export async function POST(request: NextRequest) {
           ...(verdict
             ? {
                 ai_score: evidenceTooThin ? null : verdict.score,
-                ai_recommendation: verdict.recommendation,
+                ai_recommendation: evidenceTooThin ? "further_review" : verdict.recommendation,
                 ...(evidenceTooThin
                   ? {
                       needs_manual_followup: true,
@@ -92,7 +92,9 @@ export async function POST(request: NextRequest) {
           ai_summary: typeof structuredOutput === "string" ? structuredOutput : JSON.stringify(structuredOutput),
           transcript_json: transcript ? (Array.isArray(transcript) ? JSON.stringify(transcript) : transcript) : null,
           callback_preference: parsed.callback_preference || null,
-          status: "completed",
+          // A thin transcript is not a completed screening; saying "completed"
+          // hid it from the "send call again" queue.
+          status: evidenceTooThin ? "failed" : "completed",
           updated_at: new Date().toISOString(),
         })
         .eq("id", participantId)
