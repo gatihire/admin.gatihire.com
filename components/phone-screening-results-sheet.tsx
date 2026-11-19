@@ -794,7 +794,7 @@ export function PhoneScreeningResultsSheet({
                           <span className="text-amber-700">{minuses.length} concerns</span>
                         </div>
                       )}
-                      {overallVerdict && (
+                      {overallVerdict && d.ai_score != null && (
                         <Badge variant="outline" className={`text-[10px] font-bold px-2 py-0.5 rounded-full border-none shadow-sm ${
                           overallVerdict === "strong_fit" ? "bg-emerald-100 text-emerald-700" :
                           overallVerdict === "good_fit" ? "bg-green-100 text-green-700" :
@@ -804,7 +804,7 @@ export function PhoneScreeningResultsSheet({
                           {overallVerdict.replace(/_/g, " ")}
                         </Badge>
                       )}
-                      {confidenceScore != null && (
+                      {confidenceScore != null && d.ai_score != null && (
                         <span className="text-[10px] text-zinc-400">Confidence: {Math.round(confidenceScore * 100)}%</span>
                       )}
                     </div>

@@ -901,6 +901,12 @@ export async function handleCompletedExecution(
   if (classification === "not_screened" && patch.status !== "failed" && patch.status !== "failed_partial") {
     patch.status = "failed"
   }
+  // A completed screening clears the queue's follow-up flag. It was set when
+  // the attempt could not be placed and nothing removed it on success, so
+  // finished, scored candidates kept showing as "Needs Follow-up" in /today.
+  if (classification === "screened") {
+    patch.needs_manual_followup = false
+  }
   // Persist classification in verdict_json metadata (classification_outcome column may not exist)
   try {
     const vj = patch.verdict_json

@@ -907,6 +907,13 @@ who had just answered all three topics. The 08:54 call was exactly that. `isCapT
 the partial and follow-up flags, drops any scheduled auto-retry, and records
 `_ended_at_cap` for transparency. HR is only asked to re-call calls that actually broke.
 
+Two smaller inconsistencies showed up in the same rows. `needs_manual_followup` was set when
+an attempt could not be placed and never cleared on success, so finished, analysed calls
+still carried the "Needs Follow-up" flag; a `screened` outcome now clears it. And the card
+renders the fit badge from `enriched_summary.overall_verdict`, which is independent of
+`ai_score`, so an unscored call could show "possible fit" next to no number — the badge and
+confidence are now hidden whenever there is no score.
+
 **b. Fallback summaries invented facts.** `lib/fallback-summary.ts` estimated duration as
 `segments × 15 s`, so a 217 s call was reported as "~11 minutes". It now takes the real
 `call_duration_seconds`. Keyword matching is word-bounded — `includes("led")` matched
