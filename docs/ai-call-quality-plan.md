@@ -899,6 +899,14 @@ topics* is real evidence, and denying it a verdict would be its own bug — a 36
 the same day came back `good_fit`. `isSubstantiveInterruptedCall()` draws that line (120 s+,
 two substantive answers, 60+ candidate words, no technical drop) and both handlers use it.
 
+The status was wrong in the same direction. A capped call had no closing line, so the
+classifier called it `interrupted` and wrote `status: failed`, `call_is_partial: true`,
+`needs_manual_followup: true` — which renders a **Send Call Again** button on a candidate
+who had just answered all three topics. The 08:54 call was exactly that. `isCapTimeout()`
+(360 s ± 15) plus `markCapTimeoutAsCompleted()` now keeps the call as `completed`, clears
+the partial and follow-up flags, drops any scheduled auto-retry, and records
+`_ended_at_cap` for transparency. HR is only asked to re-call calls that actually broke.
+
 **b. Fallback summaries invented facts.** `lib/fallback-summary.ts` estimated duration as
 `segments × 15 s`, so a 217 s call was reported as "~11 minutes". It now takes the real
 `call_duration_seconds`. Keyword matching is word-bounded — `includes("led")` matched

@@ -4,7 +4,14 @@ import { evaluateCallQuality } from "@/lib/ai-learning"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { scheduleBolnaCall, MAX_CALL_ATTEMPTS } from "@/lib/scheduled-call"
 import { enrichTranscript } from "@/lib/transcript-enrichment"
-import { deriveFallbackScore, bandFromVerdict, scoreFromVerdict, scoreIsHeuristic, isSubstantiveInterruptedCall } from "@/lib/call-scoring"
+import {
+  deriveFallbackScore,
+  bandFromVerdict,
+  scoreFromVerdict,
+  scoreIsHeuristic,
+  isSubstantiveInterruptedCall,
+  isCapTimeout,
+} from "@/lib/call-scoring"
 import { logCandidateActivity } from "@/lib/activity-logger"
 import { toE164 } from "@/lib/phone"
 import { appendWhatsappHistory } from "@/lib/whatsapp-history"
@@ -464,6 +471,28 @@ function hasSubstantiveInterruptedEvidence(
   })
 }
 
+/**
+ * A call stopped by our own 6-minute cap is not a failed call. It ran the full
+ * screening and the clock ended it; marking it partial puts a "Send Call Again"
+ * button on the card and asks HR to pay for a second call to a candidate who
+ * already answered. Only calls that broke, or that ended before the cap, keep
+ * the failed/partial marking.
+ */
+function markCapTimeoutAsCompleted(patch: Record<string, unknown>, durationSec: number): boolean {
+  if (!isCapTimeout(durationSec)) return false
+  const verdict =
+    patch.verdict_json && typeof patch.verdict_json === "object" && !Array.isArray(patch.verdict_json)
+      ? (patch.verdict_json as Record<string, unknown>)
+      : {}
+  patch.status = "completed"
+  patch.call_is_partial = false
+  patch.needs_manual_followup = false
+  // A completed screening must not be queued for another automatic attempt.
+  delete patch.next_retry_at
+  patch.verdict_json = { ...verdict, _ended_at_cap: true }
+  return true
+}
+
 function applyIncompleteCallScoreRule(
   patch: Record<string, unknown>,
   opts: { partial?: boolean; notes: string }
@@ -828,9 +857,10 @@ export async function handleCompletedExecution(
   // with a synthesizer error at 158s is not. Drop the score only for a technical
   // drop or thin evidence — otherwise let the analysis replace the heuristic.
   if (classification === "interrupted") {
+    const interruptedDuration = rawDuration ? Number(rawDuration) : 0
     const substantive = hasSubstantiveInterruptedEvidence(
       transcript,
-      rawDuration ? Number(rawDuration) : 0,
+      interruptedDuration,
       hangupReason
     )
 
@@ -840,6 +870,9 @@ export async function handleCompletedExecution(
           ? (patch.verdict_json as Record<string, unknown>)
           : {}
       patch.verdict_json = { ...verdict, _interrupted: true, _scored_despite_interruption: true }
+      // A cap timeout is a finished screening, not a broken one. Say so in the
+      // classification too, because the card reads that marker directly.
+      if (markCapTimeoutAsCompleted(patch, interruptedDuration)) classification = "screened"
     } else {
       applyIncompleteCallScoreRule(patch, {
         partial: true,
@@ -1456,7 +1489,7 @@ export async function handleFailedExecution(
 
   const hangupBy = (execution as any)?.hangup_by ?? execution.telephony_data?.hangup_by ?? null
   const hangupReason = execution.telephony_data?.hangup_reason ?? (execution as any)?.hangup_reason ?? null
-  const classification: "not_screened" | "interrupted" | "retry" = isPartialCall ? "interrupted" : "retry"
+  let classification: "screened" | "not_screened" | "interrupted" | "retry" = isPartialCall ? "interrupted" : "retry"
 
   const patch: Record<string, unknown> = {
     // Same constraint note as above: never write `failed_partial`, which is not
@@ -1552,6 +1585,7 @@ export async function handleFailedExecution(
         ? (patch.verdict_json as Record<string, unknown>)
         : {}
     patch.verdict_json = { ...verdict, _interrupted: true, _scored_despite_interruption: true }
+    if (markCapTimeoutAsCompleted(patch, partialDuration)) classification = "screened"
   } else {
     applyIncompleteCallScoreRule(patch, {
       partial: !!isPartialCall,

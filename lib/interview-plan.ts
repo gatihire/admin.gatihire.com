@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai"
 import { logger } from "@/lib/logger"
+import { SCREENING_HARD_CAP_SECONDS } from "@/lib/call-scoring"
 import type { JobContext, CandidateContext } from "@/lib/jd-questions"
 
 /**
@@ -17,7 +18,7 @@ import type { JobContext, CandidateContext } from "@/lib/jd-questions"
 
 export const PLAN_VERSION = 1
 export const TARGET_SECONDS = 300
-export const HARD_CAP_SECONDS = 360
+export const HARD_CAP_SECONDS = SCREENING_HARD_CAP_SECONDS
 /**
  * Two digs, not three. Three topics x (1 ask + 3 digs) is twelve questions, which
  * at ~33s an exchange is 6.6 minutes — the plan promised five and could not

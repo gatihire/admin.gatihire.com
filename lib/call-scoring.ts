@@ -48,6 +48,20 @@ export const VERDICT_SCORES: Record<string, { score: number; recommendation: Sco
 }
 
 /**
+ * The plan promises five minutes and the agent is terminated at six. It lives
+ * here because the scorer has to recognise "this call ended because we stopped
+ * it" as distinct from "this call broke".
+ */
+export const SCREENING_HARD_CAP_SECONDS = 360
+
+/** Provider duration is rounded and lands a second or two either side of the
+ *  cap, so a call is treated as capped when it reaches the cap within 15s. */
+export function isCapTimeout(durationSec: number | null | undefined): boolean {
+  if (typeof durationSec !== "number" || !Number.isFinite(durationSec)) return false
+  return durationSec >= SCREENING_HARD_CAP_SECONDS - 15
+}
+
+/**
  * A call can be interrupted and still be a screening. The 6-minute cap is a
  * content outcome — the topics were covered, the clock ran out. A synthesizer
  * error or an inactivity timeout is not, and must never carry a score.
