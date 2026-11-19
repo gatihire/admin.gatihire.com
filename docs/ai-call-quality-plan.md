@@ -889,10 +889,15 @@ the card could show "Not a fit" next to "6/10".
 
 `scoreIsHeuristic()` in `lib/call-scoring.ts` now detects the placeholder and lets the
 real analysis replace it. When it does, `verdict_json` is rewritten too — verdict, score,
-recommendation and a normalised confidence — so the badge and the number agree. A failed
-or partial attempt is never scored at all: `applyIncompleteCallScoreRule()` clears the
-heuristic number, marks `_insufficient_evidence`, and asks for a re-call (a 158 s call
-that died with `synthesizer_error` had carried 6.0).
+recommendation and a normalised confidence — so the badge and the number agree.
+
+A call that dropped technically (`synthesizer_error`, `inactivity_timeout`) or that has
+thin evidence is never scored: `applyIncompleteCallScoreRule()` clears the heuristic
+number, marks `_insufficient_evidence`, and asks for a re-call. A 158 s call that died with
+`synthesizer_error` had carried 6.0. But a call cut by the 6-minute cap *after covering the
+topics* is real evidence, and denying it a verdict would be its own bug — a 360 s call on
+the same day came back `good_fit`. `isSubstantiveInterruptedCall()` draws that line (120 s+,
+two substantive answers, 60+ candidate words, no technical drop) and both handlers use it.
 
 **b. Fallback summaries invented facts.** `lib/fallback-summary.ts` estimated duration as
 `segments × 15 s`, so a 217 s call was reported as "~11 minutes". It now takes the real

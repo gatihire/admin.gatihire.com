@@ -48,6 +48,32 @@ export const VERDICT_SCORES: Record<string, { score: number; recommendation: Sco
 }
 
 /**
+ * A call can be interrupted and still be a screening. The 6-minute cap is a
+ * content outcome — the topics were covered, the clock ran out. A synthesizer
+ * error or an inactivity timeout is not, and must never carry a score.
+ *
+ * `handleCompletedExecution` and `handleFailedExecution` both decide this, so
+ * the rule lives here rather than being written twice.
+ */
+export function isSubstantiveInterruptedCall(opts: {
+  durationSec: number
+  substantiveAnswers: number
+  candidateWords: number
+  hangupReason?: string | null
+}): boolean {
+  const technicalDrop =
+    /synthesizer_error|inactivity_timeout|no audio|audio issue|cannot hear|can't hear|inaudible/i.test(
+      opts.hangupReason || ""
+    )
+  return (
+    opts.durationSec >= 120 &&
+    opts.substantiveAnswers >= 2 &&
+    opts.candidateWords >= 60 &&
+    !technicalDrop
+  )
+}
+
+/**
  * True when the score on the row came from the offline heuristic rather than a
  * real transcript analysis. Those scores are placeholders: the enrichment pass
  * must be allowed to replace them, otherwise every completed call keeps the

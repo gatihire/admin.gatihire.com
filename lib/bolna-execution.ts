@@ -4,7 +4,7 @@ import { evaluateCallQuality } from "@/lib/ai-learning"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { scheduleBolnaCall, MAX_CALL_ATTEMPTS } from "@/lib/scheduled-call"
 import { enrichTranscript } from "@/lib/transcript-enrichment"
-import { deriveFallbackScore, bandFromVerdict, scoreFromVerdict, scoreIsHeuristic } from "@/lib/call-scoring"
+import { deriveFallbackScore, bandFromVerdict, scoreFromVerdict, scoreIsHeuristic, isSubstantiveInterruptedCall } from "@/lib/call-scoring"
 import { logCandidateActivity } from "@/lib/activity-logger"
 import { toE164 } from "@/lib/phone"
 import { appendWhatsappHistory } from "@/lib/whatsapp-history"
@@ -436,6 +436,34 @@ async function buildFallbackVerdictPatch(
  * on the board as a judgement nobody made. Keep the transcript and summary for
  * the human, drop the score, and ask for a re-call.
  */
+/**
+ * A call cut by the 6-minute cap after covering the topics is real evidence; a
+ * call that died with a synthesizer error or inactivity timeout is not. Used by
+ * both the completed and failed handlers so the two cannot disagree.
+ */
+function hasSubstantiveInterruptedEvidence(
+  transcript: string,
+  durationSec: number,
+  hangupReason: string | null | undefined
+): boolean {
+  const candidateSegments = transcriptToSegments(transcript).filter(
+    (s) => s.speaker === "candidate" && s.text && s.text.trim()
+  )
+  const substantiveAnswers = candidateSegments.filter(
+    (s) => s.text.trim().split(/\s+/).filter(Boolean).length >= 10
+  ).length
+  const candidateWords = candidateSegments.reduce(
+    (total, s) => total + s.text.trim().split(/\s+/).filter(Boolean).length,
+    0
+  )
+  return isSubstantiveInterruptedCall({
+    durationSec,
+    substantiveAnswers,
+    candidateWords,
+    hangupReason,
+  })
+}
+
 function applyIncompleteCallScoreRule(
   patch: Record<string, unknown>,
   opts: { partial?: boolean; notes: string }
@@ -795,14 +823,30 @@ export async function handleCompletedExecution(
     }
   }
 
-  // An interrupted call is not a screening. Keep the transcript and summary for
-  // the human, but do not put a judgement on the board.
+  // An interrupted call is not automatically unscorable. A call cut by the
+  // 6-minute cap after covering the topics is real evidence; a call that died
+  // with a synthesizer error at 158s is not. Drop the score only for a technical
+  // drop or thin evidence — otherwise let the analysis replace the heuristic.
   if (classification === "interrupted") {
-    applyIncompleteCallScoreRule(patch, {
-      partial: true,
-      notes:
-        "Call dropped or lost audio before the screening finished. No score given — HR should review the transcript and send the call again.",
-    })
+    const substantive = hasSubstantiveInterruptedEvidence(
+      transcript,
+      rawDuration ? Number(rawDuration) : 0,
+      hangupReason
+    )
+
+    if (substantive) {
+      const verdict =
+        patch.verdict_json && typeof patch.verdict_json === "object" && !Array.isArray(patch.verdict_json)
+          ? (patch.verdict_json as Record<string, unknown>)
+          : {}
+      patch.verdict_json = { ...verdict, _interrupted: true, _scored_despite_interruption: true }
+    } else {
+      applyIncompleteCallScoreRule(patch, {
+        partial: true,
+        notes:
+          "Call dropped or lost audio before the screening finished. No score given — HR should review the transcript and send the call again.",
+      })
+    }
   }
 
   // Log call completed event
@@ -1042,7 +1086,17 @@ async function enrichTranscriptAsync(
   // thinking a real screening happened — it shows "View Results" instead of
   // "Send Call Again".
   const status = String(participant.status || "")
-  const isIncompleteCall = !!(participant.call_is_partial || status === "failed_partial" || status === "failed")
+  const existingVerdict =
+    participant.verdict_json && typeof participant.verdict_json === "object" && !Array.isArray(participant.verdict_json)
+      ? (participant.verdict_json as Record<string, unknown>)
+      : {}
+  // A cap-timeout with substantial evidence is still a screening. The verdict
+  // path sets this marker after applying the evidence gate, so a 6-minute call
+  // that reached the cap keeps its analysis instead of being written off.
+  const scoredDespiteInterruption = existingVerdict._scored_despite_interruption === true
+  const isIncompleteCall =
+    !scoredDespiteInterruption &&
+    !!(participant.call_is_partial || status === "failed_partial" || status === "failed")
   let enriched = await enrichTranscript(transcript, candidate, job, bolnaVerdict)
   if (!enriched) {
     // A silent null here is how call 2 kept a heuristic summary with no
@@ -1065,10 +1119,6 @@ async function enrichTranscriptAsync(
   // The summary is left alone for incomplete calls: the verdict path has already
   // written "Not enough conversation to assess this candidate", and overwriting
   // it with a narrative summary hides that from HR.
-  const existingVerdict =
-    participant.verdict_json && typeof participant.verdict_json === "object" && !Array.isArray(participant.verdict_json)
-      ? (participant.verdict_json as Record<string, unknown>)
-      : {}
   const scoreIsHeuristicScore = scoreIsHeuristic(participant.verdict_json)
   const hasRealScore =
     !scoreIsHeuristicScore &&
@@ -1492,14 +1542,24 @@ export async function handleFailedExecution(
     }
   }
 
-  // A failed or partial attempt is never a screening, even when the transcript
-  // held enough words for the heuristic to produce a number.
-  applyIncompleteCallScoreRule(patch, {
-    partial: !!isPartialCall,
-    notes: isPartialCall
-      ? "Call ended mid-conversation. No score given — HR should review the transcript and send the call again."
-      : "Call did not connect or complete. No score given.",
-  })
+  // A failed or partial attempt is not scored — unless it is a cap-timeout with
+  // real evidence, which is handled exactly like the completed path.
+  const partialTranscript = execution.transcript || ""
+  const partialDuration = Number(execution.conversation_duration ?? execution.telephony_data?.duration ?? 0)
+  if (isPartialCall && hasSubstantiveInterruptedEvidence(partialTranscript, partialDuration, hangupReason)) {
+    const verdict =
+      patch.verdict_json && typeof patch.verdict_json === "object" && !Array.isArray(patch.verdict_json)
+        ? (patch.verdict_json as Record<string, unknown>)
+        : {}
+    patch.verdict_json = { ...verdict, _interrupted: true, _scored_despite_interruption: true }
+  } else {
+    applyIncompleteCallScoreRule(patch, {
+      partial: !!isPartialCall,
+      notes: isPartialCall
+        ? "Call ended mid-conversation. No score given — HR should review the transcript and send the call again."
+        : "Call did not connect or complete. No score given.",
+    })
+  }
 
   // Persist classification/hangup metadata for UI (who ended call, incomplete screening)
   try {
