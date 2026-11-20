@@ -102,6 +102,19 @@ export async function GET(
       return NextResponse.json({ error: "Candidate not found" }, { status: 404 })
     }
 
+    // Fetch applications linked to this candidate so the profile's "jobs"
+    // section can show which jobs the candidate is in pipeline for.
+    const { data: applications, error: appError } = await supabaseAdmin
+      .from('applications')
+      .select('job_id, status, applied_at, jobs!inner(title, subtitle)')
+      .eq('candidate_id', candidateId)
+      .order('applied_at', { ascending: false })
+
+    if (appError) {
+      console.error('Failed to fetch candidate applications:', appError)
+    }
+
+
     // Transform the data to match the same format as the candidates list API
     const transformedCandidate = {
       _id: candidate.id, // Map id to _id for frontend compatibility
@@ -155,6 +168,7 @@ export async function GET(
       portfolioUrl: candidate.portfolioUrl,
       githubProfile: candidate.githubProfile,
       summary: candidate.summary,
+      applicantApplications: (applications as any[]) || [],
     }
 
     const fieldRule = getFieldRule(ctx, "candidates.view", "candidates")
