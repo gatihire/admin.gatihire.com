@@ -36,10 +36,43 @@ const OUTBOUND_OPTIONS = [
 
 interface UploadFile {
   file: File
-  status: "uploading" | "processing" | "completed" | "error" | "duplicate" | "parsing-failed" | "blocked" | "created" | "updated"
+  status:
+    | "uploading"
+    | "processing"
+    | "completed"
+    | "error"
+    | "duplicate"
+    | "parsing-failed"
+    | "blocked"
+    | "created"
+    | "updated"
+    | "needs-review"
   progress: number
   result?: any
   error?: string
+}
+
+// A file whose resume was saved and added to the job, but whose text could not
+// be read automatically. It is NOT a failure — the CV is in the pipeline and a
+// recruiter can open it — so it counts as uploaded.
+const UPLOADED_STATUSES: UploadFile["status"][] = ["completed", "created", "updated", "duplicate", "needs-review"]
+const FAILED_STATUSES: UploadFile["status"][] = ["error", "parsing-failed", "blocked"]
+
+function isUploaded(status: UploadFile["status"]) {
+  return UPLOADED_STATUSES.includes(status)
+}
+
+function isFailed(status: UploadFile["status"]) {
+  return FAILED_STATUSES.includes(status)
+}
+
+function friendlyUploadError(error: any, status?: number) {
+  const msg = String(error?.message || error || "").trim()
+  if (/failed to fetch|networkerror|load failed|fetch failed|network request failed/i.test(msg)) {
+    return "Could not reach the server — the upload was interrupted. Please retry."
+  }
+  if (!msg && status) return `Upload failed (HTTP ${status}). Please retry.`
+  return msg || "Upload failed. Please retry."
 }
 
 interface JobUploadDialogProps {
@@ -62,7 +95,7 @@ export function JobUploadDialog({ jobId, jobTitle, open, onOpenChange, onComplet
     setSource(o === "inbound" ? INBOUND_OPTIONS[0].value : OUTBOUND_OPTIONS[0].value)
   }
 
-  const processFile = useCallback(async (file: File, index: number) => {
+  const processFile = useCallback(async (file: File, index: number): Promise<UploadFile["status"]> => {
     setUploadedFiles((prev) => prev.map((f, i) => (i === index ? { ...f, status: "processing", progress: 30 } : f)))
 
     const formData = new FormData()
@@ -76,57 +109,85 @@ export function JobUploadDialog({ jobId, jobTitle, open, onOpenChange, onComplet
       )
     }, 500)
 
+    let finalStatus: UploadFile["status"] = "error"
+
     try {
       const response = await fetch(`/api/jobs/${jobId}/upload-resume`, {
         method: "POST",
         body: formData,
       })
 
-      clearInterval(progressInterval)
-      const result = await response.json()
+      // A gateway timeout / crash returns HTML or an empty body, not JSON.
+      // Calling response.json() on that threw "Unexpected token '<'", which
+      // looked like a code bug instead of a failed upload.
+      const rawBody = await response.text()
+      let result: any = {}
+      try {
+        result = rawBody ? JSON.parse(rawBody) : {}
+      } catch {
+        result = { error: `Upload failed (HTTP ${response.status}). The server did not return a readable response.` }
+      }
 
       if (!response.ok) {
         if (result.isDuplicate || result.error === "Resume already exists") {
+          finalStatus = "duplicate"
           setUploadedFiles((prev) =>
-            prev.map((f, i) => i === index ? { ...f, status: "duplicate", progress: 100, result } : f),
+            prev.map((f, i) => i === index ? { ...f, status: finalStatus, progress: 100, result } : f),
           )
-          return
+          return finalStatus
         }
         if (result.parsingFailed || result.error === "Resume parsing failed") {
+          finalStatus = "parsing-failed"
           setUploadedFiles((prev) =>
-            prev.map((f, i) => i === index ? { ...f, status: "parsing-failed", progress: 0, error: result.details || "Parsing failed" } : f),
+            prev.map((f, i) => i === index ? { ...f, status: finalStatus, progress: 0, error: result.details || "Parsing failed" } : f),
           )
-          return
+          return finalStatus
         }
+        if (result.validationFailed || result.resultType === "blocked") {
+          finalStatus = "blocked"
+          setUploadedFiles((prev) =>
+            prev.map((f, i) => i === index ? { ...f, status: finalStatus, progress: 0, error: result.details || result.error || "This file was blocked" } : f),
+          )
+          return finalStatus
+        }
+        finalStatus = "error"
         setUploadedFiles((prev) =>
-          prev.map((f, i) => i === index ? { ...f, status: "error", progress: 0, error: result.error || "Upload failed" } : f),
+          prev.map((f, i) => i === index ? { ...f, status: finalStatus, progress: 0, error: friendlyUploadError(result.error, response.status) } : f),
         )
-        return
+        return finalStatus
       }
 
-      const candidateId = result.candidateId
       // The route reports identity merges as `isDuplicate`; there is no
       // `updatedExisting` key, so the old check always evaluated to false and a
       // merged upload was labelled "created" with the "new candidate" toast.
       const mergedExisting = !!(result.isDuplicate || result.updatedExisting)
-      const successStatus: UploadFile["status"] = mergedExisting ? "updated" : "created"
+      // `needsReview` means the CV is stored and attached to the job but the
+      // text could not be read. That is an upload that arrived — not a failure.
+      finalStatus = result.needsReview ? "needs-review" : mergedExisting ? "updated" : "created"
 
       setUploadedFiles((prev) =>
-        prev.map((f, i) => i === index ? { ...f, status: successStatus, progress: 100, result } : f),
+        prev.map((f, i) => i === index ? { ...f, status: finalStatus, progress: 100, result } : f),
       )
 
       invalidateSessionCache("internal:candidates:", { prefix: true })
 
-      if (mergedExisting) {
+      if (finalStatus === "needs-review") {
+        toast({ title: "Resume Saved — Needs Review", description: `${file.name} was added to ${jobTitle}. We could not read the text automatically, so it is flagged for review.` })
+      } else if (mergedExisting) {
         toast({ title: "Existing Candidate Updated", description: `${file.name} matched an existing profile by phone — refreshed and added to ${jobTitle}` })
       } else {
         toast({ title: "Resume Uploaded", description: `${file.name} parsed and added to the Applied stage of ${jobTitle} for review` })
       }
+
+      return finalStatus
     } catch (error: any) {
-      clearInterval(progressInterval)
+      finalStatus = "error"
       setUploadedFiles((prev) =>
-        prev.map((f, i) => i === index ? { ...f, status: "error", progress: 0, error: error.message || "Unknown error" } : f),
+        prev.map((f, i) => i === index ? { ...f, status: finalStatus, progress: 0, error: friendlyUploadError(error) } : f),
       )
+      return finalStatus
+    } finally {
+      clearInterval(progressInterval)
     }
   }, [source, origin, jobId, jobTitle, toast])
 
@@ -141,15 +202,49 @@ export function JobUploadDialog({ jobId, jobTitle, open, onOpenChange, onComplet
     setUploadedFiles((prev) => [...prev, ...newFiles])
     setIsProcessing(true)
 
+    let uploaded = 0
+    let failed = 0
     for (let i = 0; i < newFiles.length; i++) {
-      await processFile(newFiles[i].file, startIdx + i)
+      const status = await processFile(newFiles[i].file, startIdx + i)
+      if (isUploaded(status)) uploaded += 1
+      else if (isFailed(status)) failed += 1
       if (i < newFiles.length - 1) {
         await new Promise((r) => setTimeout(r, 1000))
       }
     }
 
     setIsProcessing(false)
+
+    if (failed > 0) {
+      toast({
+        title: `${failed} file${failed === 1 ? "" : "s"} not uploaded`,
+        description: `${uploaded} of ${newFiles.length} resume${newFiles.length === 1 ? "" : "s"} made it in. Use Retry on the failed file${failed === 1 ? "" : "s"}.`,
+        variant: "destructive",
+      })
+    } else {
+      toast({
+        title: "Upload Complete",
+        description: `${uploaded} of ${newFiles.length} resume${newFiles.length === 1 ? "" : "s"} uploaded.`,
+      })
+    }
   }, [uploadedFiles.length, toast, processFile])
+
+  // Retry every file that failed, without touching the ones that succeeded.
+  const retryFailed = useCallback(async () => {
+    const failedIndexes = uploadedFiles
+      .map((f, i) => (isFailed(f.status) ? i : -1))
+      .filter((i) => i >= 0)
+    if (!failedIndexes.length) return
+
+    setIsProcessing(true)
+    for (const index of failedIndexes) {
+      const file = uploadedFiles[index]?.file
+      if (!file) continue
+      await processFile(file, index)
+      await new Promise((r) => setTimeout(r, 500))
+    }
+    setIsProcessing(false)
+  }, [uploadedFiles, processFile])
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -180,15 +275,20 @@ export function JobUploadDialog({ jobId, jobTitle, open, onOpenChange, onComplet
       case "created": return <Badge variant="outline" className="bg-green-50 text-green-600 border-green-200 text-[10px] gap-1"><CheckCircle className="h-3 w-3" />Done</Badge>
       case "updated": return <Badge variant="outline" className="bg-indigo-50 text-indigo-600 border-indigo-200 text-[10px] gap-1"><RefreshCw className="h-3 w-3" />Updated</Badge>
       case "duplicate": return <Badge variant="outline" className="bg-orange-50 text-orange-600 border-orange-200 text-[10px] gap-1"><AlertTriangle className="h-3 w-3" />Duplicate</Badge>
+      case "needs-review": return <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200 text-[10px] gap-1"><AlertTriangle className="h-3 w-3" />Needs Review</Badge>
       case "parsing-failed": return <Badge variant="outline" className="bg-red-50 text-red-600 border-red-200 text-[10px] gap-1"><AlertCircle className="h-3 w-3" />Parse Error</Badge>
       case "error": return <Badge variant="outline" className="bg-red-50 text-red-600 border-red-200 text-[10px] gap-1"><AlertCircle className="h-3 w-3" />Error</Badge>
       default: return null
     }
   }
 
-  const allCompleted = uploadedFiles.length > 0 && uploadedFiles.every((f) =>
-    ["completed", "created", "updated", "duplicate", "parsing-failed", "error"].includes(f.status)
-  )
+  const uploadedCount = uploadedFiles.filter((f) => isUploaded(f.status)).length
+  const failedCount = uploadedFiles.filter((f) => isFailed(f.status)).length
+  const allFinished = uploadedFiles.length > 0 && uploadedFiles.every((f) => !["uploading", "processing"].includes(f.status))
+  // "Done" is only honest when every file actually made it in. The old check
+  // treated "error" and "parse failed" as finished, so HR clicked Done on a
+  // dialog that said "0/2 uploaded" and the resumes were never in the pipeline.
+  const canFinish = allFinished && failedCount === 0
 
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!isProcessing) onOpenChange(o) }}>
@@ -321,7 +421,7 @@ export function JobUploadDialog({ jobId, jobTitle, open, onOpenChange, onComplet
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">
                   {statusBadge(f.status)}
-                  {(f.status === "duplicate" || f.status === "parsing-failed" || f.status === "error") && !isProcessing && (
+                  {(f.status === "duplicate" || f.status === "parsing-failed" || f.status === "blocked" || f.status === "error") && !isProcessing && (
                     <button onClick={() => removeFile(i)} className="text-zinc-400 hover:text-zinc-600">
                       <X className="h-4 w-4" />
                     </button>
@@ -334,13 +434,28 @@ export function JobUploadDialog({ jobId, jobTitle, open, onOpenChange, onComplet
 
         <div className="flex items-center justify-between pt-2 border-t border-zinc-100">
           <div className="text-xs text-zinc-400">
-            {uploadedFiles.filter((f) => f.status === "created" || f.status === "updated" || f.status === "completed").length}/{uploadedFiles.length} uploaded
+            <span className={failedCount > 0 ? "font-semibold text-red-500" : undefined}>
+              {uploadedCount}/{uploadedFiles.length} uploaded
+            </span>
+            {failedCount > 0 ? <span className="text-red-500"> • {failedCount} failed</span> : null}
           </div>
           <div className="flex gap-2">
             <Button variant="outline" size="sm" onClick={clearAll} disabled={isProcessing}>
               Close
             </Button>
-            {allCompleted && (
+            {failedCount > 0 && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-red-200 text-red-600 hover:bg-red-50"
+                onClick={retryFailed}
+                disabled={isProcessing}
+              >
+                <RefreshCw className="h-4 w-4 mr-1.5" />
+                Retry failed ({failedCount})
+              </Button>
+            )}
+            {canFinish && (
               <Button size="sm" className="bg-emerald-600 hover:bg-emerald-700" onClick={() => { onComplete(); clearAll() }}>
                 <CheckCircle className="h-4 w-4 mr-1.5" />
                 Done

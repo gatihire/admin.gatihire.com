@@ -1,5 +1,4 @@
-import { type NextRequest, NextResponse } from "next/server"
-export const runtime = "nodejs"
+import { after, type NextRequest, NextResponse } from "next/server"
 import crypto from "crypto"
 import { parseResume } from "@/lib/resume-parser"
 import { generateEmbedding } from "@/lib/ai-utils"
@@ -9,6 +8,177 @@ import { checkFileExistsInSupabase } from "@/lib/supabase-storage-utils"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { deriveOrigin } from "@/lib/origin"
 import { getOrAnalyzeFit } from "@/lib/candidate-fit"
+
+export const runtime = "nodejs"
+// Parsing + embedding + fit analysis is an LLM-bound workflow. Give the
+// function the full serverless budget so a slow model does not cut the
+// connection mid-upload.
+export const maxDuration = 60
+
+function nowIso() {
+  return new Date().toISOString()
+}
+
+/** A human-readable name from "bipul_sikder-resume.pdf" → "bipul sikder resume". */
+function nameFromFileName(fileName: string) {
+  const base = String(fileName || "")
+    .replace(/\.[a-z0-9]+$/i, "")
+    .replace(/[_\-.]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+  return (base || "Unnamed candidate").slice(0, 120)
+}
+
+/**
+ * Link a candidate to a job. Returns the application id (or null when the
+ * application already existed).
+ *
+ * Falls back to the minimum columns when `source`/`origin`/`attribution` are
+ * not present in the target schema. A schema drift must not be able to leave
+ * a successfully parsed resume outside the job pipeline.
+ */
+async function linkCandidateToJob(
+  jobId: string,
+  candidateId: string,
+  source: string,
+  origin: string,
+  authUserId: string,
+): Promise<string | null> {
+  const { data: application, error } = await supabaseAdmin
+    .from("applications")
+    .upsert(
+      {
+        job_id: jobId,
+        candidate_id: candidateId,
+        status: "applied",
+        source,
+        origin,
+        created_by: authUserId,
+        attribution: "recruiter_upload",
+      },
+      { onConflict: "job_id,candidate_id", ignoreDuplicates: true },
+    )
+    .select()
+    .maybeSingle()
+
+  // PGRST116 is PostgREST's "zero rows returned", the expected outcome when
+  // ignoreDuplicates skipped an existing application.
+  if (!error || error.code === "PGRST116") return application?.id ?? null
+
+  console.error("Failed to link candidate to job, retrying with minimal columns", {
+    jobId,
+    candidateId,
+    error: error.message,
+  })
+
+  const { data: retry, error: retryErr } = await supabaseAdmin
+    .from("applications")
+    .upsert(
+      { job_id: jobId, candidate_id: candidateId, status: "applied" },
+      { onConflict: "job_id,candidate_id", ignoreDuplicates: true },
+    )
+    .select()
+    .maybeSingle()
+
+  if (retryErr && retryErr.code !== "PGRST116") throw new Error(retryErr.message)
+  return retry?.id ?? null
+}
+
+/**
+ * Keep a resume whose text could not be read.
+ *
+ * Before this, a parse failure returned 422 *before* the file was stored, so
+ * HR saw "failed" and the CV was gone. The candidate now exists with the file
+ * attached and `resume_parse_state = 'needs_review'`, which is what the
+ * needs-review screen lists.
+ */
+async function createNeedsReviewCandidate(opts: {
+  authUserId: string
+  fileName: string
+  fileUrl: string
+  fileHash: string
+  fileSize: number
+  fileType: string
+  error: string
+}): Promise<string> {
+  const { data: byHash } = await supabaseAdmin
+    .from("candidates")
+    .select("id")
+    .eq("file_hash", opts.fileHash)
+    .limit(1)
+    .maybeSingle()
+
+  if (byHash?.id) {
+    await supabaseAdmin
+      .from("candidates")
+      .update({
+        file_name: opts.fileName,
+        file_url: opts.fileUrl,
+        file_size: opts.fileSize,
+        file_type: opts.fileType,
+        resume_parse_state: "needs_review",
+        resume_parse_error: opts.error,
+        updated_at: nowIso(),
+      })
+      .eq("id", byHash.id)
+    return byHash.id as string
+  }
+
+  const { data: created, error } = await supabaseAdmin
+    .from("candidates")
+    .insert({
+      name: nameFromFileName(opts.fileName),
+      email: `${crypto.randomUUID()}@unknown.invalid`,
+      phone: null,
+      current_role: "Not specified",
+      location: "Not specified",
+      total_experience: "Not specified",
+      status: "new",
+      file_name: opts.fileName,
+      file_url: opts.fileUrl,
+      file_hash: opts.fileHash,
+      file_size: opts.fileSize,
+      file_type: opts.fileType,
+      resume_parse_state: "needs_review",
+      resume_parse_error: opts.error,
+      uploaded_at: nowIso(),
+      updated_at: nowIso(),
+      uploaded_by_auth_user_id: opts.authUserId,
+    })
+    .select("id")
+    .single()
+
+  if (!error && created?.id) return created.id as string
+
+  // Last resort: the standard insert path, then flag the row.
+  const fallbackId = await SupabaseCandidateService.addCandidate({
+    name: nameFromFileName(opts.fileName),
+    email: `${crypto.randomUUID()}@unknown.invalid`,
+    phone: "",
+    currentRole: "Not specified",
+    location: "Not specified",
+    totalExperience: "Not specified",
+    status: "new",
+    fileName: opts.fileName,
+    fileUrl: opts.fileUrl,
+    fileHash: opts.fileHash,
+    uploadedAt: nowIso(),
+    updatedAt: nowIso(),
+    uploadedBy: opts.authUserId,
+  } as any)
+
+  await supabaseAdmin
+    .from("candidates")
+    .update({
+      resume_parse_state: "needs_review",
+      resume_parse_error: opts.error,
+      file_size: opts.fileSize,
+      file_type: opts.fileType,
+    })
+    .eq("id", fallbackId)
+
+  return fallbackId
+}
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const ctx = await getInternalAuthContext(request)
@@ -94,21 +264,19 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       text: async () => new TextDecoder().decode(fileArrayBuffer),
     } as any as File
 
-    const parsedData = await parseResume(file)
-
-    let embedding: number[] = []
-    try {
-      embedding = await generateEmbedding(parsedData.resumeText || "")
-    } catch {
-      /* continue without embedding */
-    }
-
+    //
+    // ── Save the file BEFORE parsing ───────────────────────────────────────
+    //
+    // The old order parsed first and only then uploaded, so any parse failure
+    // threw the resume away before it reached storage: HR saw a failure and the
+    // CV was gone forever. Storage is cheap; a lost resume is not.
+    //
     let fileUrl = ""
     let filePath = ""
 
     if (existingFile && existingFile.url) {
       fileUrl = existingFile.url
-      filePath = existingFile.path || ""
+      filePath = existingFile.path || contentAddressedPath
     } else {
       const fileBuffer = Buffer.from(fileArrayBuffer)
       filePath = contentAddressedPath
@@ -120,7 +288,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       const { error: uploadError } = await supabaseAdmin.storage
         .from("resume-files")
         .upload(filePath, fileBuffer, {
-          contentType: rawFile.type,
+          contentType: rawFile.type || "application/octet-stream",
           upsert: true,
         })
 
@@ -133,6 +301,80 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         .getPublicUrl(filePath)
 
       fileUrl = urlData.data.publicUrl
+    }
+
+    //
+    // ── Parse ──────────────────────────────────────────────────────────────
+    //
+    // "This is not a resume" is the only failure that rejects the upload. Any
+    // other failure (model down, rate limit, unreadable scan) keeps the file and
+    // creates a candidate flagged for review, so the CV still lands in the job.
+    //
+    let parsedData: any = null
+    let parseError: any = null
+    try {
+      parsedData = await parseResume(file)
+    } catch (e: any) {
+      parseError = e
+    }
+
+    if (!parsedData) {
+      const parseCode = String(parseError?.code || "")
+      const assessment = (parseError as any)?.assessment
+      const reason = String(assessment?.reason || parseError?.message || "Could not read this resume")
+
+      if (parseCode === "NOT_RESUME") {
+        return NextResponse.json(
+          {
+            error: "This file does not look like a resume",
+            resultType: "blocked",
+            validationFailed: true,
+            blockedCategory: "not_resume",
+            details: reason,
+            docType: String(assessment?.docType || "unknown"),
+            confidence: Number(assessment?.confidence ?? 0.6),
+            fileName: rawFile.name,
+            fileType: rawFile.type,
+            fileSize: rawFile.size,
+            suggestions: [
+              "Upload a resume/CV (not invoices, receipts, offer letters, or other documents)",
+              "If the PDF is scanned, upload a clearer PDF or a DOCX version",
+              "Make sure the resume includes contact info and sections like Skills/Experience/Education",
+            ],
+            timestamp: nowIso(),
+          },
+          { status: 422 },
+        )
+      }
+
+      const candidateId = await createNeedsReviewCandidate({
+        authUserId: ctx.authUser.id,
+        fileName: rawFile.name,
+        fileUrl,
+        fileHash,
+        fileSize: rawFile.size,
+        fileType: rawFile.type || "application/octet-stream",
+        error: reason,
+      })
+
+      const applicationId = await linkCandidateToJob(jobId, candidateId, source, origin, ctx.authUser.id)
+
+      return NextResponse.json({
+        success: true,
+        needsReview: true,
+        candidateId,
+        applicationId,
+        fileUrl,
+        message: `Resume saved and added to ${job.title}, but the text could not be read automatically. It is flagged for review.`,
+        parseError: reason,
+      })
+    }
+
+    let embedding: number[] = []
+    try {
+      embedding = await generateEmbedding(parsedData.resumeText || "")
+    } catch {
+      /* continue without embedding */
     }
 
     const emailToCheck = parsedData.email?.trim()
@@ -168,8 +410,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
     if (duplicate) {
       candidateId = duplicate.id
-      fileUrl = await SupabaseCandidateService.uploadFile(file, candidateId)
-      filePath = fileUrl.split("/").pop() || ""
+      // The file is already in storage (uploaded above, before parsing), so
+      // there is nothing to upload here. Re-uploading used to overwrite the
+      // content-addressed path with a candidate-scoped one and could fail after
+      // a successful parse, losing the association between the row and file.
 
       await SupabaseCandidateService.updateCandidate(candidateId, {
         name: parsedData.name,
@@ -221,7 +465,19 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         embedding,
       })
 
-      await supabaseAdmin.from("candidates").update({ uploaded_by_auth_user_id: ctx.authUser.id }).eq("id", candidateId)
+      // `updateCandidate` only maps a known subset of columns, so the parse
+      // state is written directly. Without this a re-uploaded resume kept the
+      // old "needs_review" flag even though it had just parsed cleanly.
+      await supabaseAdmin
+        .from("candidates")
+        .update({
+          uploaded_by_auth_user_id: ctx.authUser.id,
+          resume_parse_state: "parsed",
+          resume_parse_error: null,
+          file_size: rawFile.size,
+          file_type: rawFile.type || "application/octet-stream",
+        })
+        .eq("id", candidateId)
     } else {
       const candidateData = {
         name: parsedData.name,
@@ -277,78 +533,57 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
       candidateId = await SupabaseCandidateService.addCandidate(candidateData)
 
-      await supabaseAdmin.from("candidates").update({ uploaded_by_auth_user_id: ctx.authUser.id }).eq("id", candidateId)
+      // addCandidate() can return an existing row (it de-duplicates by email /
+      // phone+name) and it does not persist file_size / file_type / parse state
+      // for new rows either. Write those explicitly so the CV is attached and
+      // visible regardless of which path was taken.
+      await supabaseAdmin
+        .from("candidates")
+        .update({
+          uploaded_by_auth_user_id: ctx.authUser.id,
+          file_name: rawFile.name,
+          file_url: fileUrl,
+          file_hash: fileHash,
+          file_size: rawFile.size,
+          file_type: rawFile.type || "application/octet-stream",
+          resume_parse_state: "parsed",
+          resume_parse_error: null,
+        })
+        .eq("id", candidateId)
     }
 
-    // Link the candidate to this job.
+    const applicationId = await linkCandidateToJob(jobId, candidateId, source, origin, ctx.authUser.id)
+
     //
-    // Two problems with the previous version:
-    //  1. `.single()` after an upsert with ignoreDuplicates throws
-    //     "Cannot coerce the result to a single JSON object" whenever the row
-    //     already exists, because ignoreDuplicates returns no row to select.
-    //     Re-uploading a resume for a candidate already on this job therefore
-    //     500'd AFTER the candidate had been created or updated, so the UI
-    //     showed a failure while the candidate row silently persisted with no
-    //     application — the resume never appeared in the pipeline.
-    //  2. The error was never checked, so a genuine failure to link also
-    //     returned 200 with a null applicationId.
-    const { data: application, error: applicationError } = await supabaseAdmin
-      .from("applications")
-      .upsert({
-        job_id: jobId,
-        candidate_id: candidateId,
-        status: "applied",
-        source,
-        origin,
-        created_by: ctx.authUser.id,
-        attribution: "recruiter_upload",
-      }, { onConflict: "job_id,candidate_id", ignoreDuplicates: true })
-      .select()
-      .maybeSingle()
-
-    // PGRST116 is PostgREST's "zero rows returned", which is the expected
-    // outcome when ignoreDuplicates skipped an existing application. Anything
-    // else means the candidate is not actually on this job and must not be
-    // reported as a success.
-    const duplicateApplication = applicationError && applicationError.code === "PGRST116"
-    if (applicationError && !duplicateApplication) {
-      console.error("Failed to link candidate to job", {
-        jobId,
-        candidateId,
-        error: applicationError.message,
-      })
-      return NextResponse.json(
-        {
-          error: "Resume was parsed but could not be added to this job's pipeline.",
-          details: applicationError.message,
-          candidateId,
-        },
-        { status: 500 },
-      )
-    }
-
-    let fitScore: number | null = null
-    try {
-      const fitResult = await getOrAnalyzeFit(jobId, candidateId, {
-        id: candidateId,
-        current_role: parsedData.currentRole || "Not specified",
-        current_company: parsedData.currentCompany || "",
-        total_experience: parsedData.totalExperience || "Not specified",
-        location: parsedData.location || "Not specified",
-        technical_skills: parsedData.technicalSkills || [],
-        resume_text: parsedData.resumeText || "",
-        summary: parsedData.summary || "",
-      }, job)
-      fitScore = fitResult.fit_score
-    } catch (err: any) {
-      console.error("Fit analysis failed for candidate", candidateId, err?.message || err)
-    }
+    // Fit analysis is an LLM call and is not needed for the upload to be
+    // correct. Awaiting it here used to push the request past the serverless
+    // limit, which is what produced "the upload failed" while the candidate had
+    // actually been created. `after()` keeps the function alive just long
+    // enough to run it without delaying the response; the fit score is also
+    // recomputed lazily by the job pipeline if this does not finish.
+    //
+    after(async () => {
+      try {
+        await getOrAnalyzeFit(jobId, candidateId, {
+          id: candidateId,
+          current_role: parsedData.currentRole || "Not specified",
+          current_company: parsedData.currentCompany || "",
+          total_experience: parsedData.totalExperience || "Not specified",
+          location: parsedData.location || "Not specified",
+          technical_skills: parsedData.technicalSkills || [],
+          resume_text: parsedData.resumeText || "",
+          summary: parsedData.summary || "",
+        }, job)
+      } catch (err: any) {
+        console.error("Fit analysis failed for candidate", candidateId, err?.message || err)
+      }
+    })
 
     return NextResponse.json({
       success: true,
       candidateId,
-      applicationId: application?.id,
-      fitScore,
+      applicationId,
+      fitScore: null,
       message: duplicate
         ? `Resume matched existing candidate and assigned to ${job.title}`
         : `Resume uploaded and assigned to ${job.title}`,

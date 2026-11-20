@@ -121,10 +121,24 @@ export function UploadSection({ jobId }: { jobId?: string }) {
       setUploadedFiles((prev) => [...prev, ...newFiles])
       setIsProcessing(true)
 
-      // Process files sequentially to avoid overwhelming the API
+      // Process files sequentially to avoid overwhelming the API.
+      //
+      // Count from the return value of each upload, not from `uploadedFiles`:
+      // that state is captured before any of these uploads finish, so the old
+      // summary always reported the *previous* batch (typically "0 new, 0
+      // duplicates") even when every file had just been uploaded.
+      let created = 0
+      let updated = 0
+      let duplicates = 0
+      let failed = 0
       for (let i = 0; i < newFiles.length; i++) {
         const fileIndex = uploadedFiles.length + i
-        await processFile(newFiles[i].file, fileIndex)
+        const status = await processFile(newFiles[i].file, fileIndex)
+
+        if (status === "created" || status === "completed") created += 1
+        else if (status === "updated") updated += 1
+        else if (status === "duplicate") duplicates += 1
+        else failed += 1
 
         // Small delay between files
         if (i < newFiles.length - 1) {
@@ -134,19 +148,29 @@ export function UploadSection({ jobId }: { jobId?: string }) {
 
       setIsProcessing(false)
 
-      const successCount = uploadedFiles.filter((f) => f.status === "completed").length
-      const duplicateCount = uploadedFiles.filter((f) => f.status === "duplicate").length
-
-      toast({
-        title: "Upload Complete",
-        description: `Processed ${acceptedFiles.length} file(s). ${successCount} new, ${duplicateCount} duplicates`,
-      })
+      const uploadedCount = created + updated + duplicates
+      if (failed > 0) {
+        toast({
+          title: `${failed} file${failed === 1 ? "" : "s"} not uploaded`,
+          description: `${uploadedCount} of ${newFiles.length} resume${newFiles.length === 1 ? "" : "s"} made it in (${created} new, ${updated} updated, ${duplicates} duplicate${duplicates === 1 ? "" : "s"}). Retry the failed file${failed === 1 ? "" : "s"} from the list below.`,
+          variant: "destructive",
+        })
+      } else {
+        toast({
+          title: "Upload Complete",
+          description: `${newFiles.length} file${newFiles.length === 1 ? "" : "s"} processed — ${created} new, ${updated} updated, ${duplicates} duplicate${duplicates === 1 ? "" : "s"}.`,
+        })
+      }
     },
     [uploadedFiles.length, toast],
   )
 
-  const processFile = async (file: File, index: number) => {
+  const processFile = async (file: File, index: number): Promise<UploadedFile["status"]> => {
     logger.info(`Processing file ${index}: ${file.name}`)
+
+    // Maps returned from processFile; declared outside try/catch so it's
+    // accessible in both the success path and the catch block.
+    let successStatus: UploadedFile["status"] = "error"
 
     try {
       // Update status to processing
@@ -167,16 +191,28 @@ export function UploadSection({ jobId }: { jobId?: string }) {
         )
       }, 500)
 
-      const response = await fetch("/api/upload-resume", {
-        method: "POST",
-        body: formData,
-      })
-
-      clearInterval(progressInterval)
+      let response: Response
+      try {
+        response = await fetch("/api/upload-resume", {
+          method: "POST",
+          body: formData,
+        })
+      } finally {
+        clearInterval(progressInterval)
+      }
 
       logger.info(`Upload response status: ${response.status}`)
 
-      const result = await response.json()
+      // A gateway timeout / crash returns HTML or an empty body. `response.json()`
+      // threw "Unexpected token '<'" and the UI showed a code error instead of a
+      // failed upload.
+      const rawBody = await response.text()
+      let result: any = {}
+      try {
+        result = rawBody ? JSON.parse(rawBody) : {}
+      } catch {
+        result = { error: `Upload failed (HTTP ${response.status}). The server did not return a readable response.` }
+      }
       logger.info("Upload result:", result)
 
       if (!response.ok) {
@@ -199,7 +235,7 @@ export function UploadSection({ jobId }: { jobId?: string }) {
                 : f,
             ),
           )
-          return
+          return "duplicate"
         }
         
         // Check if it's a parsing failure
@@ -229,7 +265,7 @@ export function UploadSection({ jobId }: { jobId?: string }) {
             description: `Failed to parse ${file.name}. Check the error details below.`,
             variant: "destructive",
           })
-          return
+          return "parsing-failed"
         }
         
         // Validation failure (blocked)
@@ -258,7 +294,7 @@ export function UploadSection({ jobId }: { jobId?: string }) {
             description: result.details || result.error || "This file was blocked",
             variant: "destructive",
           })
-          return
+          return "blocked"
         }
         
         const message = result.error || "Upload failed"
@@ -280,7 +316,9 @@ export function UploadSection({ jobId }: { jobId?: string }) {
               : f,
           ),
         )
-        throw new Error(message)
+        // The status is already set above; return instead of throwing so the
+        // caller does not show a second, duplicate "Upload Failed" toast.
+        return "error"
       }
 
       // Map success to created/updated based on API flags
@@ -331,7 +369,9 @@ export function UploadSection({ jobId }: { jobId?: string }) {
         description: `Failed to process ${file.name}: ${error instanceof Error ? error.message : "Unknown error"}`,
         variant: "destructive",
       })
+      return "error"
     }
+    return successStatus
   }
 
   const removeFile = (index: number) => {

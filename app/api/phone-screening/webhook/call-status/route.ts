@@ -51,41 +51,78 @@ export async function POST(request: NextRequest) {
           updated_at: new Date().toISOString(),
         })
         .eq("id", participant.id)
-    } else if (callStatus === "no-answer" || callStatus === "no_answer" || callStatus === "busy" || callStatus === "failed") {
-      const attempts = (participant.call_attempts || 0) + 1
-      const maxRetries = parseInt(process.env.SCREENING_MAX_RETRIES || "3")
-      const intervals = [
-        parseInt(process.env.SCREENING_RETRY_INTERVAL_1 || "60"),
-        parseInt(process.env.SCREENING_RETRY_INTERVAL_2 || "120"),
-        parseInt(process.env.SCREENING_RETRY_INTERVAL_3 || "240"),
-      ]
+    } else {
+      // ——— call ended (no-answer / busy / failed / etc.) ————————————————
+      const technicalHangupReasons =
+        /synthesizer_error|inactivity_timeout|no audio|audio issue|cannot hear|can't hear|inaudible|network|provider|balance|system|error/i
 
-      if (attempts >= maxRetries) {
+      // Technical drops (synthesizer_error, network issues, etc.) must NOT count
+      // against the candidate's attempt budget — they are platform failures, not
+      // candidate-related. Only count genuine candidate-answered-or-not calls.
+      const hangupReason =
+        (body.HangupReason || body.Hangupreason || body.hangup_reason || "").toString()
+      const isTechnicalDrop = technicalHangupReasons.test(hangupReason)
+
+      if (!isTechnicalDrop &&
+          (callStatus === "no-answer" ||
+           callStatus === "no_answer" ||
+           callStatus === "busy" ||
+           callStatus === "failed")) {
+        const attempts = (participant.call_attempts || 0) + 1
+        const maxRetries = parseInt(process.env.SCREENING_MAX_RETRIES || "3")
+        const intervals = [
+          parseInt(process.env.SCREENING_RETRY_INTERVAL_1 || "60"),
+          parseInt(process.env.SCREENING_RETRY_INTERVAL_2 || "120"),
+          parseInt(process.env.SCREENING_RETRY_INTERVAL_3 || "240"),
+        ]
+
+        if (attempts >= maxRetries) {
+          await supabaseAdmin
+            .from("phone_screening_participants")
+            .update({
+              status: "unreachable",
+              call_attempts: attempts,
+              last_attempt_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", participant.id)
+        } else {
+          const nextRetryDelay =
+            intervals[attempts - 1] || intervals[intervals.length - 1]
+          const nextRetryAt = new Date(Date.now() + nextRetryDelay * 1000).toISOString()
+
+          await supabaseAdmin
+            .from("phone_screening_participants")
+            .update({
+              status: "failed",
+              call_attempts: attempts,
+              last_attempt_at: new Date().toISOString(),
+              next_retry_at: nextRetryAt,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", participant.id)
+
+          await scheduleBolnaCall(participant.id, nextRetryDelay).catch(() => {})
+        }
+      } else if (!isTechnicalDrop && (
+        callStatus === "no-answer" ||
+        callStatus === "no_answer" ||
+        callStatus === "busy" ||
+        callStatus === "failed"
+      )) {
+        // Non-technical call status but already handled above — keep bolna_status fresh
         await supabaseAdmin
           .from("phone_screening_participants")
-          .update({
-            status: "unreachable",
-            call_attempts: attempts,
-            last_attempt_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          })
+          .update({ bolna_status: callStatus, updated_at: new Date().toISOString() })
           .eq("id", participant.id)
-      } else {
-        const nextRetryDelay = intervals[attempts - 1] || intervals[intervals.length - 1]
-        const nextRetryAt = new Date(Date.now() + nextRetryDelay * 1000).toISOString()
-
+      } else if (isTechnicalDrop) {
+        // Technical drop (synthesizer_error, inactivity_timeout, etc.): do NOT increment
+        // call_attempts and do NOT mark unreachable. Just keep bolna_status fresh so
+        // the UI shows the real hangup reason.
         await supabaseAdmin
           .from("phone_screening_participants")
-          .update({
-            status: "failed",
-            call_attempts: attempts,
-            last_attempt_at: new Date().toISOString(),
-            next_retry_at: nextRetryAt,
-            updated_at: new Date().toISOString(),
-          })
+          .update({ bolna_status: callStatus, updated_at: new Date().toISOString() })
           .eq("id", participant.id)
-
-        await scheduleBolnaCall(participant.id, nextRetryDelay).catch(() => {})
       }
     }
 
