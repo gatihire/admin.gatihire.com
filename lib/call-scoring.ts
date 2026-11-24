@@ -98,6 +98,79 @@ export function scoreIsHeuristic(verdictJson: unknown): boolean {
   return (verdictJson as Record<string, unknown>)._fallback_summary_used === true
 }
 
+/**
+ * Apply a real analysis to the row's stored verdict.
+ *
+ * Returns `null` when there is nothing to write: the row already holds a real
+ * score, the call was not a completed screening, or the verdict word is not
+ * recognised. Otherwise it returns the score, the board band, the normalised
+ * confidence and the rewritten `verdict_json` — including removal of the
+ * `_fallback_summary_used` marker, which is what lets a later pass know the
+ * placeholder is gone.
+ *
+ * Extracted from the enrichment pass so the same rule can re-apply an existing
+ * analysis to a row whose score was clobbered by a webhook re-run, without
+ * calling Gemini again.
+ */
+export function applyEnrichedVerdict(opts: {
+  verdictJson: unknown
+  aiScore: unknown
+  aiRecommendation: unknown
+  isIncomplete: boolean
+  overallVerdict: string | null | undefined
+  confidenceScore?: unknown
+}): {
+  score: number
+  recommendation: ScoreBand
+  confidence: number | null
+  verdictJson: Record<string, unknown>
+} | null {
+  const heuristic = scoreIsHeuristic(opts.verdictJson)
+  const hasRealScore =
+    !heuristic &&
+    (typeof opts.aiScore === "number" || typeof opts.aiRecommendation === "string")
+  const derived = deriveFallbackScore({
+    hasScore: hasRealScore,
+    isIncomplete: opts.isIncomplete,
+    verdict: opts.overallVerdict,
+  })
+  if (!derived) return null
+
+  const existing =
+    opts.verdictJson && typeof opts.verdictJson === "object" && !Array.isArray(opts.verdictJson)
+      ? { ...(opts.verdictJson as Record<string, unknown>) }
+      : {}
+
+  // The scorer stores confidence as a fraction (0.85); the column and every
+  // other verdict writer use a percentage (85). Normalise so the card does not
+  // show "Confidence: 1%".
+  const confidence =
+    typeof opts.confidenceScore === "number"
+      ? opts.confidenceScore <= 1
+        ? Math.round(opts.confidenceScore * 100)
+        : Math.round(opts.confidenceScore)
+      : null
+
+  const verdictJson: Record<string, unknown> = {
+    ...existing,
+    overall_verdict: opts.overallVerdict,
+    score: derived.score,
+    recommendation: derived.recommendation,
+    confidence_score: confidence,
+    _summary_source: "gemini",
+    _score_replaced_heuristic: heuristic,
+  }
+  delete verdictJson._fallback_summary_used
+  delete verdictJson._insufficient_evidence
+
+  return {
+    score: derived.score,
+    recommendation: derived.recommendation,
+    confidence,
+    verdictJson,
+  }
+}
+
 export function bandFromVerdict(verdict: string | null | undefined): ScoreBand | null {
   if (!verdict) return null
   return VERDICT_SCORES[String(verdict).trim().toLowerCase()]?.recommendation ?? null

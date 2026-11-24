@@ -964,6 +964,40 @@ summary and now logs an error instead of returning silently.
 
 ---
 
+### 7.4 The retry that was missing — 23 Nov
+
+74 calls ran after the 19 Nov deploy. Eleven of the 33 completed ones were still sitting on
+the heuristic 6.0. Two separate causes, both in the same chain:
+
+| Shape | Rows | What happened |
+|---|---|---|
+| Heuristic score **with** a real analysis | 7 | A webhook retry / reconcile sync re-ran terminal handling; `buildFallbackVerdictPatch` wrote 6/10 again over the verdict Gemini had already produced, and that run's enrichment never landed |
+| Heuristic score, **no** analysis at all | 4 | `enrichTranscriptAsync` is fired without `await` so the webhook can answer Bolna fast; a frozen lambda or a Gemini 429 left the call on 6.0 permanently |
+
+Nothing repaired either shape. The reconcile cron skips a row that is `completed` with a
+verdict — correctly, it is "synced" — so no code path ever looked at these rows again.
+
+**a. A re-run cannot regress the row.** `hasRealVerdictAlready()` gates the fallback patch in
+both handlers: if the row has an `enriched_summary`, or a `verdict_json` that is not the
+heuristic and carries an `overall_verdict`, the placeholder is never rebuilt.
+
+**b. The score rule moved into one testable function.** `applyEnrichedVerdict()` in
+`lib/call-scoring.ts` now owns "given this verdict and this row, what score and
+`verdict_json` do we write". The enrichment pass and the recovery sweep both call it, so
+they cannot drift.
+
+**c. A sweep that actually retries.** `recoverStuckScores(limit)` runs from the 5-minute
+reconcile cron, two rows per run, completed calls only, last 48 h. A row that already has an
+analysis has its score re-applied without a model call; a row with none is sent through
+Gemini again. It reports `fixed` / `reanalysed` / `pending` in the cron response, so a
+backlog is visible instead of silent.
+
+**Remaining risk.** The enrichment pass is still not awaited on the webhook path; the sweep
+is the safety net, not a guarantee it lands first time. If `pending` stays non-zero across
+runs, the next step is a queue rather than a timer.
+
+---
+
 ## 8. Speed
 
 The model changed and the agent got slower:

@@ -10,6 +10,7 @@ import {
   persistBolnaExecutionId,
   handleCompletedExecution,
   handleFailedExecution,
+  recoverStuckScores,
 } from "@/lib/bolna-execution"
 import { updateParticipantSafely } from "@/lib/participant-update"
 
@@ -292,11 +293,25 @@ export async function GET(request: NextRequest) {
       healed.push({ participantId: target.id, executionId: execution.id || null, status: execution.status })
     }
 
+    // Self-heal placeholder scores. A completed call whose analysis never
+    // replaced the heuristic 6/10 is invisible to the loop above — it is
+    // already "synced" — and nothing else revisits it. Two rows per run keeps
+    // the cron inside its budget; the next run picks up the rest.
+    let scoreRecovery: Awaited<ReturnType<typeof recoverStuckScores>> | null = null
+    if (!dry) {
+      try {
+        scoreRecovery = await recoverStuckScores(2)
+      } catch (err: any) {
+        logger.warn("Score recovery sweep failed", { error: err?.message })
+      }
+    }
+
     return NextResponse.json({
       checked: targets.length,
       processed: healed.length,
       truncated: budgetExhausted || targets.length > batch.length,
       healed,
+      scoreRecovery,
       result: dry ? "dry-run" : "ok",
     })
   } catch (error: any) {

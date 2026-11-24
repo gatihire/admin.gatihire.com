@@ -5,10 +5,10 @@ import { getWhatsAppService } from "@/lib/whatsapp"
 import { scheduleBolnaCall, MAX_CALL_ATTEMPTS } from "@/lib/scheduled-call"
 import { enrichTranscript } from "@/lib/transcript-enrichment"
 import {
-  deriveFallbackScore,
   bandFromVerdict,
   scoreFromVerdict,
   scoreIsHeuristic,
+  applyEnrichedVerdict,
   isSubstantiveInterruptedCall,
   isCapTimeout,
 } from "@/lib/call-scoring"
@@ -472,6 +472,32 @@ function hasSubstantiveInterruptedEvidence(
 }
 
 /**
+ * True when the row already holds a verdict that came from an analysis rather
+ * than the offline placeholder.
+ *
+ * Terminal handling is deliberately re-runnable (webhook retry, reconcile cron,
+ * manual sync), but `buildFallbackVerdictPatch` writes 6/10 and would overwrite
+ * the analysis each time. That is how 7 of 33 completed calls ended up back on
+ * 6.0 while their card read good_fit or not_fit: the second run clobbered the
+ * verdict, then its enrichment call failed and nothing repaired it.
+ */
+async function hasRealVerdictAlready(participantId: string): Promise<boolean> {
+  const { data } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .select("enriched_summary, verdict_json")
+    .eq("id", participantId)
+    .maybeSingle()
+  if (!data) return false
+  if (data.enriched_summary) return true
+  const verdict = data.verdict_json
+  if (!verdict || typeof verdict !== "object" || Array.isArray(verdict)) return false
+  return (
+    !scoreIsHeuristic(verdict) &&
+    typeof (verdict as Record<string, unknown>).overall_verdict === "string"
+  )
+}
+
+/**
  * A call stopped by our own 6-minute cap is not a failed call. It ran the full
  * screening and the clock ended it; marking it partial puts a "Send Call Again"
  * button on the card and asks HR to pay for a second call to a candidate who
@@ -841,7 +867,7 @@ export async function handleCompletedExecution(
       }
     }
 
-  } else if (transcript) {
+  } else if (transcript && !(await hasRealVerdictAlready(participantId))) {
     const fallbackPatch = await buildFallbackVerdictPatch(participantId, transcript)
     // Never let an undefined value in the fallback blob erase a field the
     // terminal handler already set (notably `status: "completed"`).
@@ -1158,41 +1184,14 @@ async function enrichTranscriptAsync(
   // The summary is left alone for incomplete calls: the verdict path has already
   // written "Not enough conversation to assess this candidate", and overwriting
   // it with a narrative summary hides that from HR.
-  const scoreIsHeuristicScore = scoreIsHeuristic(participant.verdict_json)
-  const hasRealScore =
-    !scoreIsHeuristicScore &&
-    (typeof participant.ai_score === "number" || typeof participant.ai_recommendation === "string")
-  const derived = deriveFallbackScore({
-    hasScore: hasRealScore,
+  const applied = applyEnrichedVerdict({
+    verdictJson: participant.verdict_json,
+    aiScore: participant.ai_score,
+    aiRecommendation: participant.ai_recommendation,
     isIncomplete: isIncompleteCall,
-    verdict: enriched.overall_verdict,
+    overallVerdict: enriched.overall_verdict,
+    confidenceScore: enriched.confidence_score,
   })
-
-  // The scorer stores confidence as a fraction (0.85); the column and every
-  // other verdict writer use a percentage (85). Normalise so the card does not
-  // show "Confidence: 1%".
-  const confidencePct =
-    typeof enriched.confidence_score === "number"
-      ? enriched.confidence_score <= 1
-        ? Math.round(enriched.confidence_score * 100)
-        : Math.round(enriched.confidence_score)
-      : null
-
-  const nextVerdict: Record<string, unknown> = derived
-    ? {
-        ...existingVerdict,
-        overall_verdict: enriched.overall_verdict,
-        score: derived.score,
-        recommendation: derived.recommendation,
-        confidence_score: confidencePct,
-        _summary_source: "gemini",
-        _score_replaced_heuristic: scoreIsHeuristicScore,
-      }
-    : existingVerdict
-  if (derived) {
-    delete nextVerdict._fallback_summary_used
-    delete nextVerdict._insufficient_evidence
-  }
 
   // Store enriched summary
   await supabaseAdmin
@@ -1200,11 +1199,11 @@ async function enrichTranscriptAsync(
     .update({
       enriched_summary: enriched,
       ...(isIncompleteCall ? {} : { ai_summary: enriched.comprehensive_summary }),
-      ...(derived
+      ...(applied
         ? {
-            ai_score: derived.score,
-            ai_recommendation: derived.recommendation,
-            verdict_json: nextVerdict,
+            ai_score: applied.score,
+            ai_recommendation: applied.recommendation,
+            verdict_json: applied.verdictJson,
           }
         : {}),
       updated_at: new Date().toISOString(),
@@ -1213,10 +1212,98 @@ async function enrichTranscriptAsync(
 
   logger.info(`Transcript enriched for participant ${participantId}`, {
     verdict: enriched.overall_verdict,
-    confidence: confidencePct,
-    derivedScore: derived?.score,
-    replacedHeuristicScore: derived ? scoreIsHeuristic : false,
+    confidence: applied?.confidence ?? null,
+    derivedScore: applied?.score ?? null,
+    replacedHeuristicScore: applied?.verdictJson._score_replaced_heuristic === true,
   })
+}
+
+/**
+ * Heal completed calls whose score never left the placeholder.
+ *
+ * The webhook fires the enrichment pass without awaiting it (a transcript takes
+ * seconds to analyse and Bolna needs a fast answer), so a frozen lambda or a
+ * Gemini 429 leaves a finished call on the heuristic 6/10 forever. The
+ * reconcile loop above will not revisit it either: the row is already
+ * "synced", which is correct. Nothing was retrying.
+ *
+ * Bounded per run. A row that already has an analysis only needs the score
+ * re-applied (no model call); a row with none is analysed again, newest first.
+ */
+export async function recoverStuckScores(limit = 2): Promise<{
+  checked: number
+  fixed: number
+  reanalysed: number
+  pending: number
+}> {
+  const since = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString()
+  const { data } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .select("id, call_is_partial, ai_score, ai_recommendation, verdict_json, enriched_summary, transcript_raw")
+    .eq("status", "completed")
+    .gte("call_started_at", since)
+    .order("call_started_at", { ascending: false })
+    .limit(40)
+
+  const rows = data || []
+  const stuck = rows.filter((row) => scoreIsHeuristic(row.verdict_json))
+  let fixed = 0
+  let reanalysed = 0
+
+  for (const row of stuck) {
+    if (fixed + reanalysed >= limit) break
+    const verdict =
+      row.verdict_json && typeof row.verdict_json === "object" && !Array.isArray(row.verdict_json)
+        ? (row.verdict_json as Record<string, unknown>)
+        : null
+    const isIncomplete = !!row.call_is_partial && verdict?._scored_despite_interruption !== true
+    const enrichment = row.enriched_summary
+
+    if (enrichment && typeof enrichment === "object" && !Array.isArray(enrichment)) {
+      const e = enrichment as Record<string, unknown>
+      const applied = applyEnrichedVerdict({
+        verdictJson: row.verdict_json,
+        aiScore: row.ai_score,
+        aiRecommendation: row.ai_recommendation,
+        isIncomplete,
+        overallVerdict: typeof e.overall_verdict === "string" ? e.overall_verdict : null,
+        confidenceScore: e.confidence_score,
+      })
+      if (!applied) continue
+      const { error } = await supabaseAdmin
+        .from("phone_screening_participants")
+        .update({
+          ai_score: applied.score,
+          ai_recommendation: applied.recommendation,
+          verdict_json: applied.verdictJson,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", row.id)
+      if (error) {
+        logger.warn("Score recovery failed", { participantId: row.id, error: error.message })
+      } else {
+        fixed++
+        logger.info("Recovered placeholder score from existing analysis", {
+          participantId: row.id,
+          score: applied.score,
+          verdict: e.overall_verdict,
+        })
+      }
+      continue
+    }
+
+    if (row.transcript_raw && row.transcript_raw.length >= 400) {
+      await enrichTranscriptAsync(row.id, row.transcript_raw, null)
+      reanalysed++
+    }
+  }
+
+  return {
+    checked: rows.length,
+    fixed,
+    reanalysed,
+    pending: Math.max(0, stuck.length - fixed - reanalysed),
+  }
 }
 
 export interface ParticipantRecord {
@@ -1567,11 +1654,13 @@ export async function handleFailedExecution(
       if (typeof normalized.score === "number") patch.ai_score = normalized.score
       if (normalized.recommendation) patch.ai_recommendation = normalized.recommendation
       await writeScreeningAnswers(participant.id, normalized)
-    } else {
+    } else if (!(await hasRealVerdictAlready(participant.id))) {
       // The model ended without emitting its JSON — a dropped line, a busy tone,
       // a candidate who hung up first. The conversation still happened, so it
       // still gets a summary; without this the candidate showed up in review
       // with a transcript and no score, indistinguishable from a no-op call.
+      // A row that already carries a real verdict is never rewritten with the
+      // placeholder (re-run safety, same rule as the completed path).
       const fallbackPatch = await buildFallbackVerdictPatch(participant.id, execution.transcript)
       if (fallbackPatch) {
         for (const [key, value] of Object.entries(fallbackPatch)) {
