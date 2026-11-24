@@ -1237,15 +1237,19 @@ export async function recoverStuckScores(limit = 2): Promise<{
   pending: number
 }> {
   // Wide enough to cover a backlog from a bad deploy, not just the last day:
-  // the 19-21 Nov rows were still wrong a week later and nothing looked at them.
+  // the 18-21 Nov rows were still wrong a week later and nothing looked at them.
   const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString()
+  // No transcript in the scan. It is the biggest column on the row and most
+  // rows here only need their existing analysis re-applied — and capping the
+  // scan at 80 rows silently hid every older placeholder (67 of them) because
+  // a busy fortnight has more completed calls than that.
   const { data } = await supabaseAdmin
     .from("phone_screening_participants")
-    .select("id, call_is_partial, ai_score, ai_recommendation, verdict_json, enriched_summary, transcript_raw")
+    .select("id, call_is_partial, ai_score, ai_recommendation, verdict_json, enriched_summary")
     .eq("status", "completed")
     .gte("call_started_at", since)
     .order("call_started_at", { ascending: false })
-    .limit(80)
+    .limit(500)
 
   const rows = data || []
   const stuck = rows.filter((row) => scoreIsHeuristic(row.verdict_json))
@@ -1300,8 +1304,15 @@ export async function recoverStuckScores(limit = 2): Promise<{
       continue
     }
 
-    if (row.transcript_raw && row.transcript_raw.length >= 400) {
-      await enrichTranscriptAsync(row.id, row.transcript_raw, null)
+    // No analysis yet: fetch the transcript for this row only.
+    const { data: full } = await supabaseAdmin
+      .from("phone_screening_participants")
+      .select("transcript_raw")
+      .eq("id", row.id)
+      .maybeSingle()
+    const transcript = full?.transcript_raw || ""
+    if (transcript.length >= 400) {
+      await enrichTranscriptAsync(row.id, transcript, null)
       reanalysed++
     }
   }
