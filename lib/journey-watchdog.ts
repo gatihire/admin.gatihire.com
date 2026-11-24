@@ -343,7 +343,10 @@ export async function sweepJourney(opts?: {
           "last_placement_error.ilike.%credit%,last_placement_error.ilike.%recharge%"
       )
       .lt("call_attempts", MAX_TOTAL_CALL_ATTEMPTS)
-      .order("last_placement_error_at", { ascending: true, nullsFirst: true })
+      // Newest refusal first: a candidate who tried to book this morning is
+      // still warm, one from five days ago is not. Both get dialled, but the
+      // board should show the recent ones moving first.
+      .order("last_placement_error_at", { ascending: false, nullsFirst: false })
       .limit(MAX_PER_BUCKET * 4)
 
     if (error) {
