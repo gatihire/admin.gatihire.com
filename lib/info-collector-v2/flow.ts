@@ -1093,13 +1093,24 @@ async function handleInteractiveButton(participantId: string, buttonId: string, 
       }
         
       case 'skip_schedule_call':
-        await supabaseAdmin
-          .from('phone_screening_participants')
-          .update({ 
-            status: 'whatsapp_sent',
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', participantId);
+        // "Skip — Schedule Call" is on the *info request* template ("Before we
+        // schedule your screening call, could you share a few details?"), so it
+        // means "skip the details, book my call" — consent to be called, not a
+        // cancellation. It used to write `status: 'whatsapp_sent'` and nothing
+        // else: no message, no timestamp, no call, no retry clock. That status
+        // tells every later stage a message is pending when none was sent, and
+        // the only thing that would ever revisit the row was the 12-hour
+        // silence sweep. Two inbound candidates sat there on 24 Nov.
+        //
+        // Route it through the same path as a "Call Now" tap, which either
+        // places the call or flags a recruiter with an explanation to the
+        // candidate.
+        await bookSlotOrExplain({
+          participantId,
+          scheduledAt: new Date(),
+          replyPhone,
+          candidateName: participant.candidate_name,
+        });
         break;
         
       // Rejection reasons

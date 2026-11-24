@@ -996,6 +996,40 @@ backlog is visible instead of silent.
 is the safety net, not a guarantee it lands first time. If `pending` stays non-zero across
 runs, the next step is a queue rather than a timer.
 
+### 7.5 The 24 Nov round: nothing was dialling
+
+HR reported that calls were not happening at all and that the WhatsApp nudges had stopped,
+while the provider wallet was funded. Two independent dead-ends, both of which looked like a
+"low balance" or "no reply" to the person reading the board.
+
+**a. The pause switch could not clear itself.** On 24 Nov 03:10 a placement returned
+`Wallet balance is low. Please recharge to proceed.`, so `pauseCallsForBalance` set
+`provider:bolna:balance_paused`. Eleven candidates were parked by `recordPlacementFailure` in
+`needs_manual_followup` with `next_placement_retry_at = null`.
+
+That combination is a deadlock. The switch is only cleared by a successful placement, and the
+only code that probes for a stale switch is the placement path — but a placement is only
+attempted for a row that is *due*, and every blocked row had been parked with no clock. So
+nothing was due, nothing probed, and the switch stayed on after the wallet was topped up.
+
+The fix is a `provider_blocked` bucket in the journey watchdog: rows parked by a
+wallet/credit/balance/recharge refusal are re-dialled, five per sweep, unguarded. One success
+clears the switch, and the rest of the backlog follows on the next run. The pause gate inside
+`placeCallForParticipant` still limits provider probing to one attempt every ten minutes, so
+this cannot turn into a retry storm.
+
+**b. "Skip — Schedule Call" parked the row.** That button lives on the *info request* template
+("Before we schedule your screening call, could you share a few details?"), so it means "skip
+the details, book my call". The handler wrote `status: 'whatsapp_sent'` and nothing else — no
+message id, no `whatsapp_sent_at`, no call, no retry clock. A status that says a message is
+pending, on a row where none was ever sent.
+
+The 12-hour silence sweep was the only thing that would ever touch such a row, and it keyed
+off `updated_at`, so two inbound candidates sat in "No call placed" all morning. The handler
+now routes through the same `bookSlotOrExplain` path as a "Call Now" tap, and the watchdog
+treats a WhatsApp-waiting status with no recorded send as stranded after 15 minutes instead
+of waiting for a reply that was never solicited.
+
 ---
 
 ## 8. Speed

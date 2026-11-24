@@ -4,6 +4,7 @@ import {
   placeCallForParticipant,
   placeCallImmediately,
   MAX_TOTAL_CALL_ATTEMPTS,
+  MAX_PLACEMENT_ATTEMPTS,
 } from "@/lib/scheduled-call"
 import { getBolnaExecution, BOLNA_TERMINAL_STATUSES } from "@/lib/bolna"
 import { updateParticipantSafely } from "@/lib/participant-update"
@@ -82,6 +83,7 @@ export type JourneyBucket =
   | "booked_not_fired"     // a call was booked for a time that passed — never placed
   | "retry_overdue"        // a retry was booked for a time that passed — never placed
   | "silent_no_call"       // WhatsApp sent, no reply, no call ever — call them
+  | "provider_blocked"     // parked by OUR provider outage (wallet/credit) — call once it is funded
   | "gone_cold"            // silent for too long — do not cold-call, hand to HR
   | "in_flight_stuck"      // a call stuck "in progress" — resolve it with the provider
 
@@ -100,6 +102,8 @@ type Row = {
   scheduled_call_at?: string | null
   next_retry_at?: string | null
   whatsapp_sent_at?: string | null
+  placement_attempts?: number | null
+  next_placement_retry_at?: string | null
   updated_at?: string | null
 }
 
@@ -135,7 +139,7 @@ export async function sweepJourney(opts?: {
   buckets?: JourneyBucket[]
 }): Promise<JourneySweepResult> {
   const dry = opts?.dry === true
-  const want = new Set(opts?.buckets || (["booked_not_fired", "retry_overdue", "silent_no_call", "gone_cold", "in_flight_stuck"] as JourneyBucket[]))
+  const want = new Set(opts?.buckets || (["booked_not_fired", "retry_overdue", "silent_no_call", "provider_blocked", "gone_cold", "in_flight_stuck"] as JourneyBucket[]))
 
   const result: JourneySweepResult = {
     scanned: 0,
@@ -264,7 +268,32 @@ export async function sweepJourney(opts?: {
       .order("updated_at", { ascending: true })
       .limit(MAX_PER_BUCKET)
 
-    for (const row of (data || []) as Row[]) {
+    // A row whose status is a WhatsApp-waiting state but which never recorded a
+    // send is not waiting for a reply from anybody — it is stranded. The old
+    // "Skip — Schedule Call" tap wrote exactly that shape, and the 12-hour rule
+    // above left it alone for half a day. Repair it after a short grace period
+    // instead of treating a missing send as a slow reply.
+    const { data: strandedData } = await supabaseAdmin
+      .from("phone_screening_participants")
+      .select("id, status, call_attempts, scheduled_call_at, next_retry_at, whatsapp_sent_at, updated_at")
+      .in("status", ["whatsapp_sent", "whatsapp_delivered", "whatsapp_read"])
+      .eq("call_attempts", 0)
+      .is("whatsapp_sent_at", null)
+      .is("whatsapp_reply_at", null)
+      .lt("updated_at", new Date(Date.now() - 15 * 60 * 1000).toISOString())
+      .order("updated_at", { ascending: true })
+      .limit(MAX_PER_BUCKET)
+
+    const silentRows = [...((data || []) as Row[])]
+    const seen = new Set(silentRows.map((r) => r.id))
+    for (const row of (strandedData || []) as Row[]) {
+      if (!seen.has(row.id)) {
+        seen.add(row.id)
+        silentRows.push(row)
+      }
+    }
+
+    for (const row of silentRows) {
       result.scanned++
       if (dry) {
         result.details.push({ participantId: row.id, bucket: "silent_no_call", outcome: "would_place_call" })
@@ -285,7 +314,68 @@ export async function sweepJourney(opts?: {
     }
   }
 
-  // ── 4. Silent for too long — hand to HR rather than cold-call ──
+  // ── 4. Parked by a provider-wide outage — place the call now that it is funded ──
+  // A wallet/credit refusal is not this candidate's fault, but it used to be
+  // terminal: `recordPlacementFailure` parked the row in needs_manual_followup
+  // with no retry clock, and the pause switch could only be cleared by a
+  // successful placement. Nothing was due, so nothing probed, so the switch
+  // stayed on after HR funded the account. On 24 Nov that was 11 candidates
+  // sitting in "No call placed" while the balance was fine.
+  //
+  // Unguarded: these people already agreed to the screen; the only thing that
+  // stopped the call was our account. One attempt per row per sweep, and the
+  // pause gate inside placeCallForParticipant still limits probing to one
+  // provider check every ten minutes.
+  if (want.has("provider_blocked")) {
+    const now = Date.now()
+    // Only the error terms are filtered in SQL. The retry clock and the
+    // placement cap are filtered in memory: PostgREST cannot AND three
+    // independent "null or below X" groups, and chaining `.or()` three times
+    // sends duplicate `or` params whose precedence is not guaranteed.
+    const { data, error } = await supabaseAdmin
+      .from("phone_screening_participants")
+      .select(
+        "id, status, call_attempts, placement_attempts, next_placement_retry_at, last_placement_error_at, updated_at"
+      )
+      .in("status", ["needs_manual_followup", "failed"])
+      .or(
+        "last_placement_error.ilike.%wallet%,last_placement_error.ilike.%balance%," +
+          "last_placement_error.ilike.%credit%,last_placement_error.ilike.%recharge%"
+      )
+      .lt("call_attempts", MAX_TOTAL_CALL_ATTEMPTS)
+      .order("last_placement_error_at", { ascending: true, nullsFirst: true })
+      .limit(MAX_PER_BUCKET * 4)
+
+    if (error) {
+      logger.error("Watchdog provider_blocked query failed", { error: error.message, code: (error as any).code })
+    }
+
+    const due = ((data || []) as Row[])
+      .filter((row) => {
+        const retryAt = row.next_placement_retry_at ? new Date(row.next_placement_retry_at).getTime() : NaN
+        if (Number.isFinite(retryAt) && retryAt > now) return false
+        return Number(row.placement_attempts ?? 0) < MAX_PLACEMENT_ATTEMPTS
+      })
+      .slice(0, MAX_PER_BUCKET)
+
+    for (const row of due) {
+      result.scanned++
+      if (dry) {
+        result.details.push({ participantId: row.id, bucket: "provider_blocked", outcome: "would_place_call" })
+        continue
+      }
+      const r = await placeNow(row.id, false)
+      if (r.ok) {
+        result.callsPlaced++
+        result.details.push({ participantId: row.id, bucket: "provider_blocked", outcome: "call_placed" })
+      } else {
+        result.callsFailed++
+        result.details.push({ participantId: row.id, bucket: "provider_blocked", outcome: `not_placed:${r.reason}` })
+      }
+    }
+  }
+
+  // ── 5. Silent for too long — hand to HR rather than cold-call ──
   if (want.has("gone_cold")) {
     const until = new Date(Date.now() - GONE_COLD_AFTER_HOURS * 3600 * 1000).toISOString()
 
