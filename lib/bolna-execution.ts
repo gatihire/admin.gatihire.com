@@ -1236,14 +1236,16 @@ export async function recoverStuckScores(limit = 2): Promise<{
   reanalysed: number
   pending: number
 }> {
-  const since = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString()
+  // Wide enough to cover a backlog from a bad deploy, not just the last day:
+  // the 19-21 Nov rows were still wrong a week later and nothing looked at them.
+  const since = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString()
   const { data } = await supabaseAdmin
     .from("phone_screening_participants")
     .select("id, call_is_partial, ai_score, ai_recommendation, verdict_json, enriched_summary, transcript_raw")
     .eq("status", "completed")
     .gte("call_started_at", since)
     .order("call_started_at", { ascending: false })
-    .limit(40)
+    .limit(80)
 
   const rows = data || []
   const stuck = rows.filter((row) => scoreIsHeuristic(row.verdict_json))

@@ -88,6 +88,19 @@ export async function GET(request: NextRequest) {
   try {
     const now = new Date().toISOString()
 
+    // Heal placeholder scores. Defined before the first use so both response
+    // paths run it; a completed call with a heuristic score is invisible to the
+    // stuck-call query below.
+    const runScoreRecovery = async () => {
+      if (dry) return null
+      try {
+        return await recoverStuckScores(2)
+      } catch (err: any) {
+        logger.warn("Score recovery sweep failed", { error: err?.message })
+        return null
+      }
+    }
+
     // Resolve to a list of { participantId, bolnaExecutionId } to heal.
     let targets: ReconcileTarget[] = []
 
@@ -136,7 +149,17 @@ export async function GET(request: NextRequest) {
     }
 
     if (targets.length === 0) {
-      return NextResponse.json({ checked: 0, updated: 0, healed: [], result: "ok" })
+      // Nothing is stuck in flight — which is the common case. Returning here
+      // used to skip the score sweep entirely, so the cron reported "checked 0"
+      // and never healed anything: a completed call whose analysis never landed
+      // is "synced", so it can never appear in `targets`.
+      return NextResponse.json({
+        checked: 0,
+        updated: 0,
+        healed: [],
+        scoreRecovery: await runScoreRecovery(),
+        result: dry ? "dry-run" : "ok",
+      })
     }
 
     const runStartedAt = Date.now()
@@ -297,14 +320,7 @@ export async function GET(request: NextRequest) {
     // replaced the heuristic 6/10 is invisible to the loop above — it is
     // already "synced" — and nothing else revisits it. Two rows per run keeps
     // the cron inside its budget; the next run picks up the rest.
-    let scoreRecovery: Awaited<ReturnType<typeof recoverStuckScores>> | null = null
-    if (!dry) {
-      try {
-        scoreRecovery = await recoverStuckScores(2)
-      } catch (err: any) {
-        logger.warn("Score recovery sweep failed", { error: err?.message })
-      }
-    }
+    const scoreRecovery = await runScoreRecovery()
 
     return NextResponse.json({
       checked: targets.length,
