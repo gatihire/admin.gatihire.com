@@ -94,7 +94,7 @@ export async function GET(request: NextRequest) {
     const runScoreRecovery = async () => {
       if (dry) return null
       try {
-        return await recoverStuckScores(2)
+        return await recoverStuckScores(6)
       } catch (err: any) {
         logger.warn("Score recovery sweep failed", { error: err?.message })
         return null

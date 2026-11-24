@@ -1252,8 +1252,14 @@ export async function recoverStuckScores(limit = 2): Promise<{
   let fixed = 0
   let reanalysed = 0
 
+  // Wall-clock guard: a re-analysis is a Gemini call, and the cron route has a
+  // 60s ceiling. Stopping early with `pending` > 0 is honest; being killed
+  // mid-write is not.
+  const deadline = Date.now() + 40_000
+
   for (const row of stuck) {
     if (fixed + reanalysed >= limit) break
+    if (Date.now() > deadline) break
     const verdict =
       row.verdict_json && typeof row.verdict_json === "object" && !Array.isArray(row.verdict_json)
         ? (row.verdict_json as Record<string, unknown>)
