@@ -1070,6 +1070,14 @@ Rules to implement in `lib/scheduled-call.ts` / `lib/journey-watchdog.ts`:
 
 1. **Calling window.** Place outbound calls only 10:00–19:00 IST, Monday–Saturday. Outside the
    window, set `scheduled_call_at` to the next window instead of dialling.
+   *Implemented: `lib/calling-hours.ts`, enforced in `placeCallForParticipant` (the one
+   place every proactive dial passes through) and in the bulk `call_now` branch of
+   `lib/call-orchestrator.ts`, which dials directly. A deferred row keeps its status or
+   moves from `calling` to `call_scheduled`, gets both its clocks pushed to the window
+   start, and is dialled by `booked_not_fired` at 10:00. No attempt is spent. The only
+   exemption is the Bolna inbound webhook — the candidate called us.*
+   Window is configurable via `CALL_WINDOW_START_HOUR`, `CALL_WINDOW_END_HOUR`,
+   `CALL_WINDOW_DAYS` (0 = Sunday).
 2. **Retry ladder.** Attempt 1 at the best window; attempt 2 same day +3 h; attempt 3 next day
    11:00–13:00. Max 3 (already enforced as `MAX_TOTAL_CALL_ATTEMPTS`).
 3. **Voicemail → WhatsApp, not a third call.** If `answered_by_voice_mail` is true, send the
@@ -1170,6 +1178,7 @@ attempt, and a question that breaks the rules is refused with a reason rather th
 | `docs/ai-screener-prompt.md` | Mirror of the live prompt; must be updated in the same commit |
 | `lib/bolna-execution.ts:960` | Evidence scorer; replace band constants at `:1004` and `:389` |
 | `lib/journey-watchdog.ts` | Calling window + retry ladder |
+| `lib/calling-hours.ts` | IST calling window (10:00–19:00, Mon–Sat), used by every proactive dial |
 | `components/candidate-profile-sidebar.tsx:407` | Plan / Text editor tabs, `manual_override` |
 | `components/phone-screening-results-sheet.tsx:1620` | Show topics + evidence instead of a flat question list |
 | `docs/job-intake-and-screening-criteria copy.md` | Source of the Screening Brief shape; the plan object should stay compatible with it |

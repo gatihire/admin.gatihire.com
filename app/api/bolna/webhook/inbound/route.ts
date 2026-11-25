@@ -204,6 +204,11 @@ export async function POST(request: NextRequest) {
         .eq("id", participant.id)
     }
 
+    // Deliberately NOT gated by the calling window. This route only runs when the
+    // candidate themselves called our number (Bolna inbound webhook): they are
+    // awake and asking to be connected, so a callback at 02:00 is the answer they
+    // requested, not an unsolicited dial. Every proactive placement goes through
+    // `placeCallForParticipant`, which enforces the window.
     const result = await placeBolnaCall({
       to: candidate.phone,
       userData,

@@ -10,6 +10,7 @@ import { Client } from "@upstash/qstash"
 import { supabaseAdmin } from "@/lib/supabase"
 import { placeBolnaCall, BOLNA_TERMINAL_STATUSES } from "@/lib/bolna"
 import { getProviderPause, pauseCallsForBalance, clearProviderPauseIfPaused } from "@/lib/provider-health"
+import { isWithinCallingHours, nextCallingWindowStart, callingWindowLabel } from "@/lib/calling-hours"
 import { buildAlreadyCollectedUserData } from "@/lib/prompt-user-data"
 import { buildResumeInfo } from "@/lib/prompt-user-data"
 import {
@@ -286,6 +287,8 @@ export interface PlaceCallResult {
   success: boolean
   skipped?: boolean
   error?: string
+  /** When `reason` is `outside_calling_hours`, the instant the call now fires. */
+  scheduledFor?: string
   /** Machine-readable cause when nothing was placed, so callers can tell an
    *  exhausted budget apart from a duplicate dial or a provider rejection. */
   reason?:
@@ -298,6 +301,9 @@ export interface PlaceCallResult {
     | "provider_rejected"
     | "provider_paused"
     | "no_longer_waiting"
+    /** Too late or too early for the candidate — the call was re-booked into the
+     *  next allowed window instead of dialling. Not a failure: nothing was spent. */
+    | "outside_calling_hours"
     /** The eligibility gate refused. Permanent for this tap: retrying the same
      *  request can never succeed, so callers must not treat it as transient. */
     | "eligibility_blocked"
@@ -505,6 +511,73 @@ export async function placeCallForParticipant(
       .update({ status: "failed", updated_at: new Date().toISOString() })
       .eq("id", participantId)
     return { success: false, reason: "no_phone", error: "Candidate has no phone number" }
+  }
+
+  // ── Calling window ────────────────────────────────────────────────────────
+  // The last thing before the phone rings. Everything above is bookkeeping; this
+  // is the only place that has to ask what time it is for the person receiving
+  // the call.
+  //
+  // On 25 Nov a candidate was called at 02:50 IST. The journey watchdog runs
+  // every ten minutes around the clock and dialled a row it had parked on a
+  // provider balance error, so "the row is due" was the only question anyone
+  // asked. There was no window anywhere in the outbound path.
+  //
+  // Re-booking (rather than dropping or failing) keeps the candidate exactly
+  // where they were: at the start of the next window `booked_not_fired` picks a
+  // `call_scheduled` row up and dials it. No attempt is spent, so a call
+  // deferred for being late can never exhaust the budget.
+  if (!isWithinCallingHours()) {
+    const windowStart = nextCallingWindowStart()
+    const windowIso = windowStart.toISOString()
+    // Only ever push a clock forward. A row already booked for tomorrow 11:00
+    // must not be dragged back to today 10:00 by a sweep that runs at 02:00.
+    const notBefore = (current?: string | null): string => {
+      const ms = current ? new Date(current).getTime() : NaN
+      return Number.isFinite(ms) && ms > windowStart.getTime() ? new Date(ms).toISOString() : windowIso
+    }
+
+    const patch: Record<string, unknown> = {
+      scheduled_call_at: notBefore(row.scheduled_call_at),
+      next_placement_retry_at: notBefore(row.next_placement_retry_at),
+      updated_at: new Date().toISOString(),
+    }
+    // A retry row keeps a second clock and its own watchdog bucket. Leaving
+    // `next_retry_at` in the past would make `retry_overdue` select the row on
+    // every sweep and get refused here each time, starving the rows behind it.
+    if (row.status === "failed") patch.next_retry_at = notBefore(row.next_retry_at)
+    // `calling` with no execution is not "in progress" — it is a row whose
+    // placement never happened. Saying `call_scheduled` is the truth, and it is
+    // the status `booked_not_fired` dials from.
+    if (["calling", "queued", "ringing", "initiated"].includes(row.status)) {
+      patch.status = "call_scheduled"
+    }
+
+    const { error: deferError } = await supabaseAdmin
+      .from("phone_screening_participants")
+      .update(patch)
+      .eq("id", participantId)
+    if (deferError) {
+      logger.error("Could not defer call to the calling window", {
+        participantId,
+        error: deferError.message,
+      })
+    }
+
+    logger.info("Call deferred to the calling window", {
+      participantId,
+      status: row.status,
+      windowStart: windowIso,
+      window: callingWindowLabel(),
+    })
+
+    return {
+      success: false,
+      skipped: true,
+      reason: "outside_calling_hours",
+      error: `Outside calling hours (${callingWindowLabel()}) — call set for ${windowIso}`,
+      scheduledFor: windowIso,
+    }
   }
 
   const payload = row.call_payload_json

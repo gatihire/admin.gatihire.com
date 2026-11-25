@@ -53,15 +53,8 @@ async function renudgeExistingParticipant(opts: {
 
   try {
     if (effMode === "call_now") {
-      const { data: participant } = await supabaseAdmin
-        .from("phone_screening_participants")
-        .select("call_payload_json, info_data")
-        .eq("id", participantId)
-        .maybeSingle()
-
-      const userData = (participant as any)?.call_payload_json
-      if (!userData || !candidate.phone) {
-        return { ok: false, kind: "call", error: "No stored call payload or phone for re-nudge" }
+      if (!candidate.phone) {
+        return { ok: false, kind: "call", error: "Candidate has no phone number to call" }
       }
 
       // Route through the guarded placement rather than calling Bolna directly.
@@ -74,6 +67,12 @@ async function renudgeExistingParticipant(opts: {
       //    placeCallForParticipant already merges info_data over the payload, and
       //    it also owns the attempt counter that the old hardcoded
       //    `call_attempts: 1` used to reset.
+      //
+      // The stored payload is no longer a precondition. A participant created by
+      // a trigger that never placed its call has an empty payload, and requiring
+      // one made every later nudge fail with "No stored call payload" — on 25 Nov
+      // that is why HR could not nudge a candidate at all. placeCallForParticipant
+      // builds the interview plan itself when the payload has none.
       const result = await placeCallImmediately(participantId)
       if (result.skipped) {
         return { ok: false, kind: "call", error: result.error || "A call is already in progress" }
@@ -439,20 +438,47 @@ export async function POST(request: NextRequest) {
 
     // Candidate dedup: check if any candidates already have active participants for this job
     // If so, update their screening_context and log the update (showcase it was refreshed)
+    //
+    // `needs_review` and `needs_manual_followup` are included: a candidate waiting
+    // on HR or parked by a provider outage is still in the journey. Leaving them
+    // out meant re-triggering forked a SECOND participant row, and the board then
+    // showed the same candidate twice — one row holding the answers, one empty
+    // row stuck in "calling". That is what happened to Tanaya on 24 Nov.
     const { data: existingParticipants } = await supabaseAdmin
       .from("phone_screening_participants")
-      .select("id, candidate_id, status, screening_context")
+      .select("id, candidate_id, status, screening_context, updated_at")
       .eq("job_id", jobId)
       .in("candidate_id", candidateIds)
       .in("status", ["pending", "whatsapp_sent", "whatsapp_delivered", "whatsapp_read",
                       "info_requested", "info_received", "interested", "call_scheduled",
-                      "scheduled", "calling", "in_progress"])
+                      "scheduled", "calling", "in_progress", "needs_review",
+                      "needs_manual_followup", "failed"])
+      .order("updated_at", { ascending: false })
 
     console.log("[TRIGGER] existingParticipants:", existingParticipants?.map(p => ({ candidate_id: p.candidate_id, status: p.status })))
 
     const dedupedCandidateIds = new Set<string>()
     const dedupUpdates: Array<{ candidateId: string; participantId: string; screening_context: any }> = []
+    // One row per candidate. A candidate can already have duplicates from before
+    // this guard existed, and re-nudging both would place two calls.
+    const progressRank: Record<string, number> = {
+      needs_review: 8, info_received: 7, interested: 6, call_scheduled: 5, scheduled: 5,
+      info_requested: 4, whatsapp_read: 3, whatsapp_delivered: 3, whatsapp_sent: 3,
+      calling: 2, in_progress: 2, pending: 1, needs_manual_followup: 1, failed: 0,
+    }
+    const bestByCandidate = new Map<string, NonNullable<typeof existingParticipants>[number]>()
     for (const ep of existingParticipants || []) {
+      const current = bestByCandidate.get(ep.candidate_id)
+      if (!current) {
+        bestByCandidate.set(ep.candidate_id, ep)
+        continue
+      }
+      const a = progressRank[ep.status] ?? 0
+      const b = progressRank[current.status] ?? 0
+      // The query is newest-first, so `current` wins ties.
+      if (a > b) bestByCandidate.set(ep.candidate_id, ep)
+    }
+    for (const ep of bestByCandidate.values()) {
       dedupedCandidateIds.add(ep.candidate_id)
       dedupUpdates.push({ candidateId: ep.candidate_id, participantId: ep.id, screening_context: ep.screening_context })
     }
@@ -580,6 +606,7 @@ export async function POST(request: NextRequest) {
       callsFailed: result.callsFailed,
       nudgeSent: (result.nudgeSent || 0) + renudgedCandidates,
       skippedNoPhone: result.skippedNoPhone.length > 0 ? result.skippedNoPhone : undefined,
+      deferredOutsideHours: result.deferredOutsideHours || 0,
       errors: result.errors,
       renudgedCount: renudgedCandidates,
       renudgeErrors: renudgeFailures.length > 0 ? renudgeFailures : undefined,

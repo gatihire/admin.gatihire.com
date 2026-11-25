@@ -84,6 +84,7 @@ export type JourneyBucket =
   | "retry_overdue"        // a retry was booked for a time that passed — never placed
   | "silent_no_call"       // WhatsApp sent, no reply, no call ever — call them
   | "provider_blocked"     // parked by OUR provider outage (wallet/credit) — call once it is funded
+  | "call_never_started"   // marked "calling" but the provider never received an execution
   | "gone_cold"            // silent for too long — do not cold-call, hand to HR
   | "in_flight_stuck"      // a call stuck "in progress" — resolve it with the provider
 
@@ -139,7 +140,7 @@ export async function sweepJourney(opts?: {
   buckets?: JourneyBucket[]
 }): Promise<JourneySweepResult> {
   const dry = opts?.dry === true
-  const want = new Set(opts?.buckets || (["booked_not_fired", "retry_overdue", "silent_no_call", "provider_blocked", "gone_cold", "in_flight_stuck"] as JourneyBucket[]))
+  const want = new Set(opts?.buckets || (["booked_not_fired", "retry_overdue", "silent_no_call", "provider_blocked", "call_never_started", "gone_cold", "in_flight_stuck"] as JourneyBucket[]))
 
   const result: JourneySweepResult = {
     scanned: 0,
@@ -378,7 +379,54 @@ export async function sweepJourney(opts?: {
     }
   }
 
-  // ── 5. Silent for too long — hand to HR rather than cold-call ──
+  // ── 5. Marked "calling" but the provider never received the call ──
+  // The trigger sets the row to `calling` before asking Bolna to dial. When that
+  // placement is refused without an attempt being recorded — a provider pause, a
+  // crash between the two writes — the row keeps saying a call is happening. It
+  // has no execution id, so the `in_flight_stuck` bucket (which matches on that
+  // id) never sees it, and a recruiter re-nudging it is told a call is already in
+  // progress. On 25 Nov that was Tanaya: a duplicate row "calling" since 24 Nov
+  // and HR unable to nudge her.
+  if (want.has("call_never_started")) {
+    const stale = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+    const { data } = await supabaseAdmin
+      .from("phone_screening_participants")
+      .select("id, status, call_attempts, placement_attempts, next_placement_retry_at, scheduled_call_at, updated_at")
+      .in("status", ["calling", "queued", "ringing", "initiated"])
+      .is("bolna_execution_id", null)
+      .lt("call_attempts", MAX_TOTAL_CALL_ATTEMPTS)
+      .lt("updated_at", stale)
+      .order("updated_at", { ascending: true })
+      .limit(MAX_PER_BUCKET)
+
+    for (const row of (data || []) as Row[]) {
+      // A row deferred into the next calling window looks identical to a stuck
+      // one, except for its two clocks. Without this the 10-minute sweep would
+      // hand it to `placeCallForParticipant` at 02:00, get it deferred again,
+      // and rewrite the same timestamps forever.
+      const nowMs = Date.now()
+      const clocks = [row.scheduled_call_at, row.next_placement_retry_at]
+      if (clocks.some((t) => t && new Date(t).getTime() > nowMs)) continue
+
+      result.scanned++
+      if (dry) {
+        result.details.push({ participantId: row.id, bucket: "call_never_started", outcome: "would_place_call" })
+        continue
+      }
+      // Unguarded: the row only reached this state because someone asked for a
+      // call in the first place.
+      const r = await placeNow(row.id, false)
+      if (r.ok) {
+        result.callsPlaced++
+        result.details.push({ participantId: row.id, bucket: "call_never_started", outcome: "call_placed" })
+      } else {
+        result.callsFailed++
+        result.details.push({ participantId: row.id, bucket: "call_never_started", outcome: `not_placed:${r.reason}` })
+      }
+    }
+  }
+
+  // ── 6. Silent for too long — hand to HR rather than cold-call ──
   if (want.has("gone_cold")) {
     const until = new Date(Date.now() - GONE_COLD_AFTER_HOURS * 3600 * 1000).toISOString()
 
@@ -433,7 +481,7 @@ export async function sweepJourney(opts?: {
     }
   }
 
-  // ── 5. A call stuck "in progress" — resolve it with the provider ──
+  // ── 7. A call stuck "in progress" — resolve it with the provider ──
   //
   // This used to be the reconcile job's only job, and the reconcile job never
   // ran (no CRON_SECRET, and on the Hobby plan a cron runs once a day at

@@ -1230,15 +1230,26 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
       const skipped = data.skippedNoPhone?.length || 0
       const nudged = data.nudgeSent || 0
       const deduped = data.dedupedCount || 0
+      const deferred = data.deferredOutsideHours || 0
       let description = ""
       if (bulkNudgeMode === "call_now") {
-        description = `${triggered} calls placed`; if (failed > 0) description += `, ${failed} failed`; if (skipped > 0) description += `, ${skipped} skipped (no phone)`
+        description = `${triggered} calls placed`; if (deferred > 0) description += `, ${deferred} scheduled for the next calling window`; if (failed > 0) description += `, ${failed} failed`; if (skipped > 0) description += `, ${skipped} skipped (no phone)`
       } else {
         description = `${nudged} info requests sent`; if (skipped > 0) description += `, ${skipped} skipped (no phone)`
       }
       if (deduped > 0) description += ` (${deduped} updated existing)`
-      const title = bulkNudgeMode === "call_now" ? "AI calls started" : "WhatsApp info requests sent"
-      toast({ title, description, variant: failed > 0 && triggered === 0 ? "destructive" : "default" })
+      // When nothing went out, say why. "0 calls placed" alone sent HR looking for
+      // a UI problem when the API had already told us the reason.
+      const firstError = Array.isArray(data.errors) && data.errors.length > 0 ? String(data.errors[0]) : ""
+      if (firstError && triggered + nudged === 0 && deferred === 0) description = firstError
+      // A call deferred into the next window is not a failure — the candidate is
+      // booked, and saying "failed" would send HR chasing a non-problem.
+      const nothingHappened = triggered + nudged + deferred === 0
+      const title =
+        bulkNudgeMode === "call_now"
+          ? deferred > 0 && triggered === 0 ? "Calls scheduled" : "AI calls started"
+          : "WhatsApp info requests sent"
+      toast({ title, description, variant: (failed > 0 || (firstError && nothingHappened && deferred === 0)) ? "destructive" : "default" })
       setSelectedIds(new Set()); setConfirmCallsOpen(false)
       invalidateSessionCache(`internal:applications:job:${jobId}`); onRefresh(); fetchParticipants()
     } catch (err: any) {
