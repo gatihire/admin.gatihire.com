@@ -484,6 +484,11 @@ export function DbMatchesTab({ jobId, onViewProfile, onCandidateAdded }: DbMatch
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || "Outreach failed")
 
+      const errors = [...(Array.isArray(data.errors) ? data.errors : []), ...(Array.isArray(data.renudgeErrors) ? data.renudgeErrors : [])]
+      if (errors.length > 0 && (data.nudgeSent || 0) === 0 && (data.callsTriggered || 0) === 0 && (data.deferredOutsideHours || 0) === 0) {
+        throw new Error(String(errors[0]))
+      }
+
       const nudges = data.nudgeSent ?? 0
       const calls = data.callsTriggered ?? 0
       const skipped = Array.isArray(data.skippedNoPhone) ? data.skippedNoPhone.length : 0

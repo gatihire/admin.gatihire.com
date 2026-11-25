@@ -1225,6 +1225,14 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || "Failed to start screening")
+      const errors = [...(Array.isArray(data.errors) ? data.errors : []), ...(Array.isArray(data.renudgeErrors) ? data.renudgeErrors : [])]
+      const renudgeError = errors.length > 0 ? String(errors[0]) : ""
+      // A re-nudge that sent nothing is a failure, even though the endpoint
+      // answers 200. Reporting "0 calls placed (N updated existing)" sent HR
+      // looking for a UI bug instead of the real reason (attempt cap, no phone…).
+      if (renudgeError && (data.callsTriggered || 0) === 0 && (data.nudgeSent || 0) === 0 && (data.deferredOutsideHours || 0) === 0) {
+        throw new Error(renudgeError)
+      }
       const triggered = data.callsTriggered || 0
       const failed = data.callsFailed || 0
       const skipped = data.skippedNoPhone?.length || 0
@@ -1329,6 +1337,10 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
             variant: "destructive",
           })
           return
+        }
+        const errors = [...(Array.isArray(data.errors) ? data.errors : []), ...(Array.isArray(data.renudgeErrors) ? data.renudgeErrors : [])]
+        if (errors.length > 0 && (data.nudgeSent || 0) === 0 && (data.callsTriggered || 0) === 0) {
+          throw new Error(String(errors[0]))
         }
         throw new Error(data.error || "Failed to send WhatsApp")
       }

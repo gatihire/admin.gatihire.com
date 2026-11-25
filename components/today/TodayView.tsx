@@ -1005,12 +1005,12 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
 
       if (mode === "post_call" && ivNudge && item.participantId) {
         try {
-          await nudgeOne(item)
-          toast({ title: "Nudge sent", description: `WhatsApp message sent to ${item.candidateName}.` })
-        } catch {
+          const sent = await nudgeOne(item)
+          toast({ title: "Nudge sent", description: nudgeDescription(sent, item.candidateName) })
+        } catch (err: any) {
           toast({
             title: "Nudge failed",
-            description: "The call was logged but the WhatsApp nudge did not go out.",
+            description: err?.message || "The call was logged but the WhatsApp nudge did not go out.",
             variant: "destructive",
           })
         }
@@ -1038,9 +1038,16 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
   const nudgeText = (item: WorkItem) =>
     `Hi ${firstName(item.candidateName)}, following up on your application for ${item.jobTitle}. Do you have a few minutes to chat?`
 
+  // Outside Meta's 24-hour reply window the server sends an approved template
+  // with the same intent. Say so, otherwise HR assumes the free text arrived.
+  const nudgeDescription = (sent: any, candidateName: string) =>
+    sent?.via === "template"
+      ? `Approved WhatsApp template sent to ${candidateName} (no reply in the last 24 hours).`
+      : `WhatsApp message sent to ${candidateName}.`
+
   const nudgeOne = async (item: WorkItem) => {
     if (!item.participantId) throw new Error("No WhatsApp participant")
-    await api(`/api/phone-screening/participants/${item.participantId}/send-message`, {
+    return api(`/api/phone-screening/participants/${item.participantId}/send-message`, {
       method: "POST",
       body: JSON.stringify({ text: nudgeText(item) }),
     })
@@ -1064,8 +1071,8 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
     switch (item.primaryAction) {
       case "nudge":
         return withPending(`nudge:${item.key}`, async () => {
-          await nudgeOne(item)
-          toast({ title: "Nudge sent", description: `WhatsApp message sent to ${item.candidateName}.` })
+          const sent = await nudgeOne(item)
+          toast({ title: "Nudge sent", description: nudgeDescription(sent, item.candidateName) })
           await load({ quiet: true })
         })
       case "reply":
@@ -1208,8 +1215,16 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
       if (targets.length === 0) throw new Error("None of the selected rows have a WhatsApp thread")
       const results = await Promise.allSettled(targets.map((i) => nudgeOne(i)))
       const ok = results.filter((r) => r.status === "fulfilled").length
+      const templates = results.filter(
+        (r) => r.status === "fulfilled" && (r.value as any)?.via === "template"
+      ).length
+      const firstError = results.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined
       toast({
         title: `Nudged ${ok} of ${targets.length}`,
+        description: [
+          templates > 0 ? `${templates} sent as an approved template (no 24-hour reply window).` : "",
+          firstError ? firstError.reason?.message || "A nudge failed" : "",
+        ].filter(Boolean).join(" "),
         variant: ok === 0 ? "destructive" : undefined,
       })
       await load({ quiet: true })
@@ -1244,8 +1259,8 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
       },
       nudge: (item) => {
         void withPending(`nudge:${item.key}`, async () => {
-          await nudgeOne(item)
-          toast({ title: "Nudge sent", description: `WhatsApp message sent to ${item.candidateName}.` })
+          const sent = await nudgeOne(item)
+          toast({ title: "Nudge sent", description: nudgeDescription(sent, item.candidateName) })
           await load({ quiet: true })
         })
       },

@@ -35,7 +35,7 @@ async function sendTemplateMessage(
   });
 }
 
-async function sendSessionMessage(phoneNumber: string, text: string): Promise<{ success: boolean; messageId?: string; error?: string }> {
+async function sendSessionMessage(phoneNumber: string, text: string): Promise<{ success: boolean; messageId?: string; error?: string; errorCode?: number }> {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
   const apiVersion = process.env.WHATSAPP_API_VERSION || 'v21.0';
@@ -63,7 +63,9 @@ async function sendSessionMessage(phoneNumber: string, text: string): Promise<{ 
     if (!response.ok || data.error) {
       const error = data.error?.message || `HTTP ${response.status}`;
       logger.error('Failed to send session message', { phoneNumber, error, response: data });
-      return { success: false, error };
+      // Callers need the code, not just the text: #131047 means the 24-hour
+      // service window closed and an approved template must be used instead.
+      return { success: false, error, errorCode: data.error?.code };
     }
     
     return { success: true, messageId: data.messages?.[0]?.id };
@@ -183,13 +185,14 @@ async function sendStepQuestion(
 async function sendReminder(participant: ParticipantInfo): Promise<{ success: boolean; messageId?: string; error?: string }> {
   const templateName = process.env.WHATSAPP_TEMPLATE_REMINDER_NUDGE || 'reminder_nudge';
   
+  const value = (raw: string | undefined | null, fallback: string) => String(raw || "").trim() || fallback
   const components = [
     {
       type: 'body',
       parameters: [
-        { type: 'text', text: participant.candidate_name },
-        { type: 'text', text: participant.job_title },
-        { type: 'text', text: participant.company_name }
+        { type: 'text', text: value(participant.candidate_name, "there") },
+        { type: 'text', text: value(participant.job_title, "an open role") },
+        { type: 'text', text: value(participant.company_name, "our client") }
       ]
     }
   ];
@@ -210,7 +213,11 @@ async function sendReminder(participant: ParticipantInfo): Promise<{ success: bo
       .eq('id', participant.id);
   }
   
-  return { success: true, messageId: result.messageId };
+  // Never report a rejected template as delivered. This reminder is the
+  // journey engine's only nudge for a candidate who stopped replying; treating
+  // a #131008/#131047 refusal as success is why HR saw "nudge sent" while the
+  // candidate received nothing.
+  return { success: result.success, messageId: result.messageId, error: result.error };
 }
 
 function formatConfirmation(infoData: Record<string, any>): string {

@@ -73,7 +73,11 @@ async function renudgeExistingParticipant(opts: {
       // one made every later nudge fail with "No stored call payload" — on 25 Nov
       // that is why HR could not nudge a candidate at all. placeCallForParticipant
       // builds the interview plan itself when the payload has none.
-      const result = await placeCallImmediately(participantId)
+      // This is an explicit HR "start calls now" action. `force` overrides a
+      // stale callback clock left by the calling-window deferral; it still
+      // cannot bypass the attempt budget or a live provider call. Without it
+      // HR saw "0 calls placed" while the row sat on a future `scheduled_call_at`.
+      const result = await placeCallImmediately(participantId, { force: true })
       if (result.skipped) {
         return { ok: false, kind: "call", error: result.error || "A call is already in progress" }
       }
@@ -452,7 +456,7 @@ export async function POST(request: NextRequest) {
       .in("status", ["pending", "whatsapp_sent", "whatsapp_delivered", "whatsapp_read",
                       "info_requested", "info_received", "interested", "call_scheduled",
                       "scheduled", "calling", "in_progress", "needs_review",
-                      "needs_manual_followup", "failed"])
+                      "needs_manual_followup", "unreachable", "failed"])
       .order("updated_at", { ascending: false })
 
     console.log("[TRIGGER] existingParticipants:", existingParticipants?.map(p => ({ candidate_id: p.candidate_id, status: p.status })))
@@ -464,7 +468,7 @@ export async function POST(request: NextRequest) {
     const progressRank: Record<string, number> = {
       needs_review: 8, info_received: 7, interested: 6, call_scheduled: 5, scheduled: 5,
       info_requested: 4, whatsapp_read: 3, whatsapp_delivered: 3, whatsapp_sent: 3,
-      calling: 2, in_progress: 2, pending: 1, needs_manual_followup: 1, failed: 0,
+      calling: 2, in_progress: 2, pending: 1, needs_manual_followup: 1, unreachable: 1, failed: 0,
     }
     const bestByCandidate = new Map<string, NonNullable<typeof existingParticipants>[number]>()
     for (const ep of existingParticipants || []) {
