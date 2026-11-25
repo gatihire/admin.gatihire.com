@@ -579,11 +579,15 @@ export async function placeCallForParticipant(
     // A retry row keeps a second clock and its own watchdog bucket. Leaving
     // `next_retry_at` in the past would make `retry_overdue` select the row on
     // every sweep and get refused here each time, starving the rows behind it.
-    if (row.status === "failed") patch.next_retry_at = notBefore(row.next_retry_at)
-    // `calling` with no execution is not "in progress" — it is a row whose
-    // placement never happened. Saying `call_scheduled` is the truth, and it is
-    // the status `booked_not_fired` dials from.
-    if (["calling", "queued", "ringing", "initiated"].includes(row.status)) {
+    //
+    // Every other status must land somewhere a sweep actually dials. `pending`,
+    // `needs_review` and `interested` are not picked up by any bucket, so leaving
+    // them as they are would silently drop the call HR just asked for — the row
+    // would sit with a booking nothing reads. `call_scheduled` is both the truth
+    // and the status `booked_not_fired` fires.
+    if (row.status === "failed") {
+      patch.next_retry_at = notBefore(row.next_retry_at)
+    } else {
       patch.status = "call_scheduled"
     }
 
