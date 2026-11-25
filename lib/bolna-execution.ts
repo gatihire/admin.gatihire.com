@@ -1286,15 +1286,18 @@ export async function recoverStuckScores(limit = 2): Promise<{
   //
   // `failed` is included because an interrupted call that still produced a
   // real screening keeps a score (see `_scored_despite_interruption`), and that
-  // score can be the placeholder just like a completed one. So are the statuses
-  // a call can leave behind — a candidate who said yes, or HR parked the row —
-  // because the score lives on the row, not on the status: 7 of the 18
-  // placeholders on 25 Nov were `interested` and no pass ever looked at them.
-  // Rows without a score are skipped by the filter underneath.
+  // score can be the placeholder just like a completed one.
+  //
+  // The status is not part of the question. A call leaves the row wherever the
+  // journey had got to — interested, info_requested, needs_review — and the
+  // score travels with it. Enumerating statuses meant seven of the eighteen
+  // placeholders on 25 Nov were `interested` rows no pass ever looked at, and
+  // the next two were `info_requested` / `info_received`. "Has a call" is the
+  // only condition that matters.
   const { data } = await supabaseAdmin
     .from("phone_screening_participants")
     .select("id, status, call_is_partial, ai_score, ai_recommendation, verdict_json, enriched_summary")
-    .in("status", ["completed", "failed", "interested", "not_interested", "needs_review", "needs_manual_followup"])
+    .not("call_started_at", "is", null)
     .gte("call_started_at", since)
     .order("call_started_at", { ascending: false })
     .limit(500)
@@ -1302,13 +1305,18 @@ export async function recoverStuckScores(limit = 2): Promise<{
   const rows = data || []
   const stuck = rows.filter((row) => {
     if (!scoreIsHeuristic(row.verdict_json)) return false
-    if (row.status === "completed") return true
-    // A failed row only holds a score when the interruption was substantive.
     const verdict = row.verdict_json as Record<string, unknown>
-    return row.ai_score != null || verdict._scored_despite_interruption === true
+    // An earlier pass already decided there is no evidence. Re-running would
+    // rewrite that same decision every five minutes and burn a model call.
+    if (verdict._insufficient_evidence === true) return false
+    // A placeholder number to replace or remove, a stored analysis that was
+    // never applied, or a completed call that never got an analysis at all.
+    return row.ai_score != null || !!row.enriched_summary || row.status === "completed"
   })
   let fixed = 0
   let reanalysed = 0
+  /** Rows the sweep looked at and correctly decided there was nothing to do. */
+  let settled = 0
 
   // Wall-clock guard: a re-analysis is a Gemini call, and the cron route has a
   // 60s ceiling. Stopping early with `pending` > 0 is honest; being killed
@@ -1367,7 +1375,9 @@ export async function recoverStuckScores(limit = 2): Promise<{
         // a call nobody actually screened — the exact misleading default the
         // terminal handler already removes for a thin call. Remove the number
         // instead of guessing one.
-        if (scoreIsHeuristic(row.verdict_json)) {
+        // Nothing to remove when the number is already gone; rewriting the same
+        // decision every sweep would be pure churn.
+        if (scoreIsHeuristic(row.verdict_json) && row.ai_score != null) {
           const { error } = await supabaseAdmin
             .from("phone_screening_participants")
             .update({
@@ -1397,6 +1407,8 @@ export async function recoverStuckScores(limit = 2): Promise<{
               status: row.status,
             })
           }
+        } else {
+          settled++
         }
         continue
       }
@@ -1434,6 +1446,8 @@ export async function recoverStuckScores(limit = 2): Promise<{
     if (transcript.length >= 400) {
       await enrichTranscriptAsync(row.id, transcript, null)
       reanalysed++
+    } else {
+      settled++
     }
   }
 
@@ -1441,7 +1455,7 @@ export async function recoverStuckScores(limit = 2): Promise<{
     checked: rows.length,
     fixed,
     reanalysed,
-    pending: Math.max(0, stuck.length - fixed - reanalysed),
+    pending: Math.max(0, stuck.length - fixed - reanalysed - settled),
   }
 }
 
