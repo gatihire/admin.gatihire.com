@@ -1132,7 +1132,7 @@ async function enrichTranscriptAsync(
   const { data: participant } = await supabaseAdmin
     .from("phone_screening_participants")
     .select(`
-      candidate_id, job_id, ai_score, ai_recommendation, status, call_is_partial, bolna_status, call_duration_seconds, verdict_json,
+      candidate_id, job_id, ai_score, ai_recommendation, status, call_is_partial, bolna_status, call_duration_seconds, verdict_json, enriched_summary,
       candidates: candidate_id (id, name, current_role, current_company, total_experience, location, technical_skills, resume_text),
       jobs: job_id (id, title, client_name, city, location, experience_min_years, experience_max_years, salary_min, salary_max, salary_type, skills_must_have, skills_good_to_have, description)
     `)
@@ -1193,6 +1193,26 @@ async function enrichTranscriptAsync(
     confidenceScore: enriched.confidence_score,
   })
 
+  // The card takes its score from `ai_score` and its badge from
+  // `enriched_summary.overall_verdict`. Writing the summary when the score could
+  // not be applied leaves those from two different analyses: on 20 Nov a row
+  // showed 5/10 with a good_fit badge because a second enrichment pass stored
+  // its summary after the first pass had already set the score. Only store an
+  // analysis together with the score it produced — unless the row has no stored
+  // analysis at all, in which case this is the only detail HR will get.
+  const hasStoredAnalysis =
+    !!participant.enriched_summary &&
+    typeof participant.enriched_summary === "object" &&
+    !Array.isArray(participant.enriched_summary)
+  if (!applied && hasStoredAnalysis && !scoreIsHeuristic(participant.verdict_json)) {
+    logger.info("Transcript re-analysed but the row already has a real verdict — keeping it", {
+      participantId,
+      storedVerdict: existingVerdict.overall_verdict ?? null,
+      newVerdict: enriched.overall_verdict,
+    })
+    return
+  }
+
   // Store enriched summary
   await supabaseAdmin
     .from("phone_screening_participants")
@@ -1243,16 +1263,28 @@ export async function recoverStuckScores(limit = 2): Promise<{
   // rows here only need their existing analysis re-applied — and capping the
   // scan at 80 rows silently hid every older placeholder (67 of them) because
   // a busy fortnight has more completed calls than that.
+  //
+  // `failed` is included because an interrupted call that still produced a
+  // real screening keeps a score (see `_scored_despite_interruption`), and that
+  // score can be the placeholder just like a completed one. Rows below the
+  // evidence threshold are skipped by the filter underneath — they carry no
+  // score to heal.
   const { data } = await supabaseAdmin
     .from("phone_screening_participants")
-    .select("id, call_is_partial, ai_score, ai_recommendation, verdict_json, enriched_summary")
-    .eq("status", "completed")
+    .select("id, status, call_is_partial, ai_score, ai_recommendation, verdict_json, enriched_summary")
+    .in("status", ["completed", "failed"])
     .gte("call_started_at", since)
     .order("call_started_at", { ascending: false })
     .limit(500)
 
   const rows = data || []
-  const stuck = rows.filter((row) => scoreIsHeuristic(row.verdict_json))
+  const stuck = rows.filter((row) => {
+    if (!scoreIsHeuristic(row.verdict_json)) return false
+    if (row.status === "completed") return true
+    // A failed row only holds a score when the interruption was substantive.
+    const verdict = row.verdict_json as Record<string, unknown>
+    return row.ai_score != null || verdict._scored_despite_interruption === true
+  })
   let fixed = 0
   let reanalysed = 0
 
@@ -1268,7 +1300,11 @@ export async function recoverStuckScores(limit = 2): Promise<{
       row.verdict_json && typeof row.verdict_json === "object" && !Array.isArray(row.verdict_json)
         ? (row.verdict_json as Record<string, unknown>)
         : null
-    const isIncomplete = !!row.call_is_partial && verdict?._scored_despite_interruption !== true
+    // Same rule as `enrichTranscriptAsync`: a failed/partial call is only
+    // scorable when the interruption still produced a real screening.
+    const isIncomplete =
+      verdict?._scored_despite_interruption !== true &&
+      (!!row.call_is_partial || row.status === "failed")
     const enrichment = row.enriched_summary
 
     if (enrichment && typeof enrichment === "object" && !Array.isArray(enrichment)) {
