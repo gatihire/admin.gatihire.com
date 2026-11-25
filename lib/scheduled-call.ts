@@ -513,6 +513,40 @@ export async function placeCallForParticipant(
     return { success: false, reason: "no_phone", error: "Candidate has no phone number" }
   }
 
+  // ── One candidate, one phone ──────────────────────────────────────────────
+  // Duplicate participant rows for the same candidate+job are a known artifact
+  // of the old dedup gap, and the row is the unit of duplicate protection while
+  // the phone number is per candidate. If a sibling row is live with the
+  // provider, dialling this one puts two calls in front of the same person.
+  // Siblings are compared by candidate, never by row, because that is the real
+  // uniqueness.
+  if (candidate.id && row.job_id) {
+    const { data: siblings } = await supabaseAdmin
+      .from("phone_screening_participants")
+      .select("id, status, bolna_status")
+      .eq("candidate_id", candidate.id)
+      .eq("job_id", row.job_id)
+      .neq("id", participantId)
+      .in("status", ["calling", "in_progress", "in-progress", "queued", "ringing", "initiated"])
+      .limit(5)
+    const liveSibling = ((siblings || []) as Array<{ id: string; status: string; bolna_status?: string | null }>).find(
+      (s) => isLiveProviderStatus(s.bolna_status)
+    )
+    if (liveSibling) {
+      logger.warn("Refusing a duplicate dial — a sibling row for this candidate is live", {
+        participantId,
+        liveParticipantId: liveSibling.id,
+        candidateId: candidate.id,
+      })
+      return {
+        success: false,
+        skipped: true,
+        reason: "already_calling",
+        error: "A call for this candidate is already in progress on another screening row",
+      }
+    }
+  }
+
   // ── Calling window ────────────────────────────────────────────────────────
   // The last thing before the phone rings. Everything above is bookkeeping; this
   // is the only place that has to ask what time it is for the person receiving

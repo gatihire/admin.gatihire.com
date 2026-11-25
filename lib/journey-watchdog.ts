@@ -99,6 +99,9 @@ export interface JourneySweepResult {
 type Row = {
   id: string
   status: string
+  candidate_id?: string | null
+  job_id?: string | null
+  created_at?: string | null
   call_attempts: number
   scheduled_call_at?: string | null
   next_retry_at?: string | null
@@ -391,13 +394,21 @@ export async function sweepJourney(opts?: {
     const stale = new Date(Date.now() - 10 * 60 * 1000).toISOString()
     const { data } = await supabaseAdmin
       .from("phone_screening_participants")
-      .select("id, status, call_attempts, placement_attempts, next_placement_retry_at, scheduled_call_at, updated_at")
+      .select("id, status, candidate_id, job_id, created_at, call_attempts, placement_attempts, next_placement_retry_at, scheduled_call_at, updated_at")
       .in("status", ["calling", "queued", "ringing", "initiated"])
       .is("bolna_execution_id", null)
       .lt("call_attempts", MAX_TOTAL_CALL_ATTEMPTS)
       .lt("updated_at", stale)
       .order("updated_at", { ascending: true })
       .limit(MAX_PER_BUCKET)
+
+    /** How far along a participant row is. A `calling` row with no execution is
+     *  the least advanced thing that still looks active. */
+    const stageRank: Record<string, number> = {
+      needs_review: 9, info_received: 8, interested: 7, call_scheduled: 6, scheduled: 6,
+      info_requested: 5, whatsapp_read: 4, whatsapp_delivered: 4, whatsapp_sent: 4,
+      pending: 3, calling: 2, "in-progress": 2, in_progress: 2, queued: 2, ringing: 2, initiated: 2,
+    }
 
     for (const row of (data || []) as Row[]) {
       // A row deferred into the next calling window looks identical to a stuck
@@ -407,6 +418,59 @@ export async function sweepJourney(opts?: {
       const nowMs = Date.now()
       const clocks = [row.scheduled_call_at, row.next_placement_retry_at]
       if (clocks.some((t) => t && new Date(t).getTime() > nowMs)) continue
+
+      // The candidate only has one phone, but can carry several participant rows
+      // for the same job — the dedup bug left them behind. Dialling a stale
+      // duplicate rings the same person again after a real screen has already
+      // advanced. Only the most advanced row is the journey; the others are
+      // reconciled to HR instead of called.
+      const olderSiblingWins = async (): Promise<boolean> => {
+        if (!row.candidate_id || !row.job_id) return false
+        const { data: siblings } = await supabaseAdmin
+          .from("phone_screening_participants")
+          .select("id, status, created_at")
+          .eq("candidate_id", row.candidate_id)
+          .eq("job_id", row.job_id)
+          .neq("id", row.id)
+          .in("status", Object.keys(stageRank))
+          .order("created_at", { ascending: true })
+          .limit(10)
+        const mine = stageRank[row.status] ?? 0
+        const mineCreated = row.created_at ? new Date(row.created_at).getTime() : Infinity
+        return (siblings || []).some((s: any) => {
+          const rank = stageRank[s.status] ?? 0
+          if (rank > mine) return true
+          const created = s.created_at ? new Date(s.created_at).getTime() : Infinity
+          return rank === mine && created < mineCreated
+        })
+      }
+
+      if (await olderSiblingWins()) {
+        result.scanned++
+        if (dry) {
+          result.details.push({ participantId: row.id, bucket: "call_never_started", outcome: "would_supersede" })
+          continue
+        }
+        const nowIso = new Date().toISOString()
+        await supabaseAdmin
+          .from("phone_screening_participants")
+          .update({
+            status: "needs_manual_followup",
+            needs_manual_followup: true,
+            bolna_status: "superseded",
+            last_placement_error:
+              "Superseded by an earlier screening row for this candidate — no call placed",
+            last_placement_error_at: nowIso,
+            scheduled_call_at: null,
+            next_retry_at: null,
+            next_placement_retry_at: null,
+            updated_at: nowIso,
+          })
+          .eq("id", row.id)
+        result.flaggedForHr++
+        result.details.push({ participantId: row.id, bucket: "call_never_started", outcome: "superseded_row" })
+        continue
+      }
 
       result.scanned++
       if (dry) {
