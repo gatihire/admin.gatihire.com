@@ -698,6 +698,12 @@ export interface OrchestrateScreeningInput {
   /** "quick_screen": WhatsApp outreach with buttons (Interested/Not Interested/Call Now). */
   /** "collect_info_first": single detailed_info_request template, parse all fields, pre-screen, then call. */
   callMode?: "call_now" | "quick_screen" | "collect_info_first"
+  /**
+   * Set only for an explicit HR action. A bulk "Call Now" pressed by a person
+   * is not an automatic sweep, so it may ring outside 10:00–19:00 IST. The
+   * watchdog, outreach escalation and QStash retries never set this.
+   */
+  allowOutsideCallingHours?: boolean
   /** Per-job campaign config */
   campaignConfig?: {
     nudgeHours?: number
@@ -1025,11 +1031,11 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
       continue
     }
 
-    // Same calling window as the guarded placement path. This branch dials Bolna
-    // directly, so without its own check a bulk "Call Now" started in the evening
-    // rang everyone in the batch — the 25 Nov 02:50 call reached a candidate this
-    // way through the watchdog, and the same window applies to every door.
-    if (!isWithinCallingHours()) {
+    // Automatic bulk placement keeps the calling window. An HR clicking
+    // "Start calls now" is an explicit human request and passes
+    // `allowOutsideCallingHours`, so it can be pushed at any hour. The watchdog
+    // and outreach escalation do not pass it and still defer to the next window.
+    if (!input.allowOutsideCallingHours && !isWithinCallingHours()) {
       const windowStart = nextCallingWindowStart()
       const windowIso = windowStart.toISOString()
       await supabaseAdmin

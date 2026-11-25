@@ -9,7 +9,12 @@
  *
  * The product plan already says 10:00–19:00 IST, Monday–Saturday (§9 of
  * `docs/ai-call-quality-plan.md`); this module is that rule in one place so the
- * placement path, the watchdog and any future scheduler all agree.
+ * automatic placement path, the watchdog and any future scheduler all agree.
+ *
+ * It is a guard on AUTOMATIC dialling, not a ban on phones ringing outside
+ * those hours. An explicit HR "Call Now"/"Retry" or a candidate who asks to be
+ * called passes `bypassCallingHours` through the placement path; nothing the
+ * system decides on its own (watchdog, outreach escalation, QStash retry) does.
  *
  * India has never observed DST, so a fixed +05:30 offset is exact and avoids
  * the cost and the pitfalls of an Intl round-trip on every placement.

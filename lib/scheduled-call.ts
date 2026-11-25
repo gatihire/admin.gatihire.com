@@ -224,7 +224,8 @@ function getOutreachUrl(): string {
  */
 export async function scheduleBolnaCall(
   participantId: string,
-  delaySeconds: number
+  delaySeconds: number,
+  opts?: { bypassCallingHours?: boolean }
 ): Promise<{ scheduled: boolean; error?: string }> {
   const token = getQStashToken()
   const url = getTriggerUrl()
@@ -239,7 +240,13 @@ export async function scheduleBolnaCall(
     const client = new Client({ token })
     await client.publishJSON({
       url,
-      body: { participantId },
+      body: {
+        participantId,
+        // Only set for a call the candidate explicitly asked for. The QStash
+        // endpoint still enforces the window unless this arrives with the
+        // message; automatic retries and watchdog sweeps never carry it.
+        ...(opts?.bypassCallingHours ? { bypassCallingHours: true } : {}),
+      },
       delay,
     })
     logger.info(`Scheduled Bolna call via QStash`, { participantId, delaySec: delay })
@@ -360,9 +367,10 @@ interface ParticipantRow {
  */
 export async function placeCallForParticipant(
   participantId: string,
-  opts?: { guard?: boolean }
+  opts?: { guard?: boolean; bypassCallingHours?: boolean }
 ): Promise<PlaceCallResult> {
   const guard = opts?.guard ?? false
+  const bypassCallingHours = opts?.bypassCallingHours === true
 
   logger.info("placeCallForParticipant called", { participantId, guard })
 
@@ -561,7 +569,16 @@ export async function placeCallForParticipant(
   // where they were: at the start of the next window `booked_not_fired` picks a
   // `call_scheduled` row up and dials it. No attempt is spent, so a call
   // deferred for being late can never exhaust the budget.
-  if (!isWithinCallingHours()) {
+  //
+  // The window is a guard on SYSTEM-initiated dialling. An HR "Call Now"/"Retry"
+  // or a candidate who explicitly asked to be called is a person, not a sweep,
+  // so they can push a call at any hour. Everything else keeps the guard.
+  if (bypassCallingHours && !isWithinCallingHours()) {
+    logger.info("Explicit call bypassing the automatic calling window", {
+      participantId,
+      outsideWindow: callingWindowLabel(),
+    })
+  } else if (!bypassCallingHours && !isWithinCallingHours()) {
     const windowStart = nextCallingWindowStart()
     const windowIso = windowStart.toISOString()
     // Only ever push a clock forward. A row already booked for tomorrow 11:00
@@ -762,10 +779,13 @@ export async function scheduleCall(participant: any, delayMs: number): Promise<v
  * in-flight check, because a live execution is not a booking to override — dialling
  * again would put two calls in front of the candidate at once — and it does not skip
  * the hard attempt budget in `placeCallForParticipant`.
+ *
+ * `bypassCallingHours` likewise belongs only to explicit human/candidate requests.
+ * The watchdog and outreach escalation never set it, so they still defer at night.
  */
 export async function placeCallImmediately(
   participantId: string,
-  opts?: { force?: boolean }
+  opts?: { force?: boolean; bypassCallingHours?: boolean }
 ): Promise<PlaceCallResult> {
   const { data: existing } = await supabaseAdmin
     .from("phone_screening_participants")
@@ -804,7 +824,10 @@ export async function placeCallImmediately(
     }
   }
 
-  return placeCallForParticipant(participantId, { guard: false });
+  return placeCallForParticipant(participantId, {
+    guard: false,
+    bypassCallingHours: opts?.bypassCallingHours === true,
+  });
 }
 
 /**
@@ -1091,9 +1114,11 @@ export async function markScheduleOffer(participantId: string): Promise<void> {
 
 export async function scheduleOrPlaceCall(
   participantId: string,
-  delaySeconds: number
+  delaySeconds: number,
+  opts?: { bypassCallingHours?: boolean }
 ): Promise<PlaceCallResult & { scheduled?: boolean }> {
   const delay = Math.max(0, Math.round(delaySeconds))
+  const bypassCallingHours = opts?.bypassCallingHours === true
 
   // Last line of defence before a real phone call happens.
   //
@@ -1124,7 +1149,7 @@ export async function scheduleOrPlaceCall(
   }
 
   if (delay <= DIRECT_PLACE_WINDOW_SECONDS) {
-    const placed = await placeCallImmediately(participantId)
+    const placed = await placeCallImmediately(participantId, { bypassCallingHours })
     if (placed.success || placed.skipped) return placed
 
     // Direct placement failed — book a real callback so this is never lost.
@@ -1140,7 +1165,7 @@ export async function scheduleOrPlaceCall(
       })
       .eq("id", participantId)
 
-    const scheduled = await scheduleBolnaCall(participantId, CALLBACK_RETRY_DELAY_SECONDS)
+    const scheduled = await scheduleBolnaCall(participantId, CALLBACK_RETRY_DELAY_SECONDS, { bypassCallingHours })
 
     // If the enqueue itself failed there is nothing waiting to fire. Leaving the
     // row as "call_scheduled" would show HR a booked call that can never happen —
@@ -1189,7 +1214,7 @@ export async function scheduleOrPlaceCall(
     })
     .eq("id", participantId)
 
-  const result = await scheduleBolnaCall(participantId, delay)
+  const result = await scheduleBolnaCall(participantId, delay, { bypassCallingHours })
 
   // Same stranding risk on the delayed path: only keep the booked state if the
   // QStash message actually exists to deliver it.

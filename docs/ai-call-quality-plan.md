@@ -1076,6 +1076,11 @@ Rules to implement in `lib/scheduled-call.ts` / `lib/journey-watchdog.ts`:
    moves from `calling` to `call_scheduled`, gets both its clocks pushed to the window
    start, and is dialled by `booked_not_fired` at 10:00. No attempt is spent. The only
    exemption is the Bolna inbound webhook — the candidate called us.*
+   The window guards **automatic** dialling only. An explicit HR "Call Now"/"Retry"
+   (including a bulk "Start calls now") and a candidate who asks to be called pass
+   `bypassCallingHours` / `allowOutsideCallingHours` and can be pushed at any hour.
+   The watchdog, outreach escalation and QStash retries never set those flags and
+   keep deferring outside the window.*
    Window is configurable via `CALL_WINDOW_START_HOUR`, `CALL_WINDOW_END_HOUR`,
    `CALL_WINDOW_DAYS` (0 = Sunday).
 2. **Retry ladder.** Attempt 1 at the best window; attempt 2 same day +3 h; attempt 3 next day
@@ -1178,7 +1183,7 @@ attempt, and a question that breaks the rules is refused with a reason rather th
 | `docs/ai-screener-prompt.md` | Mirror of the live prompt; must be updated in the same commit |
 | `lib/bolna-execution.ts:960` | Evidence scorer; replace band constants at `:1004` and `:389` |
 | `lib/journey-watchdog.ts` | Calling window + retry ladder |
-| `lib/calling-hours.ts` | IST calling window (10:00–19:00, Mon–Sat), used by every proactive dial |
+| `lib/calling-hours.ts` | IST calling window (10:00–19:00, Mon–Sat), used by every automatic proactive dial; explicit HR/candidate requests bypass |
 | `components/candidate-profile-sidebar.tsx:407` | Plan / Text editor tabs, `manual_override` |
 | `components/phone-screening-results-sheet.tsx:1620` | Show topics + evidence instead of a flat question list |
 | `docs/job-intake-and-screening-criteria copy.md` | Source of the Screening Brief shape; the plan object should stay compatible with it |

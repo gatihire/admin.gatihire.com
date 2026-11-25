@@ -77,7 +77,12 @@ async function renudgeExistingParticipant(opts: {
       // stale callback clock left by the calling-window deferral; it still
       // cannot bypass the attempt budget or a live provider call. Without it
       // HR saw "0 calls placed" while the row sat on a future `scheduled_call_at`.
-      const result = await placeCallImmediately(participantId, { force: true })
+      // `bypassCallingHours` makes this human action possible at any hour; only
+      // automatic sweeps keep the 10:00–19:00 guard.
+      const result = await placeCallImmediately(participantId, {
+        force: true,
+        bypassCallingHours: true,
+      })
       if (result.skipped) {
         return { ok: false, kind: "call", error: result.error || "A call is already in progress" }
       }
@@ -585,6 +590,9 @@ export async function POST(request: NextRequest) {
       fallbackOrigin,
       createdBy: ctx.authUser.id,
       callMode,
+      // The whole trigger endpoint is an authenticated HR action. A fresh
+      // "Call Now" batch is manually pushed, not an automatic sweep.
+      allowOutsideCallingHours: true,
       campaignConfig: body.campaignConfig,
     })
 

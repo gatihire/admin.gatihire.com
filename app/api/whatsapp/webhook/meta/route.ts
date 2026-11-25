@@ -1038,11 +1038,14 @@ async function dispatchIntent(
 
     if (intent === 'schedule_call_now') {
       logger.info("AI: scheduling immediate call", { participantId: participant.id })
-      await scheduleCall(participant, 0)
+      // The candidate explicitly asked to be called now — a person, not a
+      // sweep — so the automatic calling window does not apply.
+      await scheduleCall(participant, 0, { bypassCallingHours: true })
     } else {
       const delayMs = (delay_minutes || 10) * 60 * 1000
       logger.info("AI: scheduling delayed call", { participantId: participant.id, delayMinutes: delay_minutes })
-      await scheduleCall(participant, delayMs)
+      // They picked the slot themselves; carry the request through the queue.
+      await scheduleCall(participant, delayMs, { bypassCallingHours: true })
     }
     return
   }
@@ -1367,7 +1370,11 @@ async function dispatchIntent(
   }
 }
 
-async function scheduleCall(participant: any, delayMs: number) {
+async function scheduleCall(
+  participant: any,
+  delayMs: number,
+  opts?: { bypassCallingHours?: boolean }
+) {
   const scheduledTime = new Date(Date.now() + delayMs)
 
   logger.info("Scheduling call", {
@@ -1381,7 +1388,9 @@ async function scheduleCall(participant: any, delayMs: number) {
   // delivery decision: due now → direct placement, otherwise QStash. It also
   // books a callback if a direct placement fails, so "call now" can never end
   // up as a database row with no actual call behind it.
-  const result = await scheduleOrPlaceCall(participant.id, Math.max(0, Math.round(delayMs / 1000)))
+  const result = await scheduleOrPlaceCall(participant.id, Math.max(0, Math.round(delayMs / 1000)), {
+    bypassCallingHours: opts?.bypassCallingHours === true,
+  })
 
   if (result.success) {
     logger.info("Call placed immediately", { participantId: participant.id })

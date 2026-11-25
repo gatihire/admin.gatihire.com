@@ -17,7 +17,15 @@ async function handler(request: NextRequest) {
 
     logger.info("QStash trigger received", { participantId, body })
 
-    const result = await placeCallForParticipant(participantId, { guard: true })
+    // A candidate who picked "Call Now" gets a flag on the queued message, so
+    // their explicit request can fire outside the automatic calling window.
+    // Watchdog/outreach retries publish no flag and stay deferred at night.
+    const bypassCallingHours = body?.bypassCallingHours === true
+
+    const result = await placeCallForParticipant(participantId, {
+      guard: true,
+      bypassCallingHours,
+    })
 
     if (result.skipped) {
       logger.info("Call placement skipped", { participantId, reason: result.error })
