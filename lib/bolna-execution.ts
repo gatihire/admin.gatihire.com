@@ -1132,7 +1132,7 @@ async function enrichTranscriptAsync(
   const { data: participant } = await supabaseAdmin
     .from("phone_screening_participants")
     .select(`
-      candidate_id, job_id, ai_score, ai_recommendation, status, call_is_partial, bolna_status, call_duration_seconds, verdict_json, enriched_summary,
+      candidate_id, job_id, ai_score, ai_recommendation, status, call_is_partial, bolna_status, call_duration_seconds, call_hangup_reason, verdict_json, enriched_summary,
       candidates: candidate_id (id, name, current_role, current_company, total_experience, location, technical_skills, resume_text),
       jobs: job_id (id, title, client_name, city, location, experience_min_years, experience_max_years, salary_min, salary_max, salary_type, skills_must_have, skills_good_to_have, description)
     `)
@@ -1159,9 +1159,25 @@ async function enrichTranscriptAsync(
   // path sets this marker after applying the evidence gate, so a 6-minute call
   // that reached the cap keeps its analysis instead of being written off.
   const scoredDespiteInterruption = existingVerdict._scored_despite_interruption === true
-  const isIncompleteCall =
+  const incompleteFlag =
     !scoredDespiteInterruption &&
     !!(participant.call_is_partial || status === "failed_partial" || status === "failed")
+  // `call_is_partial` records that the call did not reach its end — the callee
+  // hung up, or the cap cut it. It does not record whether the screening
+  // produced evidence. Treating the flag alone as "unscorable" is why a 4:21
+  // call with a real conversation (72ad0cde, 25 Nov) stored a good_fit analysis
+  // and kept the 6.0 placeholder: this pass refused the score, and the recovery
+  // sweep refused it for the same reason. Use the same evidence gate the
+  // terminal handler uses, so a dead line and a callee who hung up after four
+  // minutes are not treated as the same thing.
+  const substantiveInterruption =
+    incompleteFlag &&
+    hasSubstantiveInterruptedEvidence(
+      transcript,
+      Number(participant.call_duration_seconds || 0),
+      participant.call_hangup_reason
+    )
+  const isIncompleteCall = incompleteFlag && !substantiveInterruption
   let enriched = await enrichTranscript(transcript, candidate, job, bolnaVerdict)
   if (!enriched) {
     // A silent null here is how call 2 kept a heuristic summary with no
@@ -1223,7 +1239,11 @@ async function enrichTranscriptAsync(
         ? {
             ai_score: applied.score,
             ai_recommendation: applied.recommendation,
-            verdict_json: applied.verdictJson,
+            // Mark it so a later webhook re-run does not re-apply the
+            // incomplete-call rule and wipe the score it just earned.
+            verdict_json: substantiveInterruption
+              ? { ...applied.verdictJson, _scored_despite_interruption: true }
+              : applied.verdictJson,
           }
         : {}),
       updated_at: new Date().toISOString(),
@@ -1309,11 +1329,33 @@ export async function recoverStuckScores(limit = 2): Promise<{
 
     if (enrichment && typeof enrichment === "object" && !Array.isArray(enrichment)) {
       const e = enrichment as Record<string, unknown>
+      // The flag says the call did not reach its end; it does not say there is
+      // no evidence. Re-run the evidence gate on the transcript for the handful
+      // of rows this sweep actually touches, otherwise a callee who hung up
+      // after four minutes of real answers can never be healed and keeps the
+      // placeholder forever.
+      let incomplete = isIncomplete
+      let substantive = false
+      if (incomplete) {
+        const { data: evidenceRow } = await supabaseAdmin
+          .from("phone_screening_participants")
+          .select("transcript_raw, call_duration_seconds, call_hangup_reason")
+          .eq("id", row.id)
+          .maybeSingle()
+        substantive =
+          !!evidenceRow &&
+          hasSubstantiveInterruptedEvidence(
+            String(evidenceRow.transcript_raw || ""),
+            Number(evidenceRow.call_duration_seconds || 0),
+            evidenceRow.call_hangup_reason
+          )
+        if (substantive) incomplete = false
+      }
       const applied = applyEnrichedVerdict({
         verdictJson: row.verdict_json,
         aiScore: row.ai_score,
         aiRecommendation: row.ai_recommendation,
-        isIncomplete,
+        isIncomplete: incomplete,
         overallVerdict: typeof e.overall_verdict === "string" ? e.overall_verdict : null,
         confidenceScore: e.confidence_score,
       })
@@ -1323,7 +1365,9 @@ export async function recoverStuckScores(limit = 2): Promise<{
         .update({
           ai_score: applied.score,
           ai_recommendation: applied.recommendation,
-          verdict_json: applied.verdictJson,
+          verdict_json: substantive
+            ? { ...applied.verdictJson, _scored_despite_interruption: true }
+            : applied.verdictJson,
           updated_at: new Date().toISOString(),
         })
         .eq("id", row.id)
