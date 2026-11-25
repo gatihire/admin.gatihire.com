@@ -417,7 +417,7 @@ export async function sweepJourney(opts?: {
     const stageRank: Record<string, number> = {
       needs_review: 9, info_received: 8, interested: 7, call_scheduled: 6, scheduled: 6,
       info_requested: 5, whatsapp_read: 4, whatsapp_delivered: 4, whatsapp_sent: 4,
-      pending: 3, calling: 2, "in-progress": 2, in_progress: 2, queued: 2, ringing: 2, initiated: 2,
+      pending: 1, calling: 2, "in-progress": 2, in_progress: 2, queued: 2, ringing: 2, initiated: 2,
     }
 
     for (const row of (data || []) as Row[]) {
