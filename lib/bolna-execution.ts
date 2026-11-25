@@ -1286,13 +1286,15 @@ export async function recoverStuckScores(limit = 2): Promise<{
   //
   // `failed` is included because an interrupted call that still produced a
   // real screening keeps a score (see `_scored_despite_interruption`), and that
-  // score can be the placeholder just like a completed one. Rows below the
-  // evidence threshold are skipped by the filter underneath — they carry no
-  // score to heal.
+  // score can be the placeholder just like a completed one. So are the statuses
+  // a call can leave behind — a candidate who said yes, or HR parked the row —
+  // because the score lives on the row, not on the status: 7 of the 18
+  // placeholders on 25 Nov were `interested` and no pass ever looked at them.
+  // Rows without a score are skipped by the filter underneath.
   const { data } = await supabaseAdmin
     .from("phone_screening_participants")
     .select("id, status, call_is_partial, ai_score, ai_recommendation, verdict_json, enriched_summary")
-    .in("status", ["completed", "failed"])
+    .in("status", ["completed", "failed", "interested", "not_interested", "needs_review", "needs_manual_followup"])
     .gte("call_started_at", since)
     .order("call_started_at", { ascending: false })
     .limit(500)
@@ -1359,7 +1361,45 @@ export async function recoverStuckScores(limit = 2): Promise<{
         overallVerdict: typeof e.overall_verdict === "string" ? e.overall_verdict : null,
         confidenceScore: e.confidence_score,
       })
-      if (!applied) continue
+      if (!applied) {
+        // No usable verdict and no evidence: the 6/10 on the row is a placeholder
+        // the analysis never earned. Leaving it makes HR read "further review" on
+        // a call nobody actually screened — the exact misleading default the
+        // terminal handler already removes for a thin call. Remove the number
+        // instead of guessing one.
+        if (scoreIsHeuristic(row.verdict_json)) {
+          const { error } = await supabaseAdmin
+            .from("phone_screening_participants")
+            .update({
+              ai_score: null,
+              ai_recommendation: "further_review",
+              verdict_json: {
+                ...(verdict ?? {}),
+                score: null,
+                recommendation: "further_review",
+                _insufficient_evidence: true,
+                notes:
+                  "No score given — the call did not produce enough evidence to assess this candidate.",
+              },
+              ai_summary: "Not enough conversation to assess this candidate. No score was given.",
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", row.id)
+          if (error) {
+            logger.warn("Placeholder score could not be cleared", {
+              participantId: row.id,
+              error: error.message,
+            })
+          } else {
+            fixed++
+            logger.info("Cleared placeholder score — call had no usable evidence", {
+              participantId: row.id,
+              status: row.status,
+            })
+          }
+        }
+        continue
+      }
       const { error } = await supabaseAdmin
         .from("phone_screening_participants")
         .update({
