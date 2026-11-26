@@ -3,7 +3,7 @@ import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import {
   createBolnaAgent, updateBolnaAgent, BOLNA_MASTER_PROMPT,
   BOLNA_WELCOME_MESSAGE, BOLNA_WELCOME_MESSAGE_HINGLISH, BOLNA_LISTENING,
-  BOLNA_TRANSCRIBER_KEYWORDS, type BolnaAgentLanguage,
+  BOLNA_HANGUP_PROMPT, BOLNA_TRANSCRIBER_KEYWORDS, type BolnaAgentLanguage,
 } from "@/lib/bolna"
 import { logger } from "@/lib/logger"
 
@@ -65,7 +65,10 @@ function buildAgentPayload(webhookBase: string, opts?: { agentName?: string; lan
                 voice: "Ashutosh",
                 voice_id: "ashutosh",
                 language: language === "hinglish" ? "hi" : "en",
-                speed: 1.0,
+                // 1.0 was the "speaking very slowly" complaint on 20 Nov.
+                // 1.1 is audibly more active without sounding rushed; the
+                // prompt also asks for a normal, confident pace.
+                speed: 1.1,
                 loudness: 1.0,
               },
               stream: true,
@@ -103,6 +106,16 @@ function buildAgentPayload(webhookBase: string, opts?: { agentName?: string; lan
             max_silence_repeats: BOLNA_LISTENING.max_silence_repeats,
             interruption_backoff_period: BOLNA_LISTENING.interruption_backoff_period,
             number_of_words_for_interruption: BOLNA_LISTENING.number_of_words_for_interruption,
+            // Wait out partial transcripts instead of speaking into a pause.
+            incremental_delay: BOLNA_LISTENING.incremental_delay,
+            // Let the agent end the call from the prompt once both sides have
+            // said goodbye. Without this the only endings are silence or the
+            // 6-minute cap, which is why a finished call kept running.
+            hangup_after_LLMCall: true,
+            call_cancellation_prompt: BOLNA_HANGUP_PROMPT,
+            // The goodbye must play through; if it were interruptible, a
+            // candidate's "thanks" could cancel the hangup and reopen the call.
+            interruptible_hangup_message: false,
           },
         },
       ],

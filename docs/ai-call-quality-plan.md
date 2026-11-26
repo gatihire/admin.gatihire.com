@@ -368,12 +368,13 @@ text mirrored into `docs/ai-screener-prompt.md`.
 flow. The current three-number drift is the single cheapest defect to fix and it explains a large
 part of the 2.5-minute ceiling.
 
-Recommended welcome (short, honest, still cheap to say yes to):
+Welcome (superseded by §7.6 — the live one is English-first, names Truckinzy only, and
+does not say a duration out loud):
 
 ```text
-Hello {candidate_first_name} ji, Ayush bol raha hu GatiHire se — Truckinzy ki logistics
-hiring team se. Aapke {job_title} profile ke baare mein paanch minute baat karni thi.
-Abhi theek hai?
+Hi {candidate_first_name}, this is Ayush from Truckinzy. I'm calling about your
+application — this is a first-round screening on behalf of our client. Is now a good
+time to talk?
 ```
 
 ### 4.6 Backend contract
@@ -1029,6 +1030,42 @@ off `updated_at`, so two inbound candidates sat in "No call placed" all morning.
 now routes through the same `bookSlotOrExplain` path as a "Call Now" tap, and the watchdog
 treats a WhatsApp-waiting status with no recorded send as stranded after 15 minutes instead
 of waiting for a reply that was never solicited.
+
+### 7.6 The 20–23 Nov round: speed, consent, language, and closing
+
+The 20–23 Nov feedback is the first round that post-dates the 18–19 Nov fixes, so
+every item below is still reproducible on the live agent. The 20 Nov 10:10 call
+also predates the 21 Nov 10:18 prompt push, but the 23 Nov calls do not — they
+still show the interruption and mid-answer closing.
+
+| What HR heard | Cause in code | Fix |
+|---|---|---|
+| Agent speaks too slowly | `synthesizer.provider_config.speed: 1.0` | **1.1** in `app/api/bolna/agent/route.ts` |
+| "GatiHire se Truckinzy…" and a stretched "Gati-Hire" | Welcome and `ROLE` named GatiHire; the voice stretched the word | Welcome and prompt say **Truckinzy only**; GatiHire is banned from spoken text |
+| Agent talks into a mid-sentence pause | `endpointing: 900`, no `incremental_delay` | **1100 ms** endpointing + **600 ms** incremental delay |
+| Agent talks over the first half of a real sentence | `number_of_words_for_interruption: 8` | **5** — a sentence makes it yield, "haan ji" still does not |
+| Candidate has to ask it to repeat | Slow speech plus a long, clause-heavy turn | Speed + the existing "same words, one clause shorter" repeat rule |
+| Interview starts before consent | Welcome asked "Abhi theek hai?" but the flow assumed a yes | Explicit **consent gate**: no question until a clear yes; one re-ask if unclear |
+| "Sir" / "ma'am" | Not banned anywhere | Banned in prompt; first name or no name |
+| "Do minute baat…" / duration out loud | Welcome and step 2 said "paanch minute" | Duration removed from every spoken line; internal 5-minute target stays |
+| No human touch, just question after question | Prompt only said "one question per turn" | One short natural reaction ("Right", "Got it", "That makes sense") before the next question, only where it fits |
+| Agent closes while candidate is answering | Closing was not gated on the candidate finishing | Closing only after the answer is complete; never speak over the candidate |
+| Call does not end after both said goodbye | Bolna only hung up on silence or the 360 s cap | `hangup_after_LLMCall: true` + `BOLNA_HANGUP_PROMPT` as `call_cancellation_prompt`; `interruptible_hangup_message: false` |
+| English should be tried first | Welcome was Hinglish | English-first welcome for both modes; prompt switches to Hinglish the moment the candidate does |
+
+Two supporting changes:
+
+- **`updateBolnaAgent` now uses `PUT`.** Bolna's `PATCH` accepts the request but can
+  silently ignore `tasks` / `agent_prompts`, which is how a "successful" sync left an
+  older prompt live. `PUT` replaces the configuration, so the payload must be complete —
+  `buildAgentPayload` already is.
+- **The prompt reference doc is generated from the code.** `docs/ai-screener-prompt.md`
+  is a mirror of `lib/bolna.ts`; the stale English section that still promised a JSON
+  `recommendation` / `next_round_ready` output is gone.
+
+The values live in `BOLNA_LISTENING`, `BOLNA_MASTER_PROMPT`, `BOLNA_WELCOME_MESSAGE` and
+`BOLNA_HANGUP_PROMPT` in `lib/bolna.ts`, and are imported by the provisioning route, so a
+`force:true` re-sync cannot regress them.
 
 ---
 

@@ -1,4 +1,9 @@
-# AI Screener — master prompt
+# AI Screener — master prompt (superseded)
+
+> **This file is historical.** The live prompt now lives in `lib/bolna.ts`
+> (`BOLNA_MASTER_PROMPT`, `BOLNA_WELCOME_MESSAGE`, `BOLNA_HANGUP_PROMPT`) and is
+> mirrored in [`docs/ai-screener-prompt.md`](./ai-screener-prompt.md). The
+> constants named below (`BOLNA_MASTER_PROMPT_HINGLISH`) no longer exist.
 
 The voice agent that calls candidates on WhatsApp/talent-board leads and runs the
 first-round screening call.
