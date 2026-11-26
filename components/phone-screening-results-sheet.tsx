@@ -217,6 +217,13 @@ function formatCallTime(iso: string): string {
  * then any attempt with stored evidence, and only then fall back to the first
  * tab.
  */
+function callAttemptLabel(attempt: number): string {
+  if (attempt === 1) return "1st Call"
+  if (attempt === 2) return "2nd Call"
+  if (attempt === 3) return "3rd Call"
+  return `Call ${attempt}`
+}
+
 function preferredCallIndex(results?: CallResultView[] | null): number {
   if (!results?.length) return 0
   const hasEvidence = (r: CallResultView) => Boolean(
@@ -1109,6 +1116,56 @@ export function PhoneScreeningResultsSheet({
 
             </div>
 
+            {/* At-a-glance attempt history. HR should not have to click through
+                tabs — or read the WhatsApp thread — to learn that call 1 was
+                short, call 2 was busy and call 3 produced the recording. */}
+            {callResultsView.length > 0 && (
+              <div className="px-4 pt-3">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-zinc-400 mb-2">Attempt history</p>
+                <div className="overflow-hidden rounded-xl border border-zinc-200">
+                  {callResultsView.map((cr, idx) => {
+                    const crVerd = parseVerdictObj(cr.verdict_json)
+                    const crCls = cr.classification_outcome || crVerd?._classification_outcome
+                    const crEnd = describeCallEnd({
+                      hangup_by: cr.hangup_by,
+                      call_hangup_reason: cr.call_hangup_reason,
+                      call_disconnect_reason: cr.call_disconnect_reason,
+                      verdict_json: cr.verdict_json,
+                      classification_outcome: crCls,
+                    } as any)
+                    const incomplete = crCls === "not_screened" || crCls === "interrupted" || cr.call_is_partial || cr.status === "failed_partial"
+                    const outcome = cr.no_record
+                      ? "Call placed — no detailed record retained"
+                      : cr.ai_score != null
+                        ? `Score ${Math.round(Number(cr.ai_score))} · ${crEnd.short || "Completed"}`
+                        : incomplete
+                          ? "Ended before screening finished — no score"
+                          : crEnd.short || cr.status || "Call ended"
+                    const active = idx === Math.min(selectedCallIndex, callResultsView.length - 1)
+                    return (
+                      <button
+                        key={`history-${cr.bolna_execution_id || cr.attempt}-${idx}`}
+                        type="button"
+                        onClick={() => setSelectedCallIndex(idx)}
+                        className={cn(
+                          "grid w-full grid-cols-[5.5rem_6.5rem_1fr] items-center gap-2 px-3 py-2 text-left text-[11px] border-b border-zinc-100 last:border-b-0 transition-colors",
+                          active ? "bg-zinc-900 text-white" : "bg-white hover:bg-zinc-50 text-zinc-700"
+                        )}
+                      >
+                        <span className="font-bold">{callAttemptLabel(cr.attempt)}</span>
+                        <span className={active ? "text-zinc-300" : "text-zinc-400"}>
+                          {cr.call_ended_at ? formatCallTime(cr.call_ended_at) : "No time recorded"}
+                        </span>
+                        <span className={cn("truncate", active ? "text-zinc-100" : incomplete ? "text-amber-700" : "text-zinc-600")}>
+                          {outcome}{cr.call_duration_seconds ? ` · ${formatDuration(cr.call_duration_seconds)}` : ""}
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Call results summary cards (one per attempt, up to the hard cap) */}
             {callResultsView.length > 0 && (
               <div className="px-4 pt-3">
@@ -1135,7 +1192,7 @@ export function PhoneScreeningResultsSheet({
                         )}
                       >
                         <div className="flex items-center justify-between gap-2 mb-1">
-                          <span className="text-xs font-bold text-zinc-800">{cr.attempt === 1 ? "1st Call" : cr.attempt === 2 ? "2nd Call" : cr.attempt === 3 ? "3rd Call" : `Call ${cr.attempt}`}</span>
+                          <span className="text-xs font-bold text-zinc-800">{callAttemptLabel(cr.attempt)}</span>
                           {crIncomplete ? (
                             <Badge variant="outline" className="text-[10px] bg-amber-50 text-amber-700 border-amber-200">Incomplete</Badge>
                           ) : cr.ai_score != null ? (
@@ -1159,7 +1216,7 @@ export function PhoneScreeningResultsSheet({
               <div className="px-4 pt-3 pb-1">
                 <div className="inline-flex rounded-lg border border-zinc-200 bg-zinc-50 p-0.5">
                   {callResultsView.slice(0, MAX_CALL_ATTEMPTS).map((cr, idx) => {
-                    const label = cr.attempt === 1 ? "1st Call" : cr.attempt === 2 ? "2nd Call" : cr.attempt === 3 ? "3rd Call" : `Call ${cr.attempt}`
+                    const label = callAttemptLabel(cr.attempt)
                     const active = idx === Math.min(selectedCallIndex, callResultsView.length - 1)
                     return (
                       <button

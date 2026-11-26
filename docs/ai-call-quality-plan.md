@@ -1118,7 +1118,10 @@ claimed completion:
    dedupe and classification guard was applied to `candidate_activity`.
 2. **Results sheet.** Once every dialled attempt became visible, the sheet defaulted to tab 0 —
    an empty 1st-call placeholder — while the recording and transcript sat on the 3rd-call tab.
-   It now opens on the current attempt, or the first attempt with stored evidence.
+   It now opens on the current attempt, or the first attempt with stored evidence, and shows an
+   **Attempt history** table (attempt / time / outcome) above the per-call cards. WhatsApp outcome
+   lines are prefixed with the attempt number — `Call 3: Ended before screening finished…` — so
+   the thread itself reads as a call log.
 
 The post-call "thank you for speaking with our AI recruiter" template is also skipped for
 incomplete calls; telling a candidate who hung up after 30 seconds that the screening is done

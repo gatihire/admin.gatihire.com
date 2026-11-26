@@ -786,7 +786,7 @@ export async function handleCompletedExecution(
   // Resolve job/candidate for activity logging
   const { data: participantMeta } = await supabaseAdmin
     .from("phone_screening_participants")
-    .select("candidate_id, job_id")
+    .select("candidate_id, job_id, call_attempts")
     .eq("id", participantId)
     .single()
 
@@ -916,16 +916,20 @@ export async function handleCompletedExecution(
   // what it was so HR does not go looking for a result that does not exist.
   const executionId = execution.id ? String(execution.id) : null
   const outcomeEventType = classification === "screened" ? "call_completed" : "call_ended"
-  const outcomeText =
+  const attemptNumber = Number(participantMeta?.call_attempts || 0)
+  const outcomeBase =
     classification === "screened"
       ? effectiveVerdict?.score != null
-        ? `Call completed — screening score ${Math.round(effectiveVerdict.score)}/100 is ready to review.`
-        : "Call completed — transcript and summary recorded."
+        ? `Screening completed — score ${Math.round(effectiveVerdict.score)}/100 is ready to review.`
+        : "Screening completed — transcript and summary recorded."
       : classification === "retry"
         ? "Call not answered — no screening took place."
         : classification === "voicemail"
           ? "Call reached voicemail — no screening took place."
-          : "Call ended before screening finished — no score was given. Review the transcript."
+          : "Ended before screening finished — no score was given. Review the transcript."
+  // HR reads the WhatsApp thread as the call log. Prefix the attempt so one
+  // line says "Call 3: ..." instead of five identical "Call completed" lines.
+  const outcomeText = attemptNumber > 0 ? `Call ${attemptNumber}: ${outcomeBase}` : outcomeBase
 
   if (executionId) {
     const { data: existingOutcome } = await supabaseAdmin
