@@ -47,6 +47,7 @@ interface CallResultView {
   is_current?: boolean
   /** A dialled attempt whose older row did not retain call details. */
   no_record?: boolean
+  executionId?: string | null
   bolna_execution_id?: string | null
   status?: string | null
   bolna_status?: string | null
@@ -206,6 +207,33 @@ function formatCallTime(iso: string): string {
   })
 }
 
+/**
+ * Open the sheet on the call HR actually needs to see.
+ *
+ * Attempts are listed 1st → 3rd, but older attempts often have no retained
+ * record. Defaulting to index 0 opened an empty "call was placed" placeholder
+ * while the recording and result sat on a later tab — exactly the report that
+ * a finished call had "no recording and no result". Prefer the current attempt,
+ * then any attempt with stored evidence, and only then fall back to the first
+ * tab.
+ */
+function preferredCallIndex(results?: CallResultView[] | null): number {
+  if (!results?.length) return 0
+  const hasEvidence = (r: CallResultView) => Boolean(
+    r?.recording_url ||
+    r?.transcript_raw ||
+    (r?.transcripts && r.transcripts.length) ||
+    r?.verdict_json ||
+    r?.ai_summary ||
+    r?.ai_score != null ||
+    r?.call_ended_at
+  )
+  const current = results.findIndex((r) => r?.is_current && hasEvidence(r))
+  if (current >= 0) return current
+  const evidenced = results.findIndex(hasEvidence)
+  return evidenced >= 0 ? evidenced : 0
+}
+
 function formatTimeAgo(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime()
   const mins = Math.floor(diff / 60000)
@@ -316,7 +344,7 @@ export function PhoneScreeningResultsSheet({
     if (!participantId) return
     return fetch(`/api/phone-screening/participants/${participantId}`)
       .then((res) => res.json())
-      .then((json) => { setData(json); setSelectedCallIndex(0) })
+      .then((json) => { setData(json); setSelectedCallIndex(preferredCallIndex(json?.call_results)) })
       .catch(() => setData(null))
   }, [participantId])
 

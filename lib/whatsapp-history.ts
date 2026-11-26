@@ -51,6 +51,21 @@ export async function appendWhatsappHistory(
   const history = Array.isArray(participant.whatsapp_history)
     ? [...participant.whatsapp_history]
     : []
+
+  // A terminal Bolna execution is processed by the webhook, then again by
+  // reconcile / on-view healing / manual sync. Those extra passes used to
+  // append another "Call completed" note each time, so one 30-second call
+  // showed five completion lines in the thread. Dedupe every outcome note that
+  // carries an execution id before appending.
+  const kind = String(entry.kind || "")
+  const executionId = entry.executionId ? String(entry.executionId) : null
+  if (executionId && ["call_completed", "call_ended", "post_call_message"].includes(kind)) {
+    const alreadyRecorded = history.some(
+      (h: any) => h?.executionId === executionId && String(h?.kind || "") === kind
+    )
+    if (alreadyRecorded) return true
+  }
+
   history.push(entry)
 
   // An outbound entry means we just spoke to the candidate. Stamping

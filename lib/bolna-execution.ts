@@ -909,19 +909,65 @@ export async function handleCompletedExecution(
     }
   }
 
-  // Log call completed event
-  logCandidateActivity({
-    jobId: participantMeta?.job_id || "",
-    candidateId: participantMeta?.candidate_id || "",
-    participantId,
-    eventType: "call_completed",
-    eventData: {
-      duration_sec: rawDuration ? Number(rawDuration) : null,
-      score: effectiveVerdict?.score,
-      recommendation: effectiveVerdict?.recommendation,
-      hangup_reason: execution.telephony_data?.hangup_reason,
-    },
-  })
+  // A terminal execution can be processed by the webhook, then by reconcile,
+  // an on-view heal and a manual sync. Each pass used to log another
+  // "Call completed" event, so one short call appeared to have happened five
+  // times. Also, a call that ended after a "hello" is not "completed" — call it
+  // what it was so HR does not go looking for a result that does not exist.
+  const executionId = execution.id ? String(execution.id) : null
+  const outcomeEventType = classification === "screened" ? "call_completed" : "call_ended"
+  const outcomeText =
+    classification === "screened"
+      ? effectiveVerdict?.score != null
+        ? `Call completed — screening score ${Math.round(effectiveVerdict.score)}/100 is ready to review.`
+        : "Call completed — transcript and summary recorded."
+      : classification === "retry"
+        ? "Call not answered — no screening took place."
+        : classification === "voicemail"
+          ? "Call reached voicemail — no screening took place."
+          : "Call ended before screening finished — no score was given. Review the transcript."
+
+  if (executionId) {
+    const { data: existingOutcome } = await supabaseAdmin
+      .from("candidate_activity")
+      .select("id")
+      .eq("participant_id", participantId)
+      .eq("event_type", outcomeEventType)
+      .contains("event_data", { execution_id: executionId })
+      .limit(1)
+    if (existingOutcome?.length) {
+      logger.info("Skipping duplicate call outcome activity", { participantId, executionId, outcomeEventType })
+    } else {
+      await logCandidateActivity({
+        jobId: participantMeta?.job_id || "",
+        candidateId: participantMeta?.candidate_id || "",
+        participantId,
+        eventType: outcomeEventType,
+        eventData: {
+          execution_id: executionId,
+          classification,
+          duration_sec: rawDuration ? Number(rawDuration) : null,
+          score: effectiveVerdict?.score,
+          recommendation: effectiveVerdict?.recommendation,
+          hangup_reason: hangupReason,
+        },
+      })
+    }
+  } else {
+    await logCandidateActivity({
+      jobId: participantMeta?.job_id || "",
+      candidateId: participantMeta?.candidate_id || "",
+      participantId,
+      eventType: outcomeEventType,
+      eventData: {
+        classification,
+        duration_sec: rawDuration ? Number(rawDuration) : null,
+        score: effectiveVerdict?.score,
+        recommendation: effectiveVerdict?.recommendation,
+        hangup_reason: hangupReason,
+      },
+    })
+  }
 
   // Write the terminal patch first (completed status, transcript, etc.)
   // If classified as not_screened due to minimal engagement, ensure status reflects it
@@ -959,13 +1005,14 @@ export async function handleCompletedExecution(
   if (sideEffects) {
     await appendWhatsappHistory(participantId, {
       at: now,
-      kind: "call_completed",
+      kind: outcomeEventType,
       direction: "internal",
-      text:
-        effectiveVerdict?.score != null
-          ? `Call completed — screening score ${Math.round(effectiveVerdict.score)}/100 is ready to review.`
-          : "Call completed — transcript and summary recorded.",
-      status: "completed",
+      // appendWhatsappHistory dedupes this against earlier passes on the same
+      // execution, so a re-sync no longer stacks completion lines in the thread.
+      executionId,
+      text: outcomeText,
+      status: classification === "screened" ? "completed" : "ended",
+      classification,
     })
   }
 
@@ -1034,14 +1081,25 @@ export async function handleCompletedExecution(
       logger.error("Async transcript enrichment failed", { participantId, error: err?.message })
     })
 
-    // Send post-call WhatsApp confirmation to candidate
-    sendPostCallWhatsApp(participantId, execution.id).catch((err: any) => {
+    // Send post-call WhatsApp confirmation to candidate. A 30-second call that
+    // ended before screening is not a "thank you for speaking with our AI
+    // recruiter" moment — it reads as if the process finished successfully.
+    sendPostCallWhatsApp(participantId, execution.id, classification).catch((err: any) => {
       logger.error("Async post-call WhatsApp failed", { participantId, error: err?.message })
     })
   }
 }
 
-async function sendPostCallWhatsApp(participantId: string, executionId?: string | null): Promise<void> {
+async function sendPostCallWhatsApp(
+  participantId: string,
+  executionId?: string | null,
+  classification?: string | null
+): Promise<void> {
+  if (classification && classification !== "screened") {
+    logger.info("Skipping post-call WhatsApp for incomplete call", { participantId, executionId, classification })
+    return
+  }
+
   const { data: participant } = await supabaseAdmin
     .from("phone_screening_participants")
     .select(`

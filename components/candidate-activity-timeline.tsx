@@ -31,6 +31,7 @@ const EVENT_CONFIG: Record<string, { label: string; dot: string; badge: string }
   call_attempted: { label: "AI call placed", dot: "bg-amber-500", badge: "bg-amber-100 text-amber-800" },
   call_in_progress: { label: "Call connected", dot: "bg-amber-400", badge: "bg-amber-100 text-amber-800" },
   call_completed: { label: "Call completed", dot: "bg-emerald-500", badge: "bg-emerald-100 text-emerald-800" },
+  call_ended: { label: "Call ended early", dot: "bg-amber-500", badge: "bg-amber-100 text-amber-800" },
   call_failed: { label: "Call failed", dot: "bg-red-500", badge: "bg-red-100 text-red-800" },
   call_missed: { label: "No answer", dot: "bg-orange-500", badge: "bg-orange-100 text-orange-800" },
   callback_scheduled: { label: "Callback scheduled", dot: "bg-cyan-500", badge: "bg-cyan-100 text-cyan-800" },
@@ -63,6 +64,11 @@ function describeEvent(entry: ActivityEntry): string {
       const score = d.score != null ? `Score: ${d.score}/10` : ""
       const rec = d.recommendation || ""
       return [dur, score, rec].filter(Boolean).join(", ") || "Call ended"
+    }
+    case "call_ended": {
+      const dur = d.duration_sec ? `${Math.round(Number(d.duration_sec))}s` : ""
+      const reason = d.hangup_reason ? String(d.hangup_reason).replace(/_/g, " ") : "no screening result"
+      return [dur, reason].filter(Boolean).join(" · ") || "Call ended before screening finished"
     }
     case "call_failed":
       return d.reason ? `Reason: ${d.reason}` : "Unknown"

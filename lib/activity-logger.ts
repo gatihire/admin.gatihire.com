@@ -11,6 +11,8 @@ export type EventType =
   | "call_attempted"
   | "call_in_progress"
   | "call_completed"
+  /** Provider call ended without a usable screening (short call, hangup, busy, voicemail). */
+  | "call_ended"
   | "call_failed"
   | "call_missed"
   | "callback_scheduled"

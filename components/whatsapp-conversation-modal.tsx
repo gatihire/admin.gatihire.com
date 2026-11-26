@@ -262,14 +262,16 @@ function Bubble({ item }: { item: Rendered }) {
         ? "text-blue-700 bg-blue-50 border-blue-200"
         : item.kind === "call_completed"
           ? "text-emerald-700 bg-emerald-50 border-emerald-200"
-          : item.kind === "call_booking_failed" ||
+          : item.kind === "call_ended"
+            ? "text-amber-700 bg-amber-50 border-amber-200"
+            : item.kind === "call_booking_failed" ||
               item.kind === "call_failed" ||
               item.kind === "call_missed" ||
               item.status === "failed"
             ? "text-red-700 bg-red-50 border-red-200"
             : "text-zinc-600 bg-zinc-50 border-zinc-200"
     const Icon =
-      item.kind === "call_booked" || item.kind === "call_completed"
+      item.kind === "call_booked" || item.kind === "call_completed" || item.kind === "call_ended"
         ? PhoneCall
         : item.kind === "button_tap"
           ? MousePointerClick

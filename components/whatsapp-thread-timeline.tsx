@@ -43,6 +43,7 @@ function summarise(entries: ThreadEntry[]): string {
     .find((e) =>
       [
         "call_completed",
+        "call_ended",
         "call_booking_failed",
         "call_missed",
         "call_failed",
@@ -54,6 +55,8 @@ function summarise(entries: ThreadEntry[]): string {
     switch (headline.kind) {
       case "call_completed":
         return headline.text || "Call completed"
+      case "call_ended":
+        return headline.text || "Call ended before screening finished"
       case "call_missed":
       case "call_failed":
         return headline.text || "Call didn't connect"

@@ -1101,6 +1101,43 @@ Fixes:
 The other 22 `max_retries` rows were checked with the same derivation: none now resolve to
 `awaiting_provider`.
 
+### 7.8 The 26 Nov Taralink round: "completed" with no recording or result
+
+Vishal Rohila (Sr. Operations Manager, Taralink Carrier Private Limited) had three provider
+executions: a 29-second call at 07:01, a busy at 07:13, and a 30-second call at 08:24 where
+the candidate hung up after saying "hello". The last execution has a recording and a 416-character
+transcript, and the card correctly derives `partial`, not `completed`. Two other surfaces still
+claimed completion:
+
+1. **WhatsApp thread / activity timeline.** `handleCompletedExecution()` appended a
+   `call_completed` note on every terminal pass — webhook, reconcile, on-view heal, manual sync —
+   so one 30-second call produced **five** "Call completed — transcript and summary recorded"
+   lines, two of them before the call. The note also lied for `_classification_outcome =
+   not_screened` calls. Outcome notes now carry the execution id, `appendWhatsappHistory()`
+   dedupes on it, and incomplete calls are logged as `call_ended` with honest text. The same
+   dedupe and classification guard was applied to `candidate_activity`.
+2. **Results sheet.** Once every dialled attempt became visible, the sheet defaulted to tab 0 —
+   an empty 1st-call placeholder — while the recording and transcript sat on the 3rd-call tab.
+   It now opens on the current attempt, or the first attempt with stored evidence.
+
+The post-call "thank you for speaking with our AI recruiter" template is also skipped for
+incomplete calls; telling a candidate who hung up after 30 seconds that the screening is done
+is the same false-completion signal in a different channel.
+
+Backfill: **262** older rows had the same duplicate-thread pattern (**313** extra lines). Exact
+duplicates were removed; the **98** rows whose stored verdict explicitly says `not_screened` or
+`interrupted` had their remaining note relabelled as `call_ended`. Rows without explicit
+evidence were left untouched rather than guessed at. Backup:
+`/private/var/folders/z3/6fkq8jt16y34zbxy6ty4wvmr0000gn/T/opencode/call_completed_history_backup.json`.
+
+On the "voice unclear" report: Bolna's latency data for that execution is healthy
+(time to first audio 136 ms, transcriber connect 59 ms, synthesizer connect 33 ms), and the audio
+was delivered to the carrier. The transcript shows the agent launching into a ~35-word context +
+first-question turn after a bare "hello", with no candidate response before the hangup. That is a
+listening/clarity risk even if the line itself was fine. The prompt no longer repeats the
+role/context after consent: it acknowledges briefly and goes straight to the first question,
+cutting the first answer from ~35 words to one acknowledgement plus one question.
+
 ---
 
 ## 8. Speed
@@ -1252,7 +1289,9 @@ attempt, and a question that breaks the rules is refused with a reason rather th
 | `app/api/bolna/agent/route.ts:80` | `POST {force:true}` re-syncs prompt + welcome + tuning from code |
 | `lib/bolna.ts:361` | `BOLNA_MASTER_PROMPT` — `{interview_plan}`, 2 digs, one timing number; `BOLNA_WELCOME_MESSAGE` — 5 minutes |
 | `docs/ai-screener-prompt.md` | Mirror of the live prompt; must be updated in the same commit |
-| `lib/bolna-execution.ts:960` | Evidence scorer; replace band constants at `:1004` and `:389` |
+| `lib/bolna-execution.ts:960` | Evidence scorer; terminal outcome notes are deduped by execution id and incomplete calls are logged as `call_ended` |
+| `lib/whatsapp-history.ts` | Dedupes execution-linked call outcome / post-call entries so re-syncs cannot stack "Call completed" lines |
+| `lib/activity-logger.ts` / `components/candidate-activity-timeline.tsx` | `call_ended` event for calls without a usable screening result |
 | `lib/call-truth.ts` | Single source of truth for call state; now resolves `max_retries` and unknown statuses from stored call data, and owns `MAX_TOTAL_CALL_ATTEMPTS` |
 | `lib/journey-watchdog.ts` | Calling window + retry ladder |
 | `lib/calling-hours.ts` | IST calling window (10:00–19:00, Mon–Sat), used by every automatic proactive dial; explicit HR/candidate requests bypass |
