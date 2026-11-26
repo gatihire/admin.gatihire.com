@@ -1183,6 +1183,15 @@ the trigger endpoint and report the result. `/call-now`, `/trigger`, `/send-mess
 all write the action note; `/trigger` also reports an `actions[]` array with `actedAt` so the
 calling UI can show per-candidate outcomes even in a bulk request.
 
+Post-deploy smoke test on `dpl_ArjC6462JUzZR8zqhWnJjdej3iXs` at 18:24 UTC: an unauthenticated
+`POST /api/phone-screening/call-now` for Rohit's `037c5cd2…` row returned **401** with
+`{"error":"Session expired — please log in again","code":"SESSION_EXPIRED"}`. The
+`already_calling` 409 branch was not re-fired: Rohit's sibling execution had already completed by
+then, and the deployed admin password is stale, so an authenticated call would have risked a real
+dial. It remains covered by the original 502 log (`wt5jt-1795695657371-3a015dd38f62`) and the
+shared `placeCallImmediately()` guard, which now wraps that refusal in a 409 with
+`reason` and `liveParticipantId`.
+
 ---
 
 ## 8. Speed
