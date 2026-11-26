@@ -297,6 +297,9 @@ export interface PlaceCallResult {
   error?: string
   /** When `reason` is `outside_calling_hours`, the instant the call now fires. */
   scheduledFor?: string
+  /** The other screening row that owns the live call, when `reason` is
+   *  `already_calling`. Lets HR open the real result instead of retrying blindly. */
+  liveParticipantId?: string
   /** Machine-readable cause when nothing was placed, so callers can tell an
    *  exhausted budget apart from a duplicate dial or a provider rejection. */
   reason?:
@@ -551,7 +554,8 @@ export async function placeCallForParticipant(
         success: false,
         skipped: true,
         reason: "already_calling",
-        error: "A call for this candidate is already in progress on another screening row",
+        liveParticipantId: liveSibling.id,
+        error: "A call for this candidate is already in progress on another screening row. Open that call's result instead of dialling again.",
       }
     }
   }

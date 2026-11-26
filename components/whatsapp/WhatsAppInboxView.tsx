@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { useToast } from "@/hooks/use-toast"
 import { ToastAction } from "@/components/ui/toast"
+import { actionToast, failureToast, readHrActionResponse, type HrActionResult } from "@/lib/client/hr-action-feedback"
 import { supabase } from "@/lib/supabase"
 import { WhatsAppConversationModal } from "@/components/whatsapp-conversation-modal"
 
@@ -224,7 +225,7 @@ export function WhatsAppInboxView() {
       try {
         await fn()
       } catch (e: any) {
-        toast({ title: "Action failed", description: e?.message || "Please try again.", variant: "destructive" })
+        toast(failureToast(e, "Action failed"))
       } finally {
         setPending((prev) => {
           const next = new Set(prev)
@@ -250,11 +251,8 @@ export function WhatsAppInboxView() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: nudgeText(t) }),
       })
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}))
-        throw new Error(j?.error || `Send failed (${res.status})`)
-      }
-      toast({ title: "Message sent", description: `WhatsApp message sent to ${t.candidateName}.` })
+      const j = await readHrActionResponse<any>(res, `Send failed (${res.status})`)
+      toast(actionToast("nudge", j?.action as HrActionResult | undefined, `WhatsApp message sent to ${t.candidateName}.`))
       await refreshOnScreen()
     })
 
@@ -266,16 +264,14 @@ export function WhatsAppInboxView() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ participantId: t.participantId }),
       })
-      const j = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(j?.error || `Call failed (${res.status})`)
-      toast({
-        title: j?.callPlaced === false ? "Call not placed" : "Calling now",
-        description:
-          j?.callPlaced === false
-            ? j?.error || j?.reason || "The provider did not accept the call."
-            : `Placing a call to ${t.candidateName}.`,
-        variant: j?.callPlaced === false ? "destructive" : undefined,
-      })
+      const j = await readHrActionResponse<any>(res, `Call failed (${res.status})`)
+      toast(actionToast(
+        "call",
+        j?.action as HrActionResult | undefined,
+        j?.callPlaced === false
+          ? j?.error || j?.reason || "The provider did not accept the call."
+          : `Placing a call to ${t.candidateName}.`
+      ))
       await refreshOnScreen()
     })
 

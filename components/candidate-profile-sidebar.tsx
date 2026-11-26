@@ -14,6 +14,7 @@ import {
   Maximize2, Minimize2, CheckCircle, AlertTriangle, ArrowRight, MessageCircle,
 } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
+import { actionToast, failureToast, readHrActionResponse, type HrActionResult } from "@/lib/client/hr-action-feedback"
 import { CandidateActivityTimeline } from "./candidate-activity-timeline"
 import { createPreviewUrl } from "@/lib/file-preview-utils"
 
@@ -191,6 +192,7 @@ export function CandidateProfileSidebar({
   const [reasonExpanded, setReasonExpanded] = useState(false)
   const [callBusy, setCallBusy] = useState(false)
   const [nudgeBusy, setNudgeBusy] = useState(false)
+  const [triggerBusy, setTriggerBusy] = useState(false)
   // A candidate can be reachable on WhatsApp with no number on file (the CV had
   // none). Without an edit here the nudge simply failed forever and the only
   // advice we could give was "the number is missing".
@@ -241,24 +243,16 @@ export function CandidateProfileSidebar({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ participantId: participant.id }),
       })
-      const json = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(json?.error || "Could not place the call")
-      if (json?.callPlaced === false) {
-        toast({
-          title: "Call not placed",
-          description: json?.error || json?.reason || "The provider did not accept the call.",
-          variant: "destructive",
-        })
-        return
-      }
-      toast({
-        title: "Call placed",
-        description: json?.executionId
-          ? `Calling ${c?.name || "the candidate"} now.`
-          : `Calling ${c?.name || "the candidate"} now.`,
-      })
+      const json = await readHrActionResponse<any>(res, "Could not place the call")
+      toast(actionToast(
+        "call",
+        json?.action as HrActionResult | undefined,
+        json?.callPlaced === false
+          ? json?.error || json?.reason || "The provider did not accept the call."
+          : `Calling ${c?.name || "the candidate"} now.`
+      ))
     } catch (e: any) {
-      toast({ title: "Call not placed", description: e?.message || "Something went wrong", variant: "destructive" })
+      toast(failureToast(e, "Call not placed"))
     } finally {
       setCallBusy(false)
     }
@@ -281,13 +275,50 @@ export function CandidateProfileSidebar({
           text: `Hi ${first}, following up on your application for ${role}. Do you have a few minutes to chat?`,
         }),
       })
-      const json = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(json?.error || "Could not send the message")
-      toast({ title: "Nudge sent", description: `WhatsApp message sent to ${c?.name || "the candidate"}.` })
+      const json = await readHrActionResponse<any>(res, "Could not send the message")
+      toast(actionToast("nudge", json?.action as HrActionResult | undefined, `WhatsApp message sent to ${c?.name || "the candidate"}.`))
     } catch (e: any) {
-      toast({ title: "Nudge failed", description: e?.message || "Something went wrong", variant: "destructive" })
+      toast(failureToast(e, "Nudge failed"))
     } finally {
       setNudgeBusy(false)
+    }
+  }
+
+  /**
+   * A profile with no participant row used to show "Start AI Call" / "WhatsApp
+   * Nudge" buttons with no onClick — HR clicked them and genuinely nothing
+   * happened. Create the row through the same trigger the card uses.
+   */
+  const startScreeningFromTrigger = async (mode: "call_now" | "collect_info_first") => {
+    const candidateId = c?.id || rawCandidate?.id
+    if (!jobId || !candidateId) {
+      toast({ title: "No job context", description: "Open this candidate from a job to start screening.", variant: "destructive" })
+      return
+    }
+    setTriggerBusy(true)
+    try {
+      const res = await fetch("/api/phone-screening/trigger", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jobId,
+          candidateIds: [candidateId],
+          origin: (application as any)?.origin || "outbound",
+          createApplication: true,
+          callMode: mode,
+          campaignConfig: { nudgeHours: 4, escalateHours: 8, maxCallAttempts: 2 },
+        }),
+      })
+      const data = await readHrActionResponse<any>(res, "Could not start screening")
+      toast(actionToast(
+        mode === "call_now" ? "call" : "nudge",
+        (data.actions || [])[0] as HrActionResult | undefined,
+        mode === "call_now" ? "Call requested" : "Nudge requested"
+      ))
+    } catch (e: any) {
+      toast(failureToast(e, "Could not start screening"))
+    } finally {
+      setTriggerBusy(false)
     }
   }
 
@@ -1064,10 +1095,18 @@ export function CandidateProfileSidebar({
                   <p className="text-sm font-semibold">No AI context yet</p>
                   <p className="text-xs mt-1 mb-4">Start a screening call to generate questions</p>
                   <div className="flex items-center justify-center gap-2">
-                    <button className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 transition-colors">
-                      <Phone className="h-3.5 w-3.5" /> Start AI Call
+                    <button
+                      disabled={triggerBusy}
+                      onClick={() => startScreeningFromTrigger("call_now")}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 transition-colors disabled:opacity-50"
+                    >
+                      <Phone className="h-3.5 w-3.5" /> {triggerBusy ? "Starting…" : "Start AI Call"}
                     </button>
-                    <button className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 transition-colors">
+                    <button
+                      disabled={triggerBusy}
+                      onClick={() => startScreeningFromTrigger("collect_info_first")}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-zinc-700 bg-white border border-zinc-200 hover:bg-zinc-50 transition-colors disabled:opacity-50"
+                    >
                       <Mail className="h-3.5 w-3.5" /> WhatsApp Nudge
                     </button>
                   </div>

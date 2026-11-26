@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
 import dynamic from "next/dynamic"
+import { failureToast, HrActionError } from "@/lib/client/hr-action-feedback"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
@@ -185,7 +186,7 @@ async function api(path: string, init?: RequestInit): Promise<any> {
     headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
   })
   const json = await res.json().catch(() => null)
-  if (!res.ok) throw new Error(json?.error || json?.message || "Action failed")
+  if (!res.ok) throw new HrActionError(res.status, json, "Action failed")
   return json
 }
 
@@ -841,7 +842,7 @@ export function TodayView({ canViewTeam, defaultScope }: { canViewTeam: boolean;
       try {
         await fn()
       } catch (e: any) {
-        toast({ title: "Action failed", description: e?.message || "Something went wrong", variant: "destructive" })
+        toast(failureToast(e, "Action failed"))
       } finally {
         setPending((p) => {
           const n = new Set(p)

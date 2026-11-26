@@ -5,6 +5,7 @@ import { logger } from "@/lib/logger"
 import { sendSessionMessage } from "@/lib/info-collector-v2/sender"
 import { getWhatsAppService } from "@/lib/whatsapp"
 import { appendWhatsappHistory } from "@/lib/whatsapp-history"
+import { recordHrAction } from "@/lib/hr-action-history"
 import { logCandidateActivity } from "@/lib/activity-logger"
 import { toDial } from "@/lib/phone"
 
@@ -131,7 +132,9 @@ async function sendTemplateNudge(args: {
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const ctx = await getInternalAuthContext(request)
-    if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    if (!ctx) {
+      return NextResponse.json({ error: "Session expired — please log in again", code: "SESSION_EXPIRED" }, { status: 401 })
+    }
     if (!hasPermission(ctx, "applications.manage") && !hasPermission(ctx, "outreach.send")) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     }
@@ -210,8 +213,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // believing they told a candidate something they never did. The body is
     // what actually went out (the rendered template outside the window), not
     // the text HR typed.
+    const messageAt = new Date().toISOString()
+    const hrAction = await recordHrAction(participant.id, {
+      action: "manual_message",
+      status: outcome.success ? "sent" : "failed",
+      actor: ctx.authUser?.email || ctx.authUser?.id || null,
+      at: messageAt,
+      detail: outcome.success ? undefined : outcome.error || "WhatsApp delivery failed",
+    })
     await appendWhatsappHistory(participant.id, {
-      at: new Date().toISOString(),
+      at: messageAt,
       kind: "hr_manual_message",
       direction: "out",
       text: deliveredText,
@@ -241,6 +252,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           suggestion: via === "session"
             ? "The candidate has not replied in 24 hours; a template is required."
             : "The approved WhatsApp template could not be delivered.",
+          action: hrAction,
         },
         { status: 502 }
       )
@@ -277,6 +289,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       messageId: outcome.messageId ?? null,
       via,
       template,
+      action: hrAction,
     })
   } catch (error: any) {
     logger.error("HR manual message error", { error: error?.message })

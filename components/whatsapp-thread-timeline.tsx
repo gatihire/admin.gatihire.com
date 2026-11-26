@@ -1,7 +1,7 @@
 "use client"
 
 import { useState } from "react"
-import { MessageCircle, MousePointerClick, PhoneCall, XCircle } from "lucide-react"
+import { AlertCircle, Clock, MessageCircle, MousePointerClick, PhoneCall, Send, XCircle } from "lucide-react"
 import type { ThreadEntry } from "@/lib/whatsapp-thread-shared"
 import { describeTemplate, entryTime, friendlyCallFailure } from "@/lib/whatsapp-thread-shared"
 import { WhatsAppConversationModal } from "./whatsapp-conversation-modal"
@@ -49,6 +49,7 @@ function summarise(entries: ThreadEntry[]): string {
         "call_failed",
         "call_booked",
         "button_tap",
+        "hr_action",
       ].includes(String(e.kind || ""))
     )
   if (headline) {
@@ -68,6 +69,8 @@ function summarise(entries: ThreadEntry[]): string {
         return "Call booked"
       case "button_tap":
         return `Tapped “${headline.buttonTitle || headline.buttonId || "a button"}”`
+      case "hr_action":
+        return String(headline.text || "HR action recorded")
     }
   }
   const lastOutbound = [...entries].reverse().find((e) => e.template || e.text)
@@ -108,6 +111,11 @@ export function WhatsAppThreadTimeline({
   const taps = entries.filter((e) => e.kind === "button_tap").length
   const calls = entries.filter((e) => e.kind === "call_booked").length
   const failures = entries.filter((e) => ["call_booking_failed", "call_missed", "call_failed"].includes(String(e.kind))).length
+  // The newest HR action stays visible on the card — HR must not have to open
+  // the thread to check whether their nudge/call click did anything.
+  const latestHrAction = entries
+    .filter((e) => String(e.kind || "") === "hr_action")
+    .sort((a, b) => (entryTime(b)?.getTime() || 0) - (entryTime(a)?.getTime() || 0))[0]
 
   return (
     <>
@@ -153,6 +161,28 @@ export function WhatsAppThreadTimeline({
           {last && <span className="tabular-nums">{fmt(last.toISOString())}</span>}
         </span>
       </button>
+
+      {latestHrAction && (
+        <div
+          className={`mt-1 flex items-center gap-1.5 rounded-md border px-2 py-1 text-[10px] ${
+            latestHrAction.status === "failed"
+              ? "border-red-200 bg-red-50 text-red-700"
+              : latestHrAction.status === "deferred"
+                ? "border-amber-200 bg-amber-50 text-amber-800"
+                : "border-zinc-200 bg-white text-zinc-600"
+          }`}
+          title={String(latestHrAction.text || "")}
+        >
+          {latestHrAction.status === "failed" ? (
+            <AlertCircle className="h-3 w-3 shrink-0" />
+          ) : latestHrAction.status === "deferred" ? (
+            <Clock className="h-3 w-3 shrink-0" />
+          ) : (
+            <Send className="h-3 w-3 shrink-0" />
+          )}
+          <span className="truncate">{String(latestHrAction.text || "HR action recorded")}</span>
+        </div>
+      )}
 
       {open && (
         <WhatsAppConversationModal

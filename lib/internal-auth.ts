@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js"
+import { cookies } from "next/headers"
 import type { NextRequest } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import {
@@ -27,6 +28,94 @@ export type InternalAuthContext = {
 }
 
 const AUTH_TIMEOUT_MS = 8000
+
+/**
+ * Supabase rotates refresh tokens. When an expired access token is used by
+ * several parallel requests, every request used to refresh with the same old
+ * token: the first rotation succeeded and the rest got 401, which made HR see
+ * "nothing happened" on nudge/call buttons. Collapse concurrent refreshes for
+ * the same token into one flight.
+ */
+const refreshFlights = new Map<string, Promise<any>>()
+type RotatedSession = { access_token: string; refresh_token: string; expires_in: number }
+// A request that started before the cookie was updated can arrive a moment after
+// the rotation. Supabase rejects reuse of the old refresh token, so remember the
+// successful rotation for a short window and reuse it for those stragglers.
+const recentRotations = new Map<string, { session: RotatedSession; at: number }>()
+const ROTATION_REMEMBER_MS = 120_000
+
+function rotationKey(refreshToken: string) {
+  return refreshToken.slice(0, 64)
+}
+
+export function getRecentRotation(refreshToken: string): RotatedSession | null {
+  const key = rotationKey(refreshToken)
+  const hit = recentRotations.get(key)
+  if (!hit) return null
+  if (Date.now() - hit.at > ROTATION_REMEMBER_MS) {
+    recentRotations.delete(key)
+    return null
+  }
+  return hit.session
+}
+
+function refreshSessionOnce(refreshClient: any, refreshToken: string) {
+  const key = rotationKey(refreshToken)
+  const existing = refreshFlights.get(key)
+  if (existing) return existing
+  const flight = withTimeout(
+    refreshClient.auth.refreshSession({ refresh_token: refreshToken }),
+    AUTH_TIMEOUT_MS,
+    "supabase.auth.refreshSession",
+  )
+    .then((result: any) => {
+      const session = result?.data?.session
+      if (session?.access_token && session?.refresh_token) {
+        recentRotations.set(key, {
+          session: {
+            access_token: session.access_token,
+            refresh_token: session.refresh_token,
+            expires_in: session.expires_in || 3600,
+          },
+          at: Date.now(),
+        })
+      }
+      return result
+    })
+    .finally(() => {
+      refreshFlights.delete(key)
+    })
+  refreshFlights.set(key, flight)
+  return flight
+}
+
+/** Write rotated tokens back on every route response, not just a few handlers. */
+async function persistRefreshedSession(session: {
+  access_token: string
+  refresh_token: string
+  expires_in: number
+}) {
+  try {
+    const store = await cookies()
+    const common = {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict" as const,
+      path: "/",
+    }
+    store.set("sb-access-token", session.access_token, {
+      ...common,
+      maxAge: session.expires_in,
+    })
+    store.set("sb-refresh-token", session.refresh_token, {
+      ...common,
+      maxAge: 60 * 60 * 24 * 30,
+    })
+  } catch {
+    // Called outside a Route Handler: callers that own a response can still
+    // persist ctx.refreshedSession themselves.
+  }
+}
 
 function getAccessTokenFromRequest(request: NextRequest) {
   const cookieToken = request.cookies.get("sb-access-token")?.value
@@ -94,24 +183,25 @@ export async function getInternalAuthContext(request: NextRequest): Promise<Inte
     const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
     if (refreshToken && supabaseUrl && supabaseAnonKey) {
       try {
-        const refreshClient = createClient(supabaseUrl, supabaseAnonKey, {
-          auth: { persistSession: false, autoRefreshToken: false },
-          global: { fetch: supabaseFetch },
-        })
-        const refreshed = await withTimeout(
-          refreshClient.auth.refreshSession({ refresh_token: refreshToken }),
-          AUTH_TIMEOUT_MS,
-          "supabase.auth.refreshSession",
-        )
-        const session = (refreshed as any)?.data?.session
-        const refreshError = (refreshed as any)?.error
-        if (refreshError && isUnavailableError(refreshError)) unavailable = true
+        const cachedSession = getRecentRotation(refreshToken)
+        let session: RotatedSession | null = cachedSession
+        if (!session) {
+          const refreshClient = createClient(supabaseUrl, supabaseAnonKey, {
+            auth: { persistSession: false, autoRefreshToken: false },
+            global: { fetch: supabaseFetch },
+          })
+          const refreshed = await refreshSessionOnce(refreshClient, refreshToken)
+          session = (refreshed as any)?.data?.session
+          const refreshError = (refreshed as any)?.error
+          if (refreshError && isUnavailableError(refreshError)) unavailable = true
+        }
         if (session?.access_token && session?.refresh_token) {
           refreshedSession = {
             access_token: session.access_token,
             refresh_token: session.refresh_token,
             expires_in: session.expires_in || 3600,
           }
+          await persistRefreshedSession(refreshedSession)
           accessToken = session.access_token
           authResult = await getUserWithTimeout(accessToken)
           user = authResult.data?.user

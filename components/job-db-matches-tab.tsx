@@ -15,6 +15,7 @@ import {
   MessageCircle, ClipboardCheck, Archive, BrainCircuit, Filter,
 } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
+import { failureToast, HrActionError, readHrActionResponse } from "@/lib/client/hr-action-feedback"
 import { Input } from "@/components/ui/input"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
@@ -481,12 +482,11 @@ export function DbMatchesTab({ jobId, onViewProfile, onCandidateAdded }: DbMatch
           campaignConfig: { nudgeHours: 4, escalateHours: 8, maxCallAttempts: 2 },
         }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || "Outreach failed")
+      const data = await readHrActionResponse<any>(res, "Outreach failed")
 
       const errors = [...(Array.isArray(data.errors) ? data.errors : []), ...(Array.isArray(data.renudgeErrors) ? data.renudgeErrors : [])]
       if (errors.length > 0 && (data.nudgeSent || 0) === 0 && (data.callsTriggered || 0) === 0 && (data.deferredOutsideHours || 0) === 0) {
-        throw new Error(String(errors[0]))
+        throw new HrActionError(res.status, { error: String(errors[0]) }, "Outreach failed")
       }
 
       const nudges = data.nudgeSent ?? 0
@@ -507,7 +507,7 @@ export function DbMatchesTab({ jobId, onViewProfile, onCandidateAdded }: DbMatch
       onCandidateAdded()
     } catch (err: any) {
       console.error("Outreach failed:", err)
-      toast({ title: "Outreach failed", description: err.message, variant: "destructive" })
+      toast(failureToast(err, "Outreach failed"))
     } finally {
       setOutreachBusy(false)
     }

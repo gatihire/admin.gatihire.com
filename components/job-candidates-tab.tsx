@@ -52,6 +52,13 @@ import {
 import { formatDistanceToNow } from "date-fns"
 import { invalidateSessionCache } from "@/lib/utils"
 import { useToast } from "@/hooks/use-toast"
+import {
+  HrActionError,
+  actionToast,
+  failureToast,
+  readHrActionResponse,
+  type HrActionResult,
+} from "@/lib/client/hr-action-feedback"
 import { motion, AnimatePresence } from "framer-motion"
 
 interface CandidateData {
@@ -1249,15 +1256,14 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
           },
         }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || "Failed to start screening")
+      const data = await readHrActionResponse<any>(res, "Failed to start screening")
       const errors = [...(Array.isArray(data.errors) ? data.errors : []), ...(Array.isArray(data.renudgeErrors) ? data.renudgeErrors : [])]
       const renudgeError = errors.length > 0 ? String(errors[0]) : ""
       // A re-nudge that sent nothing is a failure, even though the endpoint
       // answers 200. Reporting "0 calls placed (N updated existing)" sent HR
       // looking for a UI bug instead of the real reason (attempt cap, no phone…).
       if (renudgeError && (data.callsTriggered || 0) === 0 && (data.nudgeSent || 0) === 0 && (data.deferredOutsideHours || 0) === 0) {
-        throw new Error(renudgeError)
+        throw new HrActionError(res.status, { error: renudgeError }, "Failed to start screening")
       }
       const triggered = data.callsTriggered || 0
       const failed = data.callsFailed || 0
@@ -1287,7 +1293,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
       setSelectedIds(new Set()); setConfirmCallsOpen(false)
       invalidateSessionCache(`internal:applications:job:${jobId}`); onRefresh(); fetchParticipants()
     } catch (err: any) {
-      toast({ title: "Failed to start calls", description: err.message, variant: "destructive" })
+      toast(failureToast(err, "Failed to start calls"))
     } finally { setCallingStarted(false) }
   }
 
@@ -1300,21 +1306,17 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ participantId }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || "Failed to place call")
+      const data = await readHrActionResponse<any>(res, "Failed to place call")
+      // A stale session is a 401 from the route, not a provider problem. The
+      // typed error makes the toast say "Session expired — log in again".
       if (data.callPlaced === false) {
-        toast({ title: "No call was placed", description: "The provider did not accept the call. Use Verify to check the provider status.", variant: "destructive" })
+        toast(actionToast("call", data.action as HrActionResult | undefined, data.error || data.reason || "The provider did not accept the call."))
       } else {
-        toast({
-          title: "Call accepted by the provider",
-          description: data.executionId
-            ? `Execution ${String(data.executionId).slice(0, 12)}… — awaiting the outcome`
-            : "Placed — awaiting the outcome",
-        })
+        toast(actionToast("call", data.action as HrActionResult | undefined, "Call placed — awaiting the outcome"))
       }
       fetchParticipants(); onRefresh()
     } catch (err: any) {
-      toast({ title: "Call was not placed", description: err.message, variant: "destructive" })
+      toast(failureToast(err, "Call was not placed"))
     } finally { setCallNowCandidate(null) }
   }
 
@@ -1351,36 +1353,29 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
           campaignConfig: { nudgeHours: 4, escalateHours: 8, maxCallAttempts: 2 },
         }),
       })
-      const data = await res.json()
-      if (!res.ok) {
-        if (data?.code === "NO_PHONE") {
-          const names: string[] = data?.skippedNoPhone || []
-          toast({
-            title: "No phone number",
-            description:
-              (data.error || "This candidate has no phone number on file.") +
-              (names.length ? "" : " Add one in the candidate profile, then try again."),
-            variant: "destructive",
-          })
-          return
-        }
-        const errors = [...(Array.isArray(data.errors) ? data.errors : []), ...(Array.isArray(data.renudgeErrors) ? data.renudgeErrors : [])]
-        if (errors.length > 0 && (data.nudgeSent || 0) === 0 && (data.callsTriggered || 0) === 0) {
-          throw new Error(String(errors[0]))
-        }
-        throw new Error(data.error || "Failed to send WhatsApp")
+      const data = await readHrActionResponse<any>(res, "Failed to send WhatsApp")
+      const errors = [...(Array.isArray(data.errors) ? data.errors : []), ...(Array.isArray(data.renudgeErrors) ? data.renudgeErrors : [])]
+      if (errors.length > 0 && (data.nudgeSent || 0) === 0 && (data.callsTriggered || 0) === 0) {
+        throw new HrActionError(res.status, { error: String(errors[0]) }, "Failed to send WhatsApp")
       }
-      toast({
-        title: "WhatsApp sent",
-        description:
-          origin === "inbound"
-            ? "The candidate has been asked for their details."
-            : "The candidate has been nudged to respond.",
-      })
+      // Show the server-written note: it carries the exact IST time and result,
+      // so HR sees "Nudged at 26 Nov, 5:42 PM IST — sent" rather than a bare success.
+      toast(actionToast("nudge", (data.actions || [])[0] as HrActionResult | undefined, "WhatsApp nudge sent"))
       fetchParticipants()
       onRefresh()
     } catch (err: any) {
-      toast({ title: "WhatsApp was not sent", description: err.message, variant: "destructive" })
+      if (err instanceof HrActionError && err.data?.code === "NO_PHONE") {
+        const names: string[] = Array.isArray(err.data.skippedNoPhone) ? err.data.skippedNoPhone : []
+        toast({
+          title: "No phone number",
+          description:
+            (err.data.error || "This candidate has no phone number on file.") +
+            (names.length ? "" : " Add one in the candidate profile, then try again."),
+          variant: "destructive",
+        })
+        return
+      }
+      toast(failureToast(err, "WhatsApp was not sent"))
     } finally {
       setNudgeBusyCandidate(null)
     }
@@ -2310,8 +2305,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
           campaignConfig: { nudgeHours: 4, escalateHours: 8, maxCallAttempts: 2 },
         }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || "Failed to start screening")
+      const data = await readHrActionResponse<any>(res, "Failed to start screening")
       // The trigger reports per-candidate failures in `errors`/`renudgeErrors`
       // (e.g. "RENU RANA: shortlist message failed (pre-screen returned needs_review)").
       // Before this, those failures were dropped on the floor and HR saw
@@ -2326,19 +2320,21 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
       const skipped = Array.isArray(data.skippedNoPhone) ? data.skippedNoPhone : []
       if (sent === 0 && (errs.length > 0 || skipped.length > 0)) {
         const detail = (errs.length ? errs.join(" · ") : `No phone for ${skipped.join(", ")}`).slice(0, 400)
-        throw new Error(detail)
+        throw new HrActionError(res.status, { error: detail }, "Failed to start screening")
       }
-      // Partial success: at least one candidate failed — tell HR, don't hide it.
+      // The server note includes IST date/time and the actual result. A partial
+      // failure is appended so one candidate's problem is never hidden behind a
+      // successful send.
+      const result = (data.actions || [])[0] as HrActionResult | undefined
+      const base = actionToast(mode === "call_now" ? "call" : "nudge", result, mode === "call_now" ? "AI call started" : "Info request sent")
       const partial = errs.length > 0 ? errs.join(" · ").slice(0, 200) : null
-      const title = mode === "call_now" ? "AI call started" : "Info request sent"
-      const desc = mode === "call_now"
-        ? `Direct call triggered for ${c.name}`
-        : partial
-          ? `Message sent to ${c.name}, but: ${partial}`
-          : `WhatsApp info request sent to ${c.name}`
-      toast({ title, description: desc, variant: partial ? "default" : undefined })
+      toast({
+        ...base,
+        description: partial ? `${base.description} · Note: ${partial}` : base.description,
+      })
       onApplicationUpdated({ ...application, status: "ai_screen" })
-    } catch (err: any) { toast({ title: "Failed", description: err.message, variant: "destructive" }) }
+      onRefreshParticipants?.()
+    } catch (err: any) { toast(failureToast(err, "Nudge/Call failed")) }
     finally { onNudgeEnd?.() }
   }
 

@@ -1145,6 +1145,44 @@ listening/clarity risk even if the line itself was fine. The prompt no longer re
 role/context after consent: it acknowledges briefly and goes straight to the first question,
 cutting the first answer from ~35 words to one acknowledgement plus one question.
 
+### 7.9 The 26 Nov HR round: nudge/call clicks that looked like nothing happened
+
+HR reported that around 17:00–18:00 IST they could not nudge or call candidates, and that the
+nudge button gave no usable feedback. Rohit Poddar (Bhadreswar, `+917980862820`), Customer
+Relationship Manager for Interstate Oil Carrier Limited, was the concrete case. Request and
+runtime logs for 10:00–13:30 UTC confirm **three separate causes**, not one:
+
+1. **Session rotation storm.** After the 11:26 UTC login, `/api/phone-screening/trigger`,
+   `/participants` and `/provider-health` returned **401** in clusters at 11:42–11:43 UTC and
+   roughly hourly afterwards. Supabase rotates refresh tokens; only a few route handlers wrote
+   the rotated cookies back, and parallel requests each refreshed with the same stale token —
+   the first succeeded, the rest were rejected as reuse. HR saw "Failed" (or nothing) on actions
+   that never reached the provider. `getInternalAuthContext()` now single-flights refreshes,
+   remembers a successful rotation for 120 s for late requests holding the old cookie, and writes
+   rotated cookies on **every** authenticated route response. A 401 is now explicitly
+   "Session expired — please log in again" on every HR action toast.
+2. **Duplicate screening rows / live-call guard.** Rohit had two participant rows for the same
+   job: `037c5cd2…` (`call_now`) and `cd86be00…` (`quick_screen`). An HR trigger at 12:20:21 UTC
+   placed Bolna execution `e02ab9ca…` on the second row. A "Call Now" click 36 seconds later on
+   the first row was correctly refused by the one-candidate-one-phone guard, but returned a bare
+   **502** at 12:20:57 UTC (`wt5jt-1795695657371-3a015dd38f62`) with no explanation. It now
+   returns **409** with `reason: "already_calling"` and `liveParticipantId`, and the toast tells
+   HR to open that call's result rather than dial again. 212 candidate+job groups in the first
+   1,000 participants still have duplicate rows; the guard is doing its job.
+3. **No durable UI record of an HR action.** The trigger answered 200 with counts, and every
+   toast disappeared. No nudge-like history entry had been written since 24 Nov. Every HR
+   nudge/call/retry/manual message now appends an internal, timestamped `hr_action` note to the
+   candidate's thread — success or failure, with the honest result and provider execution id
+   when available. The card shows the newest line at a glance; the full conversation shows all
+   of them. Toast copy is generated from that same stored note, so what HR sees matches the
+   record: `HR nudge at 26 Nov, 5:42 PM IST — sent`.
+
+Also fixed in the same pass: the profile sidebar's "Start AI Call" / "WhatsApp Nudge" buttons in
+the no-participant empty state had no `onClick` at all; they now create the participant through
+the trigger endpoint and report the result. `/call-now`, `/trigger`, `/send-message` and `/retry`
+all write the action note; `/trigger` also reports an `actions[]` array with `actedAt` so the
+calling UI can show per-candidate outcomes even in a bulk request.
+
 ---
 
 ## 8. Speed

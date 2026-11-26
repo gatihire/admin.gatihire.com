@@ -4,6 +4,7 @@ import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { logger } from "@/lib/logger"
 import { placeCallImmediately, MAX_TOTAL_CALL_ATTEMPTS, markRecruiterApproval } from "@/lib/scheduled-call"
 import { logCandidateActivity } from "@/lib/activity-logger"
+import { recordHrAction } from "@/lib/hr-action-history"
 
 export const runtime = "nodejs"
 
@@ -15,7 +16,9 @@ const RETRYABLE_STATUSES = ["failed", "unreachable", "failed_partial"]
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const ctx = await getInternalAuthContext(request)
-    if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    if (!ctx) {
+      return NextResponse.json({ error: "Session expired — please log in again", code: "SESSION_EXPIRED" }, { status: 401 })
+    }
     if (!hasPermission(ctx, "applications.manage") && !hasPermission(ctx, "outreach.send")) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     }
@@ -132,27 +135,36 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // a blank CTC and notice period.
     // HR pressed Retry: a manual push, not a sweep. It can happen at any hour
     // while the attempt cap and live-call guard remain in force.
+    const actor = ctx.authUser?.email || ctx.authUser?.id || null
     const result = await placeCallImmediately(participant.id, { bypassCallingHours: true })
 
     if (!result.success) {
+      const error = result.error || "Failed to place retry call"
+      const action = await recordHrAction(participant.id, {
+        action: "retry_call",
+        status: "failed",
+        actor,
+        detail: error,
+      })
       if (result.reason === "attempt_cap") {
         return NextResponse.json(
           {
-            error: result.error || "Attempt limit reached",
+            error,
             reason: "attempt_cap",
             maxAttempts: MAX_TOTAL_CALL_ATTEMPTS,
+            action,
           },
           { status: 409 }
         )
       }
       if (result.skipped) {
         return NextResponse.json(
-          { error: result.error || "Call not placed", reason: result.reason || "skipped" },
+          { error, reason: result.reason || "skipped", action },
           { status: 409 }
         )
       }
       return NextResponse.json(
-        { error: result.error || "Failed to place retry call", reason: result.reason || "provider_rejected" },
+        { error, reason: result.reason || "provider_rejected", action },
         { status: 502 }
       )
     }
@@ -196,6 +208,17 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // retry_count is deliberately NOT reset: it is the automatic ladder's own
     // counter and zeroing it on a manual retry let the ladder start over.
 
+    const action = await recordHrAction(participant.id, {
+      action: "retry_call",
+      status: fresh?.bolna_execution_id ? "started" : "failed",
+      actor,
+      at: now,
+      detail: fresh?.bolna_execution_id
+        ? undefined
+        : "Provider accepted the request but no execution id was saved",
+      executionId: fresh?.bolna_execution_id || null,
+    })
+
     logCandidateActivity({
       jobId: job?.id || "",
       candidateId: participant.candidate_id,
@@ -223,6 +246,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
       callAttempts: fresh?.call_attempts || attemptsSoFar + 1,
       maxAttempts: MAX_TOTAL_CALL_ATTEMPTS,
       lastAttemptAt: fresh?.last_attempt_at || now,
+      action,
     })
   } catch (error: any) {
     logger.error("Retry call failed", { error: error.message })

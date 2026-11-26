@@ -8,6 +8,7 @@ import { placeCallImmediately, prepareScheduleOffer, markScheduleOffer } from "@
 import { logger } from "@/lib/logger"
 import { sendSessionMessage, hasEnoughToScreen } from "@/lib/info-collector-v2"
 import { logCandidateActivityBatch } from "@/lib/activity-logger"
+import { recordHrAction, type HrActionEntry } from "@/lib/hr-action-history"
 
 export const runtime = "nodejs"
 
@@ -42,7 +43,7 @@ async function renudgeExistingParticipant(opts: {
   source?: string | null
   callMode?: TriggerRequest["callMode"]
   now: string
-}): Promise<{ ok: boolean; kind: "nudge" | "call"; error?: string }> {
+}): Promise<{ ok: boolean; kind: "nudge" | "call"; error?: string; executionId?: string | null }> {
   const { participantId, candidate, job, client, origin, source, callMode, now } = opts
   const whatsapp = getWhatsAppService()
   // The SYSTEM decides the nudge type (see systemDecidesMode): portal -> shortlist,
@@ -89,7 +90,12 @@ async function renudgeExistingParticipant(opts: {
       if (!result.success) {
         return { ok: false, kind: "call", error: result.error || "Failed to re-place call" }
       }
-      return { ok: true, kind: "call" }
+      const { data: replaced } = await supabaseAdmin
+        .from("phone_screening_participants")
+        .select("bolna_execution_id")
+        .eq("id", participantId)
+        .maybeSingle()
+      return { ok: true, kind: "call", executionId: replaced?.bolna_execution_id || null }
     }
 
     let msgResult: { success: boolean; messageId?: string; error?: string }
@@ -313,7 +319,12 @@ async function renudgeExistingParticipant(opts: {
 export async function POST(request: NextRequest) {
   try {
     const ctx = await getInternalAuthContext(request)
-    if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    if (!ctx) {
+      return NextResponse.json(
+        { error: "Session expired — please log in again", code: "SESSION_EXPIRED" },
+        { status: 401 }
+      )
+    }
     // `applications.manage` is the admin gate; recruiters are granted
     // `outreach.send` instead (the canonical permission for contacting
     // candidates), so accept either — otherwise a recruiter can look at
@@ -529,6 +540,8 @@ export async function POST(request: NextRequest) {
     let renudgedCandidates = 0
     let recalledCandidates = 0
     const renudgeFailures: string[] = []
+    const hrActions: HrActionEntry[] = []
+    const actor = ctx.authUser?.email || ctx.authUser?.id || null
     for (const du of dedupUpdates) {
       const candidate = (candidates || []).find((c) => c.id === du.candidateId)
       if (!candidate) continue
@@ -542,6 +555,15 @@ export async function POST(request: NextRequest) {
         callMode,
         now,
       })
+      const action = await recordHrAction(du.participantId, {
+        action: result.kind === "call" ? "call" : "nudge",
+        status: !result.ok ? "failed" : result.kind === "call" ? "started" : "sent",
+        actor,
+        at: now,
+        detail: result.error,
+        executionId: result.executionId,
+      })
+      if (action) hrActions.push(action)
       if (!result.ok) {
         renudgeFailures.push(`${candidate.name || du.candidateId}: ${result.error}`)
         continue
@@ -571,6 +593,8 @@ export async function POST(request: NextRequest) {
           ? `Re-nudged ${renudgedCandidates} candidate(s) and re-queued ${recalledCandidates} call(s)`
           : "All candidates already have active screening participants (re-nudge failed)",
         errors: renudgeFailures.length > 0 ? renudgeFailures : undefined,
+        actions: hrActions,
+        actedAt: now,
       })
     }
 
@@ -598,6 +622,34 @@ export async function POST(request: NextRequest) {
 
     console.log("[TRIGGER] orchestrateScreening result:", result)
 
+    // Write the same HR action note for brand-new participants. The orchestrator
+    // owns the send/dial; this reads back what it actually stored, so the note
+    // says "sent" only when a message was sent and "failed" when the provider
+    // refused. Never infer success from the fact that HR clicked the button.
+    const { data: freshRows } = await supabaseAdmin
+      .from("phone_screening_participants")
+      .select("id, candidate_id, status, screening_mode, scheduled_call_at, last_placement_error, bolna_execution_id")
+      .eq("campaign_id", result.campaignId)
+    for (const row of (freshRows || []) as any[]) {
+      const rowStatus = String(row.status || "")
+      const isCall = String(row.screening_mode || "") === "call_now"
+      const failed = rowStatus === "failed" || rowStatus === "needs_manual_followup" || !!row.last_placement_error
+      const deferred = rowStatus === "call_scheduled" && !!row.scheduled_call_at
+      const action = await recordHrAction(row.id, {
+        action: isCall ? "call" : "nudge",
+        status: failed ? "failed" : deferred ? "deferred" : isCall ? "started" : "sent",
+        actor,
+        at: now,
+        detail: failed
+          ? row.last_placement_error || `Screening status: ${rowStatus}`
+          : deferred
+            ? `next calling window ${new Date(row.scheduled_call_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`
+            : undefined,
+        executionId: row.bolna_execution_id,
+      })
+      if (action) hrActions.push(action)
+    }
+
     // Log ai_screen_started for all candidates that were triggered
     logCandidateActivityBatch(
       (candidates || []).map((c) => ({
@@ -622,6 +674,8 @@ export async function POST(request: NextRequest) {
       errors: result.errors,
       renudgedCount: renudgedCandidates,
       renudgeErrors: renudgeFailures.length > 0 ? renudgeFailures : undefined,
+      actions: hrActions,
+      actedAt: now,
     })
   } catch (error: any) {
     if (error?.code === "NO_PHONE" || error?.message === "No candidates with phone numbers found") {

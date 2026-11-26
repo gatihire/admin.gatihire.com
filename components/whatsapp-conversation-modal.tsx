@@ -13,6 +13,7 @@ import {
   MessageCircle,
   MousePointerClick,
   PhoneCall,
+  Send,
   XCircle,
 } from "lucide-react"
 import { CollectedInfoView, PreScreenVerdict } from "@/components/candidate-collected-info"
@@ -258,7 +259,13 @@ function Ticks({ status }: { status?: string | null }) {
 function Bubble({ item }: { item: Rendered }) {
   if (item.direction === "system") {
     const tone =
-      item.kind === "call_booked"
+      item.kind === "hr_action" && item.status === "failed"
+        ? "text-red-700 bg-red-50 border-red-200"
+        : item.kind === "hr_action" && item.status === "deferred"
+          ? "text-amber-700 bg-amber-50 border-amber-200"
+          : item.kind === "hr_action"
+            ? "text-indigo-700 bg-indigo-50 border-indigo-200"
+            : item.kind === "call_booked"
         ? "text-blue-700 bg-blue-50 border-blue-200"
         : item.kind === "call_completed"
           ? "text-emerald-700 bg-emerald-50 border-emerald-200"
@@ -271,7 +278,9 @@ function Bubble({ item }: { item: Rendered }) {
             ? "text-red-700 bg-red-50 border-red-200"
             : "text-zinc-600 bg-zinc-50 border-zinc-200"
     const Icon =
-      item.kind === "call_booked" || item.kind === "call_completed" || item.kind === "call_ended"
+      item.kind === "hr_action"
+        ? item.status === "failed" ? AlertCircle : Send
+        : item.kind === "call_booked" || item.kind === "call_completed" || item.kind === "call_ended"
         ? PhoneCall
         : item.kind === "button_tap"
           ? MousePointerClick

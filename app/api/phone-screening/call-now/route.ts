@@ -3,6 +3,7 @@ import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { placeCallImmediately, MAX_TOTAL_CALL_ATTEMPTS, markRecruiterApproval } from "@/lib/scheduled-call"
 import { supabaseAdmin } from "@/lib/supabase"
 import { logger } from "@/lib/logger"
+import { recordHrAction } from "@/lib/hr-action-history"
 
 export const runtime = "nodejs"
 
@@ -11,7 +12,9 @@ export const runtime = "nodejs"
 export async function POST(request: NextRequest) {
   try {
     const ctx = await getInternalAuthContext(request)
-    if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+    if (!ctx) {
+      return NextResponse.json({ error: "Session expired — please log in again", code: "SESSION_EXPIRED" }, { status: 401 })
+    }
     if (!hasPermission(ctx, "applications.manage") && !hasPermission(ctx, "outreach.send")) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     }
@@ -34,36 +37,37 @@ export async function POST(request: NextRequest) {
     })
 
     if (!result.success) {
-      // Distinguish "you already used all your attempts" from "the provider
-      // refused". A 409 with the cap attached is what lets the UI explain the
-      // refusal instead of showing a generic failure the recruiter retries blindly.
-      if (result.reason === "attempt_cap") {
+      // Every refusal gets the same visible treatment as a success: a
+      // timestamped note on the candidate's thread plus a machine-readable
+      // reason for the UI. `already_calling` is not a server fault (502) — HR
+      // asked to dial a candidate who is already on a call, and needs to be
+      // pointed at that call's row instead of clicking again.
+      const reason = result.reason || "provider_rejected"
+      const error = result.error || "Failed to place call"
+      const action = await recordHrAction(participantId, {
+        action: "call",
+        status: "failed",
+        actor: ctx.authUser?.email || ctx.authUser?.id || null,
+        detail: error,
+      })
+      const base = { error, callPlaced: false, reason, action }
+
+      if (reason === "attempt_cap") {
         return NextResponse.json(
-          {
-            error: result.error || "Attempt limit reached",
-            callPlaced: false,
-            reason: "attempt_cap",
-            maxAttempts: MAX_TOTAL_CALL_ATTEMPTS,
-          },
+          { ...base, maxAttempts: MAX_TOTAL_CALL_ATTEMPTS },
           { status: 409 }
         )
       }
-      if (result.reason === "provider_paused") {
+      if (reason === "already_calling") {
         return NextResponse.json(
-          {
-            error: result.error || "Outbound calling is paused — the voice provider is unavailable",
-            callPlaced: false,
-            reason: "provider_paused",
-            paused: true,
-          },
-          { status: 503 }
+          { ...base, liveParticipantId: result.liveParticipantId || null },
+          { status: 409 }
         )
       }
-      const status = result.reason === "not_found" ? 404 : 502
-      return NextResponse.json(
-        { error: result.error || "Failed to place call", callPlaced: false, reason: result.reason || "provider_rejected" },
-        { status }
-      )
+      if (reason === "provider_paused") {
+        return NextResponse.json({ ...base, paused: true }, { status: 503 })
+      }
+      return NextResponse.json(base, { status: reason === "not_found" ? 404 : 502 })
     }
 
     // Return the execution id so the UI can show a verifiable reference instead of
@@ -84,13 +88,23 @@ export async function POST(request: NextRequest) {
       ctx.authUser?.email ?? ctx.authUser?.id ?? null
     )
 
+    const executionId = row?.bolna_execution_id || null
+    const action = await recordHrAction(participantId, {
+      action: "call",
+      status: executionId ? "started" : "failed",
+      actor: ctx.authUser?.email ?? ctx.authUser?.id ?? null,
+      detail: executionId ? undefined : "Provider accepted the request but no execution id was saved",
+      executionId,
+    })
+
     return NextResponse.json({
       success: true,
-      callPlaced: !!row?.bolna_execution_id,
-      executionId: row?.bolna_execution_id || null,
+      callPlaced: !!executionId,
+      executionId,
       bolnaStatus: row?.bolna_status || "queued",
       callAttempts: row?.call_attempts || 1,
       placedAt: row?.last_attempt_at || new Date().toISOString(),
+      action,
     })
   } catch (error: any) {
     logger.error("Call-now failed", { error: error.message })

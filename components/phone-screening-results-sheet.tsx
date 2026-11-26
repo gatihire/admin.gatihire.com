@@ -18,6 +18,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import { useToast } from "@/hooks/use-toast"
+import { failureToast, HrActionError } from "@/lib/client/hr-action-feedback"
 import { cn } from "@/lib/utils"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
@@ -496,7 +497,7 @@ export function PhoneScreeningResultsSheet({
             prev ? { ...prev, call_attempts: json.maxAttempts ?? MAX_CALL_ATTEMPTS } : prev
           )
         }
-        throw new Error(json.error || "Failed to retry call")
+        throw new HrActionError(res.status, json, "Failed to retry call")
       }
       setRetryDialogOpen(false)
       toast({
@@ -515,7 +516,7 @@ export function PhoneScreeningResultsSheet({
           : prev
       )
     } catch (e: any) {
-      toast({ title: "Failed", description: e.message, variant: "destructive" })
+      toast(failureToast(e, "Retry failed"))
     } finally {
       setReviewBusy(false)
     }
