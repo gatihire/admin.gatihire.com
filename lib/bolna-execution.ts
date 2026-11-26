@@ -623,9 +623,10 @@ async function snapshotPreviousCallAttempt(participantId: string, incomingExecut
       call_is_partial: p.call_is_partial ?? null,
     }
 
-    // Keep latest snapshots (max 2)
+    // Keep every dialled attempt (up to the hard cap) so HR can see that calls
+    // 1 and 2 went out even when the candidate never spoke on them.
     history.unshift(snapshot)
-    ctx.call_attempt_history = history.slice(0, 2)
+    ctx.call_attempt_history = history.slice(0, MAX_CALL_ATTEMPTS)
 
     await supabaseAdmin
       .from("phone_screening_participants")

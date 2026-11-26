@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "@/lib/supabase"
 import { getInternalAuthContext, hasPermission } from "@/lib/internal-auth"
 import { logger } from "@/lib/logger"
+import { MAX_TOTAL_CALL_ATTEMPTS } from "@/lib/call-truth"
 import { getBolnaExecution, BOLNA_TERMINAL_STATUSES } from "@/lib/bolna"
 import {
   persistBolnaExecutionId,
@@ -242,7 +243,11 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     .filter((h) => h && (h.call_ended_at || h.bolna_execution_id || h.transcript_raw || h.verdict_json || h.ai_summary || h.recording_url))
     .map((h) => ({ ...h, is_current: false, transcripts: undefined, answers: undefined }))
 
-  // Show at most 2 calls total; prefer current + most recent previous
+  // Show every dialled attempt up to the hard cap. A call that was placed but
+  // never produced a transcript still counts: HR needs to see that call 1 and
+  // call 2 went out, not just the last one. Older rows have no stored history,
+  // so fill those gaps with an explicitly-labelled placeholder rather than
+  // inventing a transcript.
   const seenExec = new Set<string>()
   const callResults: any[] = []
   for (const a of [currentAttempt, ...historyAttempts]) {
@@ -250,10 +255,38 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (seenExec.has(key)) continue
     seenExec.add(key)
     callResults.push(a)
-    if (callResults.length >= 2) break
+    if (callResults.length >= MAX_TOTAL_CALL_ATTEMPTS) break
   }
-  // Ensure chronological/attempt labels are sensible (1st/2nd by attempt or order)
+  // Ensure chronological/attempt labels are sensible (1st/2nd/3rd by attempt or order)
   callResults.sort((a, b) => (Number(a?.attempt || 0) - Number(b?.attempt || 0)) || (String(a?.call_ended_at || "").localeCompare(String(b?.call_ended_at || ""))))
+  const knownAttempts = new Set(callResults.map((a) => Number(a?.attempt)).filter((n) => Number.isFinite(n)))
+  for (let n = 1; n < Number(participant?.call_attempts || 0); n++) {
+    if (knownAttempts.has(n)) continue
+    callResults.push({
+      attempt: n,
+      is_current: false,
+      no_record: true,
+      bolna_execution_id: null,
+      status: null,
+      bolna_status: null,
+      classification_outcome: null,
+      call_ended_at: null,
+      call_duration_seconds: null,
+      recording_url: null,
+      transcript_raw: null,
+      transcripts: [],
+      answers: [],
+      ai_score: null,
+      ai_recommendation: null,
+      ai_summary: null,
+      verdict_json: null,
+      hangup_by: null,
+      call_hangup_reason: null,
+      call_disconnect_reason: null,
+      call_is_partial: null,
+    })
+  }
+  callResults.sort((a, b) => Number(a?.attempt || 0) - Number(b?.attempt || 0))
 
   return NextResponse.json({
     ...participant,

@@ -76,14 +76,61 @@ function fmtDuration(seconds?: number | null): string {
 function getClassificationOutcome(p: any): string | null {
   // Prefer explicit field if present (future-proof), else verdict_json metadata
   if (p?.classification_outcome) return String(p.classification_outcome)
+  const obj = parseVerdict(p)
+  return obj?._classification_outcome || obj?.classification_outcome || null
+}
+
+function parseVerdict(p: any): any {
   const vj = p?.verdict_json
   if (!vj) return null
+  if (typeof vj === "object") return vj
   try {
-    const obj = typeof vj === "string" ? JSON.parse(vj) : vj
-    return obj?._classification_outcome || obj?.classification_outcome || null
+    return JSON.parse(vj)
   } catch {
     return null
   }
+}
+
+function getTranscriptText(p: any): string {
+  return String(p?.transcript_raw || p?.transcript || "").trim()
+}
+
+/** True only when the candidate actually spoke, not just the AI greeting. */
+function hasCandidateTurn(p: any): boolean {
+  return /(^|\n)\s*(user|candidate)\s*:/i.test(getTranscriptText(p))
+}
+
+/**
+ * Evidence strong enough to call a screening "completed", not just "a call
+ * happened". Legacy rows often have only a fallback `ai_score` with no
+ * transcript, recording or duration — those must not be reported as a finished
+ * screening when the carrier never connected the call.
+ */
+function hasScreenedCallEvidence(p: any): boolean {
+  const dur = Number(p?.call_duration_seconds ?? p?.conversation_duration ?? 0)
+  if (Number.isFinite(dur) && dur > 0) return true
+  if (p?.recording_url) return true
+  if (getTranscriptText(p)) return true
+  const vj = parseVerdict(p)
+  return Boolean(vj && (vj.score != null || vj._classification_outcome))
+}
+
+/**
+ * Proof that a call produced an outcome we can describe.
+ *
+ * Deliberately excludes `bolna_execution_id` (only proves placement) and
+ * `call_ended_at` (written even for carrier rejections that never connected).
+ * Anything here means the provider got far enough to leave a record.
+ */
+function hasCallOutcomeEvidence(p: any): boolean {
+  const dur = Number(p?.call_duration_seconds ?? p?.conversation_duration ?? 0)
+  if (Number.isFinite(dur) && dur > 0) return true
+  if (p?.recording_url) return true
+  if (getTranscriptText(p)) return true
+  const vj = parseVerdict(p)
+  if (vj && (vj.score != null || vj._classification_outcome || vj._insufficient_evidence)) return true
+  if (p?.ai_score != null) return true
+  return false
 }
 
 export function describeCallEnd(p: any): { who: string; reason: string; short: string } {
@@ -100,14 +147,102 @@ export function describeCallEnd(p: any): { who: string; reason: string; short: s
     /synthesizer/.test(reason) ? "AI voice/system error" :
     /voicemail/.test(reason) ? "Voicemail" :
     /busy/.test(reason) ? "Line busy" :
-    /no-answer|no_answer/.test(reason) ? "No answer" :
+    /no-answer|no_answer|unanswered/.test(reason) ? "No answer" :
+    /rejected|declined/.test(reason) ? "Call rejected by carrier" :
     /hangup|disconnect/.test(reason) ? "Call disconnected" :
     reason ? reason.replace(/[_-]+/g, " ") : (cls === "not_screened" ? "Incomplete screening" : "Call ended")
-  const short = who === "Candidate" ? `Candidate ended call · ${reasonText}` :
+  const short = reasonText === "Call ended" ? "Call ended" :
+    who === "Candidate" ? `Candidate ended call · ${reasonText}` :
     who === "AI agent" ? `AI agent ended call · ${reasonText}` :
     who === "System/auto" || who === "System" ? `Auto-cut/system ended call · ${reasonText}` :
     `Call ended · ${reasonText}`
   return { who, reason: reasonText, short }
+}
+
+/**
+ * Describe a call that has already ended, using the data we hold rather than a
+ * provider status string.
+ *
+ * This exists for rows whose stored `bolna_status` is not a real Bolna state —
+ * notably our internal `max_retries` marker — but which clearly carry call
+ * evidence. Before this, such a row fell through to the "execution id exists"
+ * branch and rendered as "Call placed — awaiting outcome" forever, even after a
+ * recording and a finished transcript were on disk (Raghul Kumar, 26 Nov: a
+ * 13-second call that ended with `hangup_by = Callee` still showed "awaiting
+ * call" and had no reachable result).
+ */
+function describeEndedCall(
+  p: any,
+  opts: { statusNote: string }
+): CallTruth {
+  const duration = p?.call_duration_seconds ?? p?.conversation_duration ?? null
+  const dur = fmtDuration(duration)
+  const endInfo = describeCallEnd(p)
+  const vj = parseVerdict(p)
+  const cls = getClassificationOutcome(p)
+
+  if (p?.call_voicemail === true) {
+    return truth(
+      "voicemail",
+      "Went to voicemail",
+      `Call placed · answered by voicemail, not a person${dur ? ` · ${dur}` : ""}`,
+      { tone: "warning", bucket: "failed", terminal: true, providerConfirmed: true }
+    )
+  }
+
+  // Nothing suggests the call ever connected. Name the carrier outcome when the
+  // hangup reason tells us, otherwise say plainly that the budget ran out.
+  const attempts = Number(p?.call_attempts || 0)
+  if (!hasCallOutcomeEvidence(p)) {
+    const reason = String(p?.call_hangup_reason || p?.call_disconnect_reason || "")
+    if (/busy/i.test(reason)) {
+      return truth(
+        "busy",
+        "Line busy",
+        `Number was busy · attempt ${attempts} of ${MAX_TOTAL_CALL_ATTEMPTS} · ${opts.statusNote}`,
+        { tone: "warning", bucket: "failed", terminal: true }
+      )
+    }
+    if (/unanswered|no[\s-]?answer/i.test(reason)) {
+      return truth(
+        "no_answer",
+        "Didn’t pick up",
+        `Rang out, nobody answered · attempt ${attempts} of ${MAX_TOTAL_CALL_ATTEMPTS} · ${opts.statusNote}`,
+        { tone: "warning", bucket: "failed", terminal: true }
+      )
+    }
+    return truth(
+      "not_placed",
+      "Attempt limit reached — no screening result",
+      `${reason ? `${reason.replace(/[_-]+/g, " ")} · ` : ""}attempt ${attempts} · ${opts.statusNote}. Send the call again if they should be screened.`,
+      { tone: "danger", bucket: "failed", terminal: true }
+    )
+  }
+
+  const incomplete =
+    !hasScreenedCallEvidence(p) ||
+    p?.call_is_partial === true ||
+    cls === "not_screened" ||
+    cls === "interrupted" ||
+    vj?._insufficient_evidence === true ||
+    vj?.callback_requested === true ||
+    (!hasCandidateTurn(p) && vj?.score == null && p?.ai_score == null)
+
+  if (incomplete) {
+    return truth(
+      "partial",
+      "1st screening incomplete",
+      `${endInfo.short}${dur ? ` · ${dur}` : ""} · attempt ${attempts} of ${MAX_TOTAL_CALL_ATTEMPTS} · review transcript and retry call`,
+      { tone: "warning", bucket: "review", terminal: true, providerConfirmed: true }
+    )
+  }
+
+  return truth(
+    "completed",
+    "Call completed",
+    `Picked up and screened${dur ? ` · ${dur}` : ""}`,
+    { tone: "success", bucket: "done", terminal: true, providerConfirmed: true }
+  )
 }
 
 function truth(
@@ -131,6 +266,14 @@ function truth(
 }
 
 const MAX_ATTEMPTS_DEFAULT = 2
+
+/**
+ * Hard ceiling on total placements per participant, across every path
+ * (automatic ladder, WhatsApp reply, pipeline "Call Now", manual retry).
+ * Lives here so both the truth derivation and the card actions can read it
+ * without importing the server-only scheduler.
+ */
+export const MAX_TOTAL_CALL_ATTEMPTS = 3
 
 export function getMaxAttempts(p?: { max_call_attempts?: number | null } | null): number {
   const n = Number(p?.max_call_attempts)
@@ -270,7 +413,7 @@ export function getCallTruth(p: any): CallTruth {
       return truth(
         "partial",
         "1st screening incomplete",
-        `${endInfo.short}${dur ? ` · ${dur}` : ""} · review transcript and retry call`,
+        `${endInfo.short}${dur ? ` · ${dur}` : ""} · attempt ${attempts} of ${MAX_TOTAL_CALL_ATTEMPTS} · review transcript and retry call`,
         { tone: "warning", bucket: "review", terminal: true, providerConfirmed: true }
       )
     }
@@ -344,6 +487,37 @@ export function getCallTruth(p: any): CallTruth {
       "Bolna account has insufficient balance — no call was made",
       { tone: "danger", bucket: "failed", providerConfirmed: true }
     )
+  }
+
+  // ── 2b. Our own terminal markers, and any status we do not recognise. ──
+  //
+  // `max_retries` is NOT a Bolna status. lib/scheduled-call.ts writes it when
+  // the attempt ceiling is hit, so it must be interpreted from the call data we
+  // hold — never handed to the "execution id exists" branch below, which would
+  // call it "awaiting outcome" forever.
+  if (bolnaStatus === "max_retries") {
+    return describeEndedCall(p, { statusNote: "attempt limit reached" })
+  }
+
+  // The same rule for any status this module does not know: if the row carries
+  // a finished call (duration, recording, transcript, verdict), report what
+  // happened instead of claiming the provider has not replied.
+  const KNOWN_PROVIDER_STATUSES = new Set([
+    "completed",
+    "in-progress",
+    "no-answer",
+    "busy",
+    "stopped",
+    "canceled",
+    "failed",
+    "error",
+    "balance-low",
+    "queued",
+    "initiated",
+    "ringing",
+  ])
+  if (bolnaStatus && !KNOWN_PROVIDER_STATUSES.has(bolnaStatus) && hasCallOutcomeEvidence(p)) {
+    return describeEndedCall(p, { statusNote: `provider status “${p.bolna_status}”` })
   }
 
   if (status === "failed_partial" || p.call_is_partial === true) {

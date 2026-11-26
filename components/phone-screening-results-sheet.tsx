@@ -24,8 +24,7 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { CollectedInfoView, PreScreenVerdict } from "@/components/candidate-collected-info"
 import { WhatsAppConversationModal } from "@/components/whatsapp-conversation-modal"
-import { getCallTruth, describeCallEnd } from "@/lib/call-truth"
-import { MAX_TOTAL_CALL_ATTEMPTS as MAX_CALL_ATTEMPTS } from "@/lib/scheduled-call"
+import { getCallTruth, describeCallEnd, MAX_TOTAL_CALL_ATTEMPTS as MAX_CALL_ATTEMPTS } from "@/lib/call-truth"
 
 interface TranscriptSegment {
   id: string
@@ -46,6 +45,8 @@ interface ScreeningAnswer {
 interface CallResultView {
   attempt: number
   is_current?: boolean
+  /** A dialled attempt whose older row did not retain call details. */
+  no_record?: boolean
   bolna_execution_id?: string | null
   status?: string | null
   bolna_status?: string | null
@@ -613,7 +614,7 @@ export function PhoneScreeningResultsSheet({
     return segments
   }
   const callResultsView: CallResultView[] = (Array.isArray((d as any).call_results) && (d as any).call_results.length)
-    ? (d as any).call_results.slice(0, 2)
+    ? (d as any).call_results.slice(0, MAX_CALL_ATTEMPTS)
     : [{
         attempt: Math.max(1, Number(d?.call_attempts || 1)),
         is_current: true,
@@ -1080,16 +1081,19 @@ export function PhoneScreeningResultsSheet({
 
             </div>
 
-            {/* Two call results summary cards (above call tabs) */}
+            {/* Call results summary cards (one per attempt, up to the hard cap) */}
             {callResultsView.length > 0 && (
               <div className="px-4 pt-3">
                 <p className="text-[11px] font-bold uppercase tracking-wide text-zinc-400 mb-2">Call results</p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  {callResultsView.slice(0, 2).map((cr, idx) => {
+                  {callResultsView.slice(0, MAX_CALL_ATTEMPTS).map((cr, idx) => {
                     const crVerd = parseVerdictObj(cr.verdict_json)
                     const crCls = cr.classification_outcome || crVerd?._classification_outcome
                     const crEnd = describeCallEnd({ hangup_by: cr.hangup_by, call_hangup_reason: cr.call_hangup_reason, call_disconnect_reason: cr.call_disconnect_reason, verdict_json: cr.verdict_json, classification_outcome: crCls } as any)
                     const crIncomplete = cr.status === "failed_partial" || cr.call_is_partial || crCls === "not_screened" || crCls === "interrupted" || cr.bolna_status === "stopped" || cr.bolna_status === "canceled"
+                    // A dialled call with no candidate turn is still an attempt
+                    // HR must be able to see; it is not the same as "not called".
+                    const crCandidateSpoke = (cr.transcripts || []).some((s: any) => s?.speaker === "candidate") || /(^|\n)\s*(user|candidate)\s*:/i.test(String(cr.transcript_raw || ""))
                     const active = idx === Math.min(selectedCallIndex, callResultsView.length - 1)
                     return (
                       <button
@@ -1103,7 +1107,7 @@ export function PhoneScreeningResultsSheet({
                         )}
                       >
                         <div className="flex items-center justify-between gap-2 mb-1">
-                          <span className="text-xs font-bold text-zinc-800">{cr.attempt === 1 ? "1st Call" : cr.attempt === 2 ? "2nd Call" : `Call ${cr.attempt}`}</span>
+                          <span className="text-xs font-bold text-zinc-800">{cr.attempt === 1 ? "1st Call" : cr.attempt === 2 ? "2nd Call" : cr.attempt === 3 ? "3rd Call" : `Call ${cr.attempt}`}</span>
                           {crIncomplete ? (
                             <Badge variant="outline" className="text-[10px] bg-amber-50 text-amber-700 border-amber-200">Incomplete</Badge>
                           ) : cr.ai_score != null ? (
@@ -1113,6 +1117,7 @@ export function PhoneScreeningResultsSheet({
                           )}
                         </div>
                         <p className="text-[11px] text-zinc-600 line-clamp-2">{crEnd.short}{cr.call_duration_seconds ? ` · ${formatDuration(cr.call_duration_seconds)}` : ""}</p>
+                        {!crCandidateSpoke && <p className="text-[10px] text-zinc-400 mt-1">{cr.no_record ? "Call was placed — no detailed record retained" : "Call placed — no candidate response recorded"}</p>}
                         {cr.ai_summary && <p className="text-[11px] text-zinc-500 mt-1 line-clamp-2">{String(cr.ai_summary)}</p>}
                       </button>
                     )
@@ -1121,12 +1126,12 @@ export function PhoneScreeningResultsSheet({
               </div>
             )}
 
-            {/* Call attempt tabs (only 2 calls) */}
+            {/* Call attempt tabs — one per dialled call, up to the hard cap (3) */}
             {callResultsView.length > 0 && (
               <div className="px-4 pt-3 pb-1">
                 <div className="inline-flex rounded-lg border border-zinc-200 bg-zinc-50 p-0.5">
-                  {callResultsView.slice(0, 2).map((cr, idx) => {
-                    const label = cr.attempt === 1 ? "1st Call" : cr.attempt === 2 ? "2nd Call" : `Call ${cr.attempt}`
+                  {callResultsView.slice(0, MAX_CALL_ATTEMPTS).map((cr, idx) => {
+                    const label = cr.attempt === 1 ? "1st Call" : cr.attempt === 2 ? "2nd Call" : cr.attempt === 3 ? "3rd Call" : `Call ${cr.attempt}`
                     const active = idx === Math.min(selectedCallIndex, callResultsView.length - 1)
                     return (
                       <button
@@ -1143,8 +1148,8 @@ export function PhoneScreeningResultsSheet({
                     )
                   })}
                 </div>
-                {callResultsView.length < 2 && (d?.call_attempts ?? 0) < 2 && (
-                  <p className="text-[11px] text-zinc-400 mt-1">Only 1 call attempt so far.</p>
+                {callResultsView.length < MAX_CALL_ATTEMPTS && (d?.call_attempts ?? 0) < MAX_CALL_ATTEMPTS && (
+                  <p className="text-[11px] text-zinc-400 mt-1">Only {Math.max(1, d?.call_attempts ?? 1)} call attempt so far.</p>
                 )}
               </div>
             )}

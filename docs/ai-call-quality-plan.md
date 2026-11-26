@@ -1067,6 +1067,40 @@ The values live in `BOLNA_LISTENING`, `BOLNA_MASTER_PROMPT`, `BOLNA_WELCOME_MESS
 `BOLNA_HANGUP_PROMPT` in `lib/bolna.ts`, and are imported by the provisioning route, so a
 `force:true` re-sync cannot regress them.
 
+### 7.7 The 26 Nov round: a finished call still showed "awaiting call"
+
+Raghul Kumar (City Operations Lead-Chennai) had a 13-second call that ended with
+`hangup_by = Callee`, a recording, and `verdict_json._classification_outcome = not_screened`.
+The card still said "Call placed — awaiting outcome" with an "In Progress" button, and the
+result had no reachable entry point.
+
+Root cause: `lib/scheduled-call.ts` overwrites `bolna_status` with `max_retries` when the
+attempt budget is exhausted. `max_retries` is an app-internal marker, not a Bolna state.
+`getCallTruth()` did not recognise it, so with an execution id present it fell through to
+the "execution id exists" branch and reported `awaiting_provider` forever.
+
+Fixes:
+
+- `getCallTruth()` now derives `max_retries` (and any unrecognised status on a row with
+  call evidence) from stored call data: voicemail → voicemail, connected but no candidate
+  turn / `not_screened` / `interrupted` / callback request → `partial`, a real screening →
+  `completed`, no outcome data → `not_placed` (attempt limit reached). It also carries the
+  attempt number ("attempt 3 of 3") into the card detail.
+- The attempt cap is now a single exported constant (`MAX_TOTAL_CALL_ATTEMPTS` in
+  `lib/call-truth.ts`) rather than duplicated in the scheduler, so client components can
+  read it without importing server-only code.
+- Past the cap, the card no longer offers a "Send Call Again" button that always 409s; it
+  offers "View Results" when a record exists, otherwise "Manual Follow-up". The card's
+  results entry point is shown for any call with an outcome, not just `bolna_status =
+  completed`, so an incomplete screening is still readable.
+- Every dialled attempt is now visible in the results sheet (1st / 2nd / 3rd Call), even
+  when the candidate never spoke. Older rows with no retained history get an explicitly
+  labelled "Call was placed — no detailed record retained" placeholder rather than a
+  fabricated transcript. Attempt snapshots are kept for all three attempts, not two.
+
+The other 22 `max_retries` rows were checked with the same derivation: none now resolve to
+`awaiting_provider`.
+
 ---
 
 ## 8. Speed
@@ -1219,6 +1253,7 @@ attempt, and a question that breaks the rules is refused with a reason rather th
 | `lib/bolna.ts:361` | `BOLNA_MASTER_PROMPT` — `{interview_plan}`, 2 digs, one timing number; `BOLNA_WELCOME_MESSAGE` — 5 minutes |
 | `docs/ai-screener-prompt.md` | Mirror of the live prompt; must be updated in the same commit |
 | `lib/bolna-execution.ts:960` | Evidence scorer; replace band constants at `:1004` and `:389` |
+| `lib/call-truth.ts` | Single source of truth for call state; now resolves `max_retries` and unknown statuses from stored call data, and owns `MAX_TOTAL_CALL_ATTEMPTS` |
 | `lib/journey-watchdog.ts` | Calling window + retry ladder |
 | `lib/calling-hours.ts` | IST calling window (10:00–19:00, Mon–Sat), used by every automatic proactive dial; explicit HR/candidate requests bypass |
 | `components/candidate-profile-sidebar.tsx:407` | Plan / Text editor tabs, `manual_override` |

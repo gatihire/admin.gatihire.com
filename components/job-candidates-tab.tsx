@@ -33,7 +33,7 @@ import { CandidateMetricsBar } from "./candidate-metrics-bar"
 import { CollectedInfoView, PreScreenVerdict } from "./candidate-collected-info"
 import { supabase } from "@/lib/supabase"
 import { WhatsAppThreadTimeline } from "./whatsapp-thread-timeline"
-import { getCallTruth, CALL_TRUTH_FILTERS } from "@/lib/call-truth"
+import { getCallTruth, CALL_TRUTH_FILTERS, MAX_TOTAL_CALL_ATTEMPTS } from "@/lib/call-truth"
 import { formatAge } from "@/lib/dispatch/engine"
 import { RootCauseAnalytics } from "./root-cause-analytics"
 import {
@@ -373,6 +373,12 @@ function getActionForCard(application: Application, callStatus?: string, partici
   const interestNeedsApproval =
     participant?.screening_context?.interestNeedsApproval === true
 
+  // The hard attempt budget still applies to manual retries. Offering "Send
+  // Call Again" past it was a button that always failed with "Attempt limit
+  // reached" — HR saw a call outcome but no way to open it.
+  const attempts = Number(participant?.call_attempts || 0)
+  const atAttemptCap = attempts >= MAX_TOTAL_CALL_ATTEMPTS
+
   if (application.status === "ai_screen" && interestNeedsApproval) {
     return {
       // Named "Send Call Options", not "Approve": the review modal's approve
@@ -398,6 +404,14 @@ function getActionForCard(application: Application, callStatus?: string, partici
       const bolnaStatus = participant?.bolna_status
       const retryCount = participant?.retry_count || 0
       const hasCallData = !!(participant?.recording_url || participant?.call_ended_at || participant?.bolna_execution_id)
+      // Past the hard cap, every retry CTA would 409. Route to something HR can
+      // actually use: the recorded result if there is one, else a direct follow-up.
+      if (atAttemptCap) {
+        const hasResult = !!(participant?.transcript_raw || participant?.ai_summary || participant?.verdict_json || participant?.recording_url)
+        return hasResult
+          ? { label: "Attempt limit reached — review what the call recorded", cta: "View Results", icon: Eye, color: "bg-amber-50 border-amber-200 text-amber-800", action: "view_results" }
+          : { label: "Attempt limit reached — contact the candidate directly", cta: "Manual Follow-up", icon: UserX, color: "bg-red-50 border-red-200 text-red-800", action: "manual_followup" }
+      }
       if (participant?.call_is_partial) return { label: "1st screening incomplete (call disconnected mid-conversation). Review transcript and send call again.", cta: "Send Call Again", icon: RefreshCw, color: "bg-orange-50 border-orange-200 text-orange-800", action: "retry_now" }
       // If we have call data but screening wasn't completed properly, let HR review and retry
       if (hasCallData) return { label: "1st screening incomplete (call ended before proper screening). Review and send call again.", cta: "Send Call Again", icon: RefreshCw, color: "bg-orange-50 border-orange-200 text-orange-800", action: "retry_now" }
@@ -472,6 +486,18 @@ function getActionForCard(application: Application, callStatus?: string, partici
           (participant?.status === "failed_partial" || participant?.status === "failed" || participant?.bolna_status === "stopped" || participant?.bolna_status === "canceled"))
       )
       if (isIncompleteCall) {
+        // Raghul Kumar's 13-second call ending in `max_retries` landed here with
+        // 3 of 3 attempts used: "Send Call Again" was the only visible action and
+        // always failed. Show the recorded result instead; HR can decide from it.
+        if (atAttemptCap) {
+          return {
+            label: "1st screening incomplete — attempt limit reached. Review the transcript and AI notes before deciding.",
+            cta: "View Results",
+            icon: Eye,
+            color: "bg-amber-50 border-amber-200 text-amber-800",
+            action: "view_results",
+          }
+        }
         return {
           label: "1st screening incomplete (call ended/couldn't complete). Send call again.",
           cta: "Send Call Again",
@@ -2223,10 +2249,21 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
   const callTruth = useMemo(() => getCallTruth(participant), [participant])
   const aiScore = aiInfo?.score
   const hasMatchScore = application.match_score !== null && application.match_score !== undefined
-  // A completed call must always lead somewhere: even if its score isn't stored
-  // yet, the pill stays visible so "View Results" is reachable in every stage.
-  const callCompleted =
-    participant?.bolna_status === "completed" || participant?.status === "completed" || callStatus === "done"
+  // A call that produced any outcome must always lead somewhere: even when the
+  // screening came back empty (hung up after the greeting, attempt cap reached),
+  // the result entry point stays visible so HR can read the transcript/notes.
+  const callHasResult = useMemo(() => {
+    if (!participant) return false
+    return Boolean(
+      participant.bolna_execution_id ||
+      participant.recording_url ||
+      participant.transcript_raw ||
+      participant.ai_summary ||
+      participant.verdict_json ||
+      participant.call_ended_at ||
+      callTruth.terminal
+    )
+  }, [participant, callTruth.terminal])
 
   const saveNotes = async () => {
     if (notesSaving) return
@@ -2576,7 +2613,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
               )}
 
               {/* AI Analysis button — shows match score, AI screening score, or a results entry point */}
-              {(aiScore != null || hasMatchScore || callCompleted) && (
+              {(aiScore != null || hasMatchScore || callHasResult) && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <button
@@ -2591,7 +2628,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                     >
                       <Sparkles className="h-3.5 w-3.5" />
                       {aiScore != null ? `${aiScore}/10` :
-                       callCompleted ? "View Results" :
+                       callHasResult ? "View Results" :
                        `${Math.round((application.match_score || 0) * 100)}%`}
                       {aiInfo?.recommendation && (
                         <span className="capitalize ml-0.5">{aiInfo.recommendation.replace(/_/g, " ")}</span>
@@ -2600,7 +2637,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                   </TooltipTrigger>
                   <TooltipContent>
                     {aiScore != null ? "View AI screening analysis" :
-                     callCompleted ? "View call results and AI verdict" :
+                     callHasResult ? "View call results and AI verdict" :
                      "View match analysis"}
                   </TooltipContent>
                 </Tooltip>

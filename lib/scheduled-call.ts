@@ -28,6 +28,7 @@ import {
   type PreScreenResult,
 } from "@/lib/pre-screen"
 import { logger } from "@/lib/logger"
+import { MAX_TOTAL_CALL_ATTEMPTS } from "@/lib/call-truth"
 
 // WhatsApp outreach → human-escalation cadence. No blind AI calls: a silent
 // outbound candidate gets one WhatsApp reminder, then goes to a human recruiter.
@@ -81,7 +82,7 @@ export const MAX_CALL_ATTEMPTS = 2
  * accidental-double-dial protection when a human explicitly asks for a call
  * now; it is not a licence to exceed the attempt budget.
  */
-export const MAX_TOTAL_CALL_ATTEMPTS = 3
+export { MAX_TOTAL_CALL_ATTEMPTS }
 
 // QStash accepts delays up to 24 hours.
 const MAX_DELAY_SEC = 24 * 60 * 60
