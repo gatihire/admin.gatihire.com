@@ -540,7 +540,8 @@ export async function POST(request: NextRequest) {
     let renudgedCandidates = 0
     let recalledCandidates = 0
     const renudgeFailures: string[] = []
-    const hrActions: HrActionEntry[] = []
+    // candidateId lets the UI leave a lasting "Nudged at …" line on each card.
+    const hrActions: Array<HrActionEntry & { candidateId?: string }> = []
     const actor = ctx.authUser?.email || ctx.authUser?.id || null
     for (const du of dedupUpdates) {
       const candidate = (candidates || []).find((c) => c.id === du.candidateId)
@@ -563,7 +564,7 @@ export async function POST(request: NextRequest) {
         detail: result.error,
         executionId: result.executionId,
       })
-      if (action) hrActions.push(action)
+      if (action) hrActions.push({ ...action, candidateId: du.candidateId })
       if (!result.ok) {
         renudgeFailures.push(`${candidate.name || du.candidateId}: ${result.error}`)
         continue
@@ -647,7 +648,7 @@ export async function POST(request: NextRequest) {
             : undefined,
         executionId: row.bolna_execution_id,
       })
-      if (action) hrActions.push(action)
+      if (action) hrActions.push({ ...action, candidateId: row.candidate_id })
     }
 
     // Log ai_screen_started for all candidates that were triggered

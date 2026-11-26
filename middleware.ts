@@ -13,12 +13,14 @@ const VALIDATE_TIMEOUT_MS = 5000;
 const REFRESH_TIMEOUT_MS = 5000;
 
 function applySessionCookies(response: NextResponse, session: RefreshedSession) {
+  // Keep the access cookie present after the JWT expires so API routes can
+  // refresh it. An expired-but-present JWT is recoverable; a deleted cookie is not.
   response.cookies.set("sb-access-token", session.access_token, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "strict",
     path: "/",
-    maxAge: session.expires_in,
+    maxAge: 60 * 60 * 24 * 30,
   });
   response.cookies.set("sb-refresh-token", session.refresh_token, {
     httpOnly: true,

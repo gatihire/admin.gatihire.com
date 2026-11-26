@@ -238,12 +238,14 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Keep the cookie present after the JWT expires. The API refreshes it in
+    // place; deleting it here made every HR action 401 an hour after login.
     response.cookies.set("sb-access-token", session.access_token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
       path: "/",
-      maxAge: session.expires_in,
+      maxAge: 60 * 60 * 24 * 30,
     })
 
     response.cookies.set("sb-refresh-token", session.refresh_token, {

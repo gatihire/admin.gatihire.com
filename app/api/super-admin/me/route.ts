@@ -53,7 +53,7 @@ export async function GET(request: NextRequest) {
       secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
       path: "/",
-      maxAge: ctx.refreshedSession.expires_in,
+      maxAge: 60 * 60 * 24 * 30,
     })
     response.cookies.set("sb-refresh-token", ctx.refreshedSession.refresh_token, {
       httpOnly: true,

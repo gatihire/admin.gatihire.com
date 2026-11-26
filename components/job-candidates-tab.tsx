@@ -107,6 +107,8 @@ interface CandidateCardProps {
   callNowBusy?: boolean
   nudgeBusy?: boolean
   verifyBusy?: boolean
+  /** Server-written HR action note to keep visible after the toast disappears. */
+  lastAction?: HrActionResult | null
   onCallNow?: () => void
   onVerifyStatus?: () => void
   onNudgeStart?: () => void
@@ -601,6 +603,9 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [callNowCandidate, setCallNowCandidate] = useState<string | null>(null)
   const [nudgeBusyCandidate, setNudgeBusyCandidate] = useState<string | null>(null)
+  // Last HR action per candidate. Toasts vanish; this line stays on the card
+  // with the exact IST time and result written by the server.
+  const [lastHrActions, setLastHrActions] = useState<Record<string, HrActionResult>>({})
   const [callingStarted, setCallingStarted] = useState(false)
   const [bulkStage, setBulkStage] = useState("ai_screen")
   const [bulkBusy, setBulkBusy] = useState(false)
@@ -1278,6 +1283,20 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
         description = `${nudged} info requests sent`; if (skipped > 0) description += `, ${skipped} skipped (no phone)`
       }
       if (deduped > 0) description += ` (${deduped} updated existing)`
+      // Bulk actions write one HR note per candidate. Show the newest one in the
+      // toast so HR sees the IST time and result, not just a count that vanishes.
+      const firstAction = (data.actions || [])[0] as HrActionResult | undefined
+      if (firstAction?.text) description += ` · ${firstAction.text}`
+      const actions = Array.isArray(data.actions) ? data.actions : []
+      if (actions.length > 0) {
+        setLastHrActions((prev) => {
+          const next = { ...prev }
+          for (const a of actions as Array<HrActionResult & { candidateId?: string }>) {
+            if (a?.candidateId) next[a.candidateId] = a
+          }
+          return next
+        })
+      }
       // When nothing went out, say why. "0 calls placed" alone sent HR looking for
       // a UI problem when the API had already told us the reason.
       const firstError = Array.isArray(data.errors) && data.errors.length > 0 ? String(data.errors[0]) : ""
@@ -1309,11 +1328,13 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
       const data = await readHrActionResponse<any>(res, "Failed to place call")
       // A stale session is a 401 from the route, not a provider problem. The
       // typed error makes the toast say "Session expired — log in again".
+      const action = data.action as HrActionResult | undefined
       if (data.callPlaced === false) {
-        toast(actionToast("call", data.action as HrActionResult | undefined, data.error || data.reason || "The provider did not accept the call."))
+        toast(actionToast("call", action, data.error || data.reason || "The provider did not accept the call."))
       } else {
-        toast(actionToast("call", data.action as HrActionResult | undefined, "Call placed — awaiting the outcome"))
+        toast(actionToast("call", action, "Call placed — awaiting the outcome"))
       }
+      if (action) setLastHrActions((prev) => ({ ...prev, [candidateId]: action }))
       fetchParticipants(); onRefresh()
     } catch (err: any) {
       toast(failureToast(err, "Call was not placed"))
@@ -1360,7 +1381,9 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
       }
       // Show the server-written note: it carries the exact IST time and result,
       // so HR sees "Nudged at 26 Nov, 5:42 PM IST — sent" rather than a bare success.
-      toast(actionToast("nudge", (data.actions || [])[0] as HrActionResult | undefined, "WhatsApp nudge sent"))
+      const action = (data.actions || [])[0] as HrActionResult | undefined
+      toast(actionToast("nudge", action, "WhatsApp nudge sent"))
+      if (action) setLastHrActions((prev) => ({ ...prev, [candidateId]: action }))
       fetchParticipants()
       onRefresh()
     } catch (err: any) {
@@ -1992,6 +2015,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
                       callNowBusy={callNowCandidate === app.candidate_id}
                       nudgeBusy={nudgeBusyCandidate === app.candidate_id}
                       verifyBusy={verifyCandidate === app.candidate_id}
+                      lastAction={lastHrActions[app.candidate_id]}
                       onCallNow={() => callCandidateNow(app.candidate_id)}
                       onVerifyStatus={() => verifyCallStatus(app.candidate_id)}
                       onNudgeStart={() => setNudgeBusyCandidate(app.candidate_id)}
@@ -2212,7 +2236,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
    CANDIDATE CARD — Premium Redesign
    ═══════════════════════════════════════════════════════════════════ */
 
-function CandidateCard({ application, jobId, callStatus, participant, aiInfo, clientDecision, selected, isNew, fitScore, callNowBusy, nudgeBusy, verifyBusy, onCallNow, onVerifyStatus, onNudgeStart, onNudgeEnd, onSelect, onViewProfile, onViewResults, onReviewInfo, onStageChange, onApplicationUpdated, onRefreshParticipants, interviewEntry, interviewDraft, onInterviewUpdate, onInterviewDraftChange }: CandidateCardProps) {
+function CandidateCard({ application, jobId, callStatus, participant, aiInfo, clientDecision, selected, isNew, fitScore, callNowBusy, nudgeBusy, verifyBusy, lastAction, onCallNow, onVerifyStatus, onNudgeStart, onNudgeEnd, onSelect, onViewProfile, onViewResults, onReviewInfo, onStageChange, onApplicationUpdated, onRefreshParticipants, interviewEntry, interviewDraft, onInterviewUpdate, onInterviewDraftChange }: CandidateCardProps) {
   const c = application.candidates
   const { toast } = useToast()
   const [notesDraft, setNotesDraft] = useState<string>(application.notes || "")
@@ -2760,6 +2784,23 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                 {detailsExpanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
               </Button>
             </div>
+
+            {/* The toast disappears; this stays on the card with the server's IST time. */}
+            {lastAction && (
+              <div
+                className={`mt-2 flex items-center gap-1.5 text-[11px] ${
+                  lastAction.status === "failed" ? "text-red-600" : lastAction.status === "deferred" ? "text-amber-600" : "text-emerald-700"
+                }`}
+                title={lastAction.text}
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full shrink-0 ${
+                    lastAction.status === "failed" ? "bg-red-500" : lastAction.status === "deferred" ? "bg-amber-500" : "bg-emerald-500"
+                  }`}
+                />
+                <span className="truncate">{lastAction.text}</span>
+              </div>
+            )}
 
             {/* ── Expandable Details ── */}
             <AnimatePresence>

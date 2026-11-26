@@ -30,6 +30,15 @@ export type InternalAuthContext = {
 const AUTH_TIMEOUT_MS = 8000
 
 /**
+ * Keep the access-token cookie alive for as long as the refresh token. A JWT
+ * that is expired server-side is fine — we detect that on the next request and
+ * rotate it — but a cookie the browser has already deleted leaves only a refresh
+ * token. That is exactly what made every HR API call 401 an hour after login:
+ * this module refused to refresh when the access cookie was missing.
+ */
+const SESSION_COOKIE_MAX_AGE = 60 * 60 * 24 * 30
+
+/**
  * Supabase rotates refresh tokens. When an expired access token is used by
  * several parallel requests, every request used to refresh with the same old
  * token: the first rotation succeeded and the rest got 401, which made HR see
@@ -105,11 +114,11 @@ async function persistRefreshedSession(session: {
     }
     store.set("sb-access-token", session.access_token, {
       ...common,
-      maxAge: session.expires_in,
+      maxAge: SESSION_COOKIE_MAX_AGE,
     })
     store.set("sb-refresh-token", session.refresh_token, {
       ...common,
-      maxAge: 60 * 60 * 24 * 30,
+      maxAge: SESSION_COOKIE_MAX_AGE,
     })
   } catch {
     // Called outside a Route Handler: callers that own a response can still
@@ -168,12 +177,16 @@ async function getUserWithTimeout(accessToken: string, timeoutMs = AUTH_TIMEOUT_
  */
 export async function getInternalAuthContext(request: NextRequest): Promise<InternalAuthContext | null> {
   const initialAccessToken = getAccessTokenFromRequest(request)
-  if (!initialAccessToken) return null
-  let accessToken: string = initialAccessToken
+  let accessToken: string = initialAccessToken || ""
 
   let refreshedSession: { access_token: string; refresh_token: string; expires_in: number } | undefined
 
-  let authResult = await getUserWithTimeout(accessToken)
+  // No access-token cookie is not proof of a signed-out user. The JWT cookie can
+  // expire while the 30-day refresh cookie is still valid; try that refresh
+  // before returning 401. Page middleware does this for HTML routes, but /api
+  // is intentionally outside its matcher, so HR actions need it here.
+  let authResult: GetUserResult = { data: null, error: null, unavailable: false }
+  if (accessToken) authResult = await getUserWithTimeout(accessToken)
   let user = authResult.data?.user
   let unavailable = authResult.unavailable
 

@@ -1150,9 +1150,18 @@ cutting the first answer from ~35 words to one acknowledgement plus one question
 HR reported that around 17:00–18:00 IST they could not nudge or call candidates, and that the
 nudge button gave no usable feedback. Rohit Poddar (Bhadreswar, `+917980862820`), Customer
 Relationship Manager for Interstate Oil Carrier Limited, was the concrete case. Request and
-runtime logs for 10:00–13:30 UTC confirm **three separate causes**, not one:
+runtime logs for 10:00–13:30 UTC confirm **four separate causes**, not one:
 
-1. **Session rotation storm.** After the 11:26 UTC login, `/api/phone-screening/trigger`,
+1. **Expired access-token cookie, and API routes could not refresh.** Login set
+   `sb-access-token` with `maxAge = session.expires_in` (~1 hour), so the browser deleted it
+   while the 30-day `sb-refresh-token` was still valid. The page middleware can refresh from a
+   refresh token alone, but its matcher deliberately excludes `/api`; `getInternalAuthContext()`
+   returned `null` immediately when the access cookie was absent. That made **every** HR action —
+   nudge, call, retry, thread — 401 about an hour after login, which is why HR could not act on
+   *any* profile around 17:00–18:00 IST. The access cookie is now kept for 30 days and the API
+   refreshes it in place; a missing or expired JWT no longer means "signed out" while the refresh
+   token is valid.
+2. **Session rotation storm.** After the 11:26 UTC login, `/api/phone-screening/trigger`,
    `/participants` and `/provider-health` returned **401** in clusters at 11:42–11:43 UTC and
    roughly hourly afterwards. Supabase rotates refresh tokens; only a few route handlers wrote
    the rotated cookies back, and parallel requests each refreshed with the same stale token —
@@ -1161,7 +1170,7 @@ runtime logs for 10:00–13:30 UTC confirm **three separate causes**, not one:
    remembers a successful rotation for 120 s for late requests holding the old cookie, and writes
    rotated cookies on **every** authenticated route response. A 401 is now explicitly
    "Session expired — please log in again" on every HR action toast.
-2. **Duplicate screening rows / live-call guard.** Rohit had two participant rows for the same
+3. **Duplicate screening rows / live-call guard.** Rohit had two participant rows for the same
    job: `037c5cd2…` (`call_now`) and `cd86be00…` (`quick_screen`). An HR trigger at 12:20:21 UTC
    placed Bolna execution `e02ab9ca…` on the second row. A "Call Now" click 36 seconds later on
    the first row was correctly refused by the one-candidate-one-phone guard, but returned a bare
@@ -1169,7 +1178,7 @@ runtime logs for 10:00–13:30 UTC confirm **three separate causes**, not one:
    returns **409** with `reason: "already_calling"` and `liveParticipantId`, and the toast tells
    HR to open that call's result rather than dial again. 212 candidate+job groups in the first
    1,000 participants still have duplicate rows; the guard is doing its job.
-3. **No durable UI record of an HR action.** The trigger answered 200 with counts, and every
+4. **No durable UI record of an HR action.** The trigger answered 200 with counts, and every
    toast disappeared. No nudge-like history entry had been written since 24 Nov. Every HR
    nudge/call/retry/manual message now appends an internal, timestamped `hr_action` note to the
    candidate's thread — success or failure, with the honest result and provider execution id
@@ -1180,8 +1189,10 @@ runtime logs for 10:00–13:30 UTC confirm **three separate causes**, not one:
 Also fixed in the same pass: the profile sidebar's "Start AI Call" / "WhatsApp Nudge" buttons in
 the no-participant empty state had no `onClick` at all; they now create the participant through
 the trigger endpoint and report the result. `/call-now`, `/trigger`, `/send-message` and `/retry`
-all write the action note; `/trigger` also reports an `actions[]` array with `actedAt` so the
-calling UI can show per-candidate outcomes even in a bulk request.
+all write the action note; `/trigger` also reports an `actions[]` array with `actedAt` and a
+`candidateId` per note, so the calling UI can show per-candidate outcomes even in a bulk request.
+The candidate card now keeps the latest action line under the buttons after the toast disappears;
+the thread timeline shows the full history.
 
 Post-deploy smoke test on `dpl_ArjC6462JUzZR8zqhWnJjdej3iXs` at 18:24 UTC: an unauthenticated
 `POST /api/phone-screening/call-now` for Rohit's `037c5cd2…` row returned **401** with
