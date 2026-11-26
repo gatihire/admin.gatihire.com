@@ -68,6 +68,17 @@ interface CallResultView {
   call_is_partial?: boolean | null
 }
 
+interface CallActivityAttempt {
+  attempt: number
+  started_at: string | null
+  ended_at: string | null
+  duration_seconds: number | null
+  execution_id: string | null
+  classification_outcome?: string | null
+  reason?: string | null
+  outcome: string | null
+}
+
 type WhatsAppMessage = {
   at?: string
   sentAt?: string
@@ -160,6 +171,7 @@ interface ParticipantDetail {
   transcripts: TranscriptSegment[]
   answers: ScreeningAnswer[]
   call_attempt_history?: any[]
+  call_activity_attempts?: CallActivityAttempt[]
   call_results?: CallResultView[]
 }
 
@@ -222,6 +234,20 @@ function callAttemptLabel(attempt: number): string {
   if (attempt === 2) return "2nd Call"
   if (attempt === 3) return "3rd Call"
   return `Call ${attempt}`
+}
+
+/** Match a stored call result to the activity-log entry for the same dial. */
+function activityForResult(
+  cr: CallResultView,
+  activities?: CallActivityAttempt[] | null
+): CallActivityAttempt | null {
+  if (!activities?.length) return null
+  const execId = cr.bolna_execution_id || cr.executionId
+  if (execId) {
+    const byExec = activities.find((a) => a.execution_id && a.execution_id === execId)
+    if (byExec) return byExec
+  }
+  return activities.find((a) => Number(a.attempt) === Number(cr.attempt)) ?? null
 }
 
 function preferredCallIndex(results?: CallResultView[] | null): number {
@@ -1133,14 +1159,17 @@ export function PhoneScreeningResultsSheet({
                       verdict_json: cr.verdict_json,
                       classification_outcome: crCls,
                     } as any)
-                    const incomplete = crCls === "not_screened" || crCls === "interrupted" || cr.call_is_partial || cr.status === "failed_partial"
+                    const act = activityForResult(cr, d?.call_activity_attempts)
+                    const incomplete = crCls === "not_screened" || crCls === "interrupted" || cr.call_is_partial || cr.status === "failed_partial" || (cr.no_record && !!act?.outcome)
                     const outcome = cr.no_record
-                      ? "Call placed — no detailed record retained"
+                      ? act?.outcome || "Call placed — no detailed record retained"
                       : cr.ai_score != null
                         ? `Score ${Math.round(Number(cr.ai_score))} · ${crEnd.short || "Completed"}`
                         : incomplete
                           ? "Ended before screening finished — no score"
                           : crEnd.short || cr.status || "Call ended"
+                    const atTime = cr.call_ended_at || act?.ended_at || act?.started_at
+                    const atDuration = cr.call_duration_seconds ?? act?.duration_seconds ?? null
                     const active = idx === Math.min(selectedCallIndex, callResultsView.length - 1)
                     return (
                       <button
@@ -1154,10 +1183,10 @@ export function PhoneScreeningResultsSheet({
                       >
                         <span className="font-bold">{callAttemptLabel(cr.attempt)}</span>
                         <span className={active ? "text-zinc-300" : "text-zinc-400"}>
-                          {cr.call_ended_at ? formatCallTime(cr.call_ended_at) : "No time recorded"}
+                          {atTime ? formatCallTime(atTime) : "No time recorded"}
                         </span>
                         <span className={cn("truncate", active ? "text-zinc-100" : incomplete ? "text-amber-700" : "text-zinc-600")}>
-                          {outcome}{cr.call_duration_seconds ? ` · ${formatDuration(cr.call_duration_seconds)}` : ""}
+                          {outcome}{atDuration ? ` · ${formatDuration(atDuration)}` : ""}
                         </span>
                       </button>
                     )
@@ -1179,6 +1208,7 @@ export function PhoneScreeningResultsSheet({
                     // A dialled call with no candidate turn is still an attempt
                     // HR must be able to see; it is not the same as "not called".
                     const crCandidateSpoke = (cr.transcripts || []).some((s: any) => s?.speaker === "candidate") || /(^|\n)\s*(user|candidate)\s*:/i.test(String(cr.transcript_raw || ""))
+                    const crAct = activityForResult(cr, d?.call_activity_attempts)
                     const active = idx === Math.min(selectedCallIndex, callResultsView.length - 1)
                     return (
                       <button
@@ -1201,8 +1231,8 @@ export function PhoneScreeningResultsSheet({
                             <Badge variant="outline" className="text-[10px]">{cr.status || "—"}</Badge>
                           )}
                         </div>
-                        <p className="text-[11px] text-zinc-600 line-clamp-2">{crEnd.short}{cr.call_duration_seconds ? ` · ${formatDuration(cr.call_duration_seconds)}` : ""}</p>
-                        {!crCandidateSpoke && <p className="text-[10px] text-zinc-400 mt-1">{cr.no_record ? "Call was placed — no detailed record retained" : "Call placed — no candidate response recorded"}</p>}
+                        <p className="text-[11px] text-zinc-600 line-clamp-2">{crEnd.short}{(cr.call_duration_seconds ?? crAct?.duration_seconds) ? ` · ${formatDuration(cr.call_duration_seconds ?? crAct?.duration_seconds ?? null)}` : ""}</p>
+                        {!crCandidateSpoke && <p className="text-[10px] text-zinc-400 mt-1">{cr.no_record ? (crAct?.outcome || "Call was placed — no detailed record retained") : "Call placed — no candidate response recorded"}</p>}
                         {cr.ai_summary && <p className="text-[11px] text-zinc-500 mt-1 line-clamp-2">{String(cr.ai_summary)}</p>}
                       </button>
                     )

@@ -209,7 +209,58 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     .select("*")
     .eq("participant_id", id)
 
-  // Build up to 2 call attempt results for UI (1st/2nd call tabs + summary cards above)
+  // Reconstruct a dial-by-dial timeline from the activity log. Older rows did
+  // not persist a per-attempt record, but the events still tell HR when each
+  // call went out and whether it was busy, missed or answered.
+  const { data: callActivity } = await supabaseAdmin
+    .from("candidate_activity")
+    .select("event_type, event_data, created_at")
+    .eq("participant_id", id)
+    .in("event_type", ["call_attempted", "call_in_progress", "call_ended", "call_missed"])
+    .order("created_at", { ascending: true })
+    .limit(200)
+
+  const activityAttempts: any[] = []
+  let bucket: any | null = null
+  for (const ev of callActivity || []) {
+    const d = ev.event_data && typeof ev.event_data === "object" ? ev.event_data as any : {}
+    if (ev.event_type === "call_attempted" && d.bolna_status === "initiated") {
+      bucket = {
+        attempt: activityAttempts.length + 1,
+        started_at: ev.created_at,
+        ended_at: null,
+        duration_seconds: null,
+        execution_id: null,
+        classification_outcome: null,
+        reason: null,
+        outcome: null,
+      }
+      activityAttempts.push(bucket)
+      continue
+    }
+    if (!bucket) continue
+    if (ev.event_type === "call_ended") {
+      bucket.ended_at = ev.created_at
+      bucket.duration_seconds = d.duration_sec ?? null
+      bucket.execution_id = d.execution_id ?? null
+      bucket.classification_outcome = d.classification ?? null
+      bucket.reason = d.hangup_reason ?? null
+      bucket.outcome = d.classification === "not_screened"
+        ? "Ended before screening — no score"
+        : `Call ended — ${d.duration_sec ?? 0}s`
+    } else if (ev.event_type === "call_missed") {
+      // The final "max retries reached" event is an outcome of the previous
+      // dial, not another dialled attempt.
+      if (d.maxRetriesReached && bucket.outcome) continue
+      bucket.reason = d.reason ?? bucket.reason
+      bucket.outcome = d.reason === "busy"
+        ? "Busy — no screening took place"
+        : d.reason ? `Not answered (${d.reason})` : "Not answered"
+      if (!bucket.ended_at) bucket.ended_at = ev.created_at
+    }
+  }
+
+  // Build call attempt results for UI (per-call tabs + summary cards above)
   const vj = participant?.verdict_json && typeof participant.verdict_json === "string"
     ? (() => { try { return JSON.parse(participant.verdict_json) } catch { return participant.verdict_json } })()
     : participant?.verdict_json
@@ -293,6 +344,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     transcripts: finalTranscripts,
     answers: answers || [],
     call_attempt_history: history,
+    call_activity_attempts: activityAttempts,
     call_results: callResults,
   })
 }

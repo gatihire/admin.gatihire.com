@@ -1121,7 +1121,11 @@ claimed completion:
    It now opens on the current attempt, or the first attempt with stored evidence, and shows an
    **Attempt history** table (attempt / time / outcome) above the per-call cards. WhatsApp outcome
    lines are prefixed with the attempt number — `Call 3: Ended before screening finished…` — so
-   the thread itself reads as a call log.
+   the thread itself reads as a call log. For attempts where no per-call row was retained, the
+   participant API reconstructs the dial from `candidate_activity` events, so HR still sees
+   `1st Call · 07:01 · 29s hangup`, `2nd Call · 07:13 · Busy` instead of "No time recorded".
+   Events marked `maxRetriesReached` are treated as the outcome of the preceding dial, not a
+   fourth attempt.
 
 The post-call "thank you for speaking with our AI recruiter" template is also skipped for
 incomplete calls; telling a candidate who hung up after 30 seconds that the screening is done
