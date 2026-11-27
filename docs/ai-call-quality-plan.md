@@ -1224,7 +1224,10 @@ nudge or call him again. The shared ceiling was raised from **3 to 10**:
   ordinal helper; earlier rows still show an honest placeholder instead of an invented transcript.
 
 No real dial was placed while verifying. `npx tsc --noEmit`, `npm run build` and
-`npm run lint -- --quiet` all passed.
+`npm run lint -- --quiet` all passed. Post-deploy smoke test on
+`dpl_CNUZbzUL5hFWsY1a14CLKY6UWLVm`: an unauthenticated `POST /call-now` for Himanshu's row
+returned **401** with `Session expired — please log in again`; the row remains at 3 attempts,
+so HR can now spend attempts 4–10.
 
 ---
 
