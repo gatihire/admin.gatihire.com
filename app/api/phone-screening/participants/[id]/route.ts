@@ -245,8 +245,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
       bucket.execution_id = d.execution_id ?? null
       bucket.classification_outcome = d.classification ?? null
       bucket.reason = d.hangup_reason ?? null
-      bucket.outcome = d.classification === "not_screened"
-        ? "Ended before screening — no score"
+      bucket.outcome = d.classification === "not_screened" || d.classification === "incomplete"
+        ? "Ended before screening finished — no score"
         : `Call ended — ${d.duration_sec ?? 0}s`
     } else if (ev.event_type === "call_missed") {
       // The final "max retries reached" event is an outcome of the previous

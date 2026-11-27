@@ -24,6 +24,9 @@ import {
 } from "@/lib/bolna"
 import { generateFallbackSummary } from "@/lib/fallback-summary"
 import { updateParticipantSafely } from "@/lib/participant-update"
+import { analyzeCallCoverage, type CallCoverage } from "@/lib/call-coverage"
+import { truthfulSummary, truthfulVerdictSummary } from "@/lib/summary-truth"
+import { planFromUserData } from "@/lib/interview-plan"
 
 // Terminal-execution handling shared by the live webhook and the manual
 // sync/reconcile recovery routes. Everything here must be idempotent enough to
@@ -543,6 +546,40 @@ function applyIncompleteCallScoreRule(
   patch.status = "failed"
 }
 
+/**
+ * A call that closed before the plan was covered is not a fit judgement.
+ *
+ * The Himanshu call asked 5 of 9 questions, closed at 2:04, and still stored
+ * 2/10 "not_a_fit" while its own verdict said "No score given". The coverage
+ * block makes that contradiction impossible: the score is cleared, the row is
+ * marked incomplete, and the reason is written down for HR.
+ */
+function applyCoverageScoreBlock(
+  patch: Record<string, unknown>,
+  coverage: CallCoverage
+): void {
+  const verdict =
+    patch.verdict_json && typeof patch.verdict_json === "object" && !Array.isArray(patch.verdict_json)
+      ? (patch.verdict_json as Record<string, unknown>)
+      : {}
+  patch.ai_score = null
+  patch.ai_recommendation = "further_review"
+  patch.status = "failed"
+  patch.call_is_partial = true
+  patch.needs_manual_followup = true
+  patch.verdict_json = {
+    ...verdict,
+    score: null,
+    recommendation: "further_review",
+    _insufficient_evidence: true,
+    _call_coverage: coverage,
+    notes: `Screening incomplete — ${coverage.topics_asked}/${coverage.topics_planned} topics covered, ${coverage.digs_asked} digs asked. ${
+      coverage.reasons[0] ? coverage.reasons[0] + "." : ""
+    } No score given. HR should review the transcript and send the call again.`,
+  }
+  patch.ai_summary = "Screening incomplete — the call closed before the plan was covered. No score was given."
+}
+
 type CallAttemptSnapshot = {
   attempt: number
   bolna_execution_id: string | null
@@ -650,6 +687,23 @@ export async function handleCompletedExecution(
   const verdict = extractVerdictFromTranscript(transcript)
   const extracted = (execution.extracted_data as Record<string, unknown> | null) || (execution as any).custom_extractions || null
 
+  // Resolve job/candidate and the plan before classifying. Coverage needs the
+  // plan, and the score gate needs coverage.
+  const { data: participantMeta } = await supabaseAdmin
+    .from("phone_screening_participants")
+    .select("candidate_id, job_id, call_attempts, call_payload_json")
+    .eq("id", participantId)
+    .single()
+
+  const rawDuration = execution.conversation_duration ?? execution.telephony_data?.duration
+  const durationForCoverage = rawDuration ? Number(rawDuration) : 0
+  const coverage = analyzeCallCoverage({
+    transcript,
+    plan: planFromUserData(participantMeta?.call_payload_json),
+    durationSec: durationForCoverage,
+    hangupReason: execution.telephony_data?.hangup_reason || null,
+  })
+
   await writeTranscriptSegments(participantId, transcript)
 
   // Prefer extracted_data from Bolna; fallback to parsing transcript for backward compat
@@ -661,7 +715,6 @@ export async function handleCompletedExecution(
   }
 
   const now = new Date().toISOString()
-  const rawDuration = execution.conversation_duration ?? execution.telephony_data?.duration
   const hangupReason = execution.telephony_data?.hangup_reason || null
   const hangupBy = execution.telephony_data?.hangup_by || null
   const isSynthesizerError = hangupReason === "synthesizer_error"
@@ -672,7 +725,7 @@ export async function handleCompletedExecution(
   const statusFromExec = (execution.status || "").toLowerCase()
   const isRetryStatus = ["busy", "no-answer", "failed", "canceled"].includes(statusFromExec)
 
-  let classification: "screened" | "not_screened" | "interrupted" | "retry" | "voicemail" = "screened"
+  let classification: "screened" | "not_screened" | "incomplete" | "interrupted" | "retry" | "voicemail" = "screened"
 
   if (isRetryStatus) {
     classification = "retry"
@@ -703,18 +756,26 @@ export async function handleCompletedExecution(
     }
   }
 
+  // The agent can end a call cleanly and still leave the screening half-done.
+  // Himanshu's call had a closing line at 2:04 with 5 of 9 planned questions and
+  // was classified "screened". Coverage, not the closing line, decides.
+  if (classification === "screened" && coverage.closed_before_coverage) {
+    classification = "incomplete"
+  }
+
   const patch: Record<string, unknown> = {
     // `failed_partial` is NOT in the status CHECK constraint, so writing it made
     // Postgres reject the entire patch (partial calls never persisted at all).
     // `failed` + call_is_partial carries the same meaning and always saves.
     status:
       classification === "interrupted" ||
+      classification === "incomplete" ||
       classification === "not_screened" ||
       classification === "retry" ||
       classification === "voicemail"
         ? "failed"
         : "completed",
-    call_is_partial: classification === "interrupted" ? true : undefined,
+    call_is_partial: classification === "interrupted" || classification === "incomplete" ? true : undefined,
     bolna_status: execution.status || "completed",
     call_duration_seconds: rawDuration != null && rawDuration !== '' && !Number.isNaN(Number(rawDuration)) ? Math.round(Number(rawDuration)) : null,
     // Prefer the provider's own terminal timestamp: a repaired call must not
@@ -727,6 +788,7 @@ export async function handleCompletedExecution(
   // so they must surface in /jobs and /today just like other incomplete calls.
   if (
     classification === "not_screened" ||
+    classification === "incomplete" ||
     classification === "interrupted" ||
     classification === "voicemail" ||
     classification === "retry"
@@ -783,12 +845,8 @@ export async function handleCompletedExecution(
     patch.candidate_timezone = execution.context_details.timezone
   }
 
-  // Resolve job/candidate for activity logging
-  const { data: participantMeta } = await supabaseAdmin
-    .from("phone_screening_participants")
-    .select("candidate_id, job_id, call_attempts")
-    .eq("id", participantId)
-    .single()
+  // participantMeta was resolved before classification so coverage could read the
+  // stored plan. Keep using that row for activity logging.
 
   if (effectiveVerdict) {
     patch.verdict_json = effectiveVerdict
@@ -879,6 +937,24 @@ export async function handleCompletedExecution(
     }
   }
 
+  // Coverage is the final gate. A clean goodbye does not make a half-finished
+  // screening a screening, and a long call that skipped topics is still short.
+  if (classification === "incomplete" || coverage.closed_before_coverage) {
+    classification = "incomplete"
+    applyCoverageScoreBlock(patch, coverage)
+  }
+
+  // Store the audit on every call, even a good one: duration, topics, digs,
+  // language switch turn and early-close flag. Without it nobody can see the
+  // next Himanshu call without reading every transcript by hand.
+  if (coverage.assessable) {
+    const vj =
+      patch.verdict_json && typeof patch.verdict_json === "object" && !Array.isArray(patch.verdict_json)
+        ? (patch.verdict_json as Record<string, unknown>)
+        : {}
+    patch.verdict_json = { ...vj, _call_coverage: coverage }
+  }
+
   // An interrupted call is not automatically unscorable. A call cut by the
   // 6-minute cap after covering the topics is real evidence; a call that died
   // with a synthesizer error at 158s is not. Drop the score only for a technical
@@ -926,7 +1002,9 @@ export async function handleCompletedExecution(
         ? "Call not answered — no screening took place."
         : classification === "voicemail"
           ? "Call reached voicemail — no screening took place."
-          : "Ended before screening finished — no score was given. Review the transcript."
+          : classification === "incomplete"
+            ? `Screening incomplete — ${coverage.topics_asked}/${coverage.topics_planned} topics covered, ${coverage.digs_asked} digs asked. No score given. Review the transcript and send the call again.`
+            : "Ended before screening finished — no score was given. Review the transcript."
   // HR reads the WhatsApp thread as the call log. Prefix the attempt so one
   // line says "Call 3: ..." instead of five identical "Call completed" lines.
   const outcomeText = attemptNumber > 0 ? `Call ${attemptNumber}: ${outcomeBase}` : outcomeBase
@@ -975,7 +1053,11 @@ export async function handleCompletedExecution(
 
   // Write the terminal patch first (completed status, transcript, etc.)
   // If classified as not_screened due to minimal engagement, ensure status reflects it
-  if (classification === "not_screened" && patch.status !== "failed" && patch.status !== "failed_partial") {
+  if (
+    (classification === "not_screened" || classification === "incomplete") &&
+    patch.status !== "failed" &&
+    patch.status !== "failed_partial"
+  ) {
     patch.status = "failed"
   }
   // A completed screening clears the queue's follow-up flag. It was set when
@@ -1222,9 +1304,13 @@ async function enrichTranscriptAsync(
   // path sets this marker after applying the evidence gate, so a 6-minute call
   // that reached the cap keeps its analysis instead of being written off.
   const scoredDespiteInterruption = existingVerdict._scored_despite_interruption === true
+  const coverageIncomplete =
+    existingVerdict._classification_outcome === "incomplete" ||
+    (existingVerdict._call_coverage as any)?.closed_before_coverage === true
   const incompleteFlag =
     !scoredDespiteInterruption &&
-    !!(participant.call_is_partial || status === "failed_partial" || status === "failed")
+    (coverageIncomplete ||
+      !!(participant.call_is_partial || status === "failed_partial" || status === "failed"))
   // `call_is_partial` records that the call did not reach its end — the callee
   // hung up, or the cap cut it. It does not record whether the screening
   // produced evidence. Treating the flag alone as "unscorable" is why a 4:21
@@ -1235,6 +1321,7 @@ async function enrichTranscriptAsync(
   // minutes are not treated as the same thing.
   const substantiveInterruption =
     incompleteFlag &&
+    !coverageIncomplete &&
     hasSubstantiveInterruptedEvidence(
       transcript,
       Number(participant.call_duration_seconds || 0),
@@ -1252,6 +1339,16 @@ async function enrichTranscriptAsync(
     logger.error("Transcript enrichment failed twice; keeping heuristic summary", { participantId })
     return
   }
+
+  // Gemini estimates call length from the size of the transcript. On 27 Nov it
+  // reported "~9 minutes" for a 308s call. Replace any invented duration line
+  // with the provider's number before the summary reaches the card or the
+  // verdict JSON.
+  const truthOpts = {
+    durationSec: participant.call_duration_seconds,
+    transcript,
+  }
+  enriched.comprehensive_summary = truthfulSummary(enriched.comprehensive_summary, truthOpts)
 
   // Derive a score/recommendation only when the call has no REAL score and was
   // a real, completed screening. A fallback/heuristic score is not a real
@@ -1304,9 +1401,12 @@ async function enrichTranscriptAsync(
             ai_recommendation: applied.recommendation,
             // Mark it so a later webhook re-run does not re-apply the
             // incomplete-call rule and wipe the score it just earned.
-            verdict_json: substantiveInterruption
-              ? { ...applied.verdictJson, _scored_despite_interruption: true }
-              : applied.verdictJson,
+            verdict_json: truthfulVerdictSummary(
+              substantiveInterruption
+                ? { ...applied.verdictJson, _scored_despite_interruption: true }
+                : applied.verdictJson,
+              truthOpts
+            ),
           }
         : {}),
       updated_at: new Date().toISOString(),
@@ -1798,7 +1898,7 @@ export async function handleFailedExecution(
 
   const hangupBy = (execution as any)?.hangup_by ?? execution.telephony_data?.hangup_by ?? null
   const hangupReason = execution.telephony_data?.hangup_reason ?? (execution as any)?.hangup_reason ?? null
-  let classification: "screened" | "not_screened" | "interrupted" | "retry" = isPartialCall ? "interrupted" : "retry"
+  let classification: "screened" | "not_screened" | "incomplete" | "interrupted" | "retry" = isPartialCall ? "interrupted" : "retry"
 
   const patch: Record<string, unknown> = {
     // Same constraint note as above: never write `failed_partial`, which is not
@@ -1890,7 +1990,18 @@ export async function handleFailedExecution(
   // real evidence, which is handled exactly like the completed path.
   const partialTranscript = execution.transcript || ""
   const partialDuration = Number(execution.conversation_duration ?? execution.telephony_data?.duration ?? 0)
-  if (isPartialCall && hasSubstantiveInterruptedEvidence(partialTranscript, partialDuration, hangupReason)) {
+  const coverage = analyzeCallCoverage({
+    transcript: partialTranscript,
+    plan: planFromUserData((participant as any).call_payload_json),
+    durationSec: partialDuration,
+    hangupReason,
+  })
+  if (coverage.closed_before_coverage) {
+    classification = "incomplete"
+    patch.call_is_partial = true
+    patch.needs_manual_followup = true
+  }
+  if (isPartialCall && hasSubstantiveInterruptedEvidence(partialTranscript, partialDuration, hangupReason) && !coverage.closed_before_coverage) {
     const verdict =
       patch.verdict_json && typeof patch.verdict_json === "object" && !Array.isArray(patch.verdict_json)
         ? (patch.verdict_json as Record<string, unknown>)
@@ -1913,9 +2024,16 @@ export async function handleFailedExecution(
       ;(vj as any)._classification_outcome = classification
       ;(vj as any)._hangup_by = hangupBy || null
       ;(vj as any)._call_hangup_reason = hangupReason || null
+      if (coverage.assessable) (vj as any)._call_coverage = coverage
       patch.verdict_json = vj
     } else if (isPartialCall) {
-      patch.verdict_json = { _classification_outcome: classification, _hangup_by: hangupBy || null, _call_hangup_reason: hangupReason || null, summary: "1st screening incomplete (call ended mid-conversation). Review transcript and send call again." }
+      patch.verdict_json = {
+        _classification_outcome: classification,
+        _hangup_by: hangupBy || null,
+        _call_hangup_reason: hangupReason || null,
+        ...(coverage.assessable ? { _call_coverage: coverage } : {}),
+        summary: "1st screening incomplete (call ended mid-conversation). Review transcript and send call again.",
+      }
       if (!patch.ai_summary) patch.ai_summary = "1st screening incomplete (call ended mid-conversation). Review transcript and send call again."
     }
   } catch {}

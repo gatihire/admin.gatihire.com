@@ -19,7 +19,8 @@ export async function GET(request: NextRequest) {
   //   default  — full rows (`*`), kept for external callers; avoid on hot paths
   //   pipeline — everything the pipeline cards need, minus the TOAST payloads
   //              they never read (transcript_raw, call_payload_json, cost_breakdown)
-  //   card     — list rows only: no transcript/JSONB payloads
+  //   card     — list rows only: no transcript/recording payloads (verdict_json
+  //              is needed for the incomplete-call score gate)
   //   status   — ids + status for polling and per-campaign counters
   const fields = searchParams.get("fields")
 
@@ -64,6 +65,7 @@ export async function GET(request: NextRequest) {
   const CARD_COLUMNS = `
       id, campaign_id, job_id, candidate_id, status, origin,
       ai_score, ai_recommendation, call_duration_seconds,
+      bolna_status, call_is_partial, call_attempts, call_ended_at, verdict_json,
       scheduled_call_at, callback_preference, review_status, created_at,
       candidates: candidate_id (id, name, email, phone, current_role)
     `

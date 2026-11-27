@@ -11,7 +11,8 @@
     "dev": "next dev",
     "lint": "eslint \"{app,components,lib}/**/*.{ts,tsx,js,jsx}\"",
     "reconcile:calls": "node --env-file=.env.local scripts/reconcile-calls.mjs",
-    "start": "next start"
+    "start": "next start",
+    "test": "tsx --test __tests__/*.test.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -96,6 +97,7 @@
     "eslint-config-next": "^16.1.1",
     "postcss": "^8.5",
     "tailwindcss": "^3.4.17",
+    "tsx": "^4.23.15",
     "typescript": "^5"
   },
   "overrides": {

@@ -490,7 +490,7 @@ function getActionForCard(application: Application, callStatus?: string, partici
       const cls = vj?._classification_outcome || participant?.classification_outcome
       const isIncompleteCall = !!(
         participant?.call_is_partial ||
-        cls === "not_screened" || cls === "interrupted" ||
+        cls === "not_screened" || cls === "incomplete" || cls === "interrupted" ||
         ((participant?.bolna_execution_id || participant?.call_ended_at || participant?.recording_url) &&
           (participant?.status === "failed_partial" || participant?.status === "failed" || participant?.bolna_status === "stopped" || participant?.bolna_status === "canceled"))
       )
@@ -725,9 +725,12 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
       map[cid] = callSubSection(p)
       idMap[cid] = p.id
       pDataMap[cid] = p
+      // An incomplete screening can carry a legacy score. Suppress it at the
+      // source: every card, button and detail surface reads this map.
+      const scorable = getCallTruth(p).state === "completed"
       aiMap[cid] = {
-        recommendation: p.ai_recommendation ?? undefined,
-        score: p.ai_score != null ? Number(p.ai_score) : undefined,
+        recommendation: scorable ? (p.ai_recommendation ?? undefined) : undefined,
+        score: scorable && p.ai_score != null ? Number(p.ai_score) : undefined,
       }
     }
     return { map, idMap, aiMap, pDataMap }
@@ -2535,7 +2538,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                             execution {String(participant.bolna_execution_id).slice(0, 12)}…
                           </p>
                         )}
-                        {participant.classification_outcome === "not_screened" && (
+                        {(participant.classification_outcome === "not_screened" || participant.classification_outcome === "incomplete") && (
                           <div className="mt-1 inline-flex items-center px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 text-[9px] font-semibold">
                             Call not completed — needs to be recalled
                           </div>

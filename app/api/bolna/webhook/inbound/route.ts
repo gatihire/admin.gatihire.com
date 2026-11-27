@@ -8,9 +8,11 @@ import {
   buildPlanFromQuestions,
   buildTemplatePlan,
   jobContextFromRow,
+  planFromUserData,
   renderInterviewPlan,
   renderLegacyQuestions,
   toBolnaUserData,
+  PLAN_VERSION,
 } from "@/lib/interview-plan"
 
 export const runtime = "nodejs"
@@ -164,19 +166,27 @@ export async function POST(request: NextRequest) {
     // Same assertion as the outbound path: an inbound callback for a row whose
     // payload was never written must not be screened with no questions, and the
     // prompt now reads {interview_plan}.
-    if (!String(userData.interview_plan || "").trim()) {
+    const storedPlan = planFromUserData(userData)
+    const stalePlan = !!storedPlan && Number(storedPlan.version || 0) < PLAN_VERSION
+    if (!String(userData.interview_plan || "").trim() || stalePlan) {
       const existingQuestions = String(userData.questions || "")
-      const planSource = existingQuestions.trim()
-        ? buildPlanFromQuestions(existingQuestions, jobContextFromRow(participant.jobs || { id: "" }), {
+      const planSource = stalePlan
+        ? buildTemplatePlan(jobContextFromRow(participant.jobs || { id: "" }), {
             id: candidate.id,
             name: candidate.name,
             current_role: candidate.current_role ?? null,
           })
-        : buildTemplatePlan(jobContextFromRow(participant.jobs || { id: "" }), {
-            id: candidate.id,
-            name: candidate.name,
-            current_role: candidate.current_role ?? null,
-          })
+        : existingQuestions.trim()
+          ? buildPlanFromQuestions(existingQuestions, jobContextFromRow(participant.jobs || { id: "" }), {
+              id: candidate.id,
+              name: candidate.name,
+              current_role: candidate.current_role ?? null,
+            })
+          : buildTemplatePlan(jobContextFromRow(participant.jobs || { id: "" }), {
+              id: candidate.id,
+              name: candidate.name,
+              current_role: candidate.current_role ?? null,
+            })
       userData = {
         ...userData,
         job_title: userData.job_title || participant.jobs?.title || "",
@@ -188,10 +198,16 @@ export async function POST(request: NextRequest) {
           .map((q, i) => `${i + 1}. ${q.replace(/^\d+\.\s*/, "")}`)
           .join("\n"),
       }
-      logger.warn("Bolna inbound: payload had no interview plan — built one", {
-        participantId: participant.id,
-        fromExistingQuestions: Boolean(existingQuestions.trim()),
-      })
+      logger.warn(
+        stalePlan
+          ? "Bolna inbound: queued interview plan was v1 — regenerated before dialling"
+          : "Bolna inbound: payload had no interview plan — built one",
+        {
+          participantId: participant.id,
+          fromExistingQuestions: Boolean(existingQuestions.trim()) && !stalePlan,
+          previousVersion: storedPlan?.version ?? null,
+        }
+      )
       await supabaseAdmin
         .from("phone_screening_participants")
         .update({

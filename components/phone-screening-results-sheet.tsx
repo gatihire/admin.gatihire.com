@@ -12,7 +12,7 @@ import {
   ExternalLink, ThumbsUp, ThumbsDown, PhoneCall, Play, Pause,
   MessageSquare, BarChart3, Mic, MessageCircle,
   ArrowDown, CircleDot, Volume2, Download, Bot, Settings,
-  RefreshCw, UserX
+  RefreshCw, UserX, ListChecks, Languages
 } from "lucide-react"
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -653,7 +653,10 @@ export function PhoneScreeningResultsSheet({
   const vjRaw: any = (d as any).verdict_json
   const vjObj = typeof vjRaw === "string" ? (() => { try { return JSON.parse(vjRaw) } catch { return null } })() : vjRaw
   const classificationOutcome = (d as any).classification_outcome || vjObj?._classification_outcome || vjObj?.classification_outcome
-  const isIncompleteScreening = callTruth.state === "partial" || classificationOutcome === "not_screened" || classificationOutcome === "interrupted" || !!(d as any).call_is_partial || d?.status === "failed_partial"
+  const coverage = vjObj?._call_coverage as
+    | { assessable?: boolean; topics_asked?: number; topics_planned?: number; digs_asked?: number; closed_before_coverage?: boolean; early_language_switch?: boolean }
+    | undefined
+  const isIncompleteScreening = callTruth.state === "partial" || classificationOutcome === "not_screened" || classificationOutcome === "incomplete" || classificationOutcome === "interrupted" || !!(d as any).call_is_partial || d?.status === "failed_partial"
   const callEndInfo = describeCallEnd(d)
 
   // Call attempt results (max 2): "Call 1 / Call 2" tabs + two summary cards above
@@ -715,7 +718,11 @@ export function PhoneScreeningResultsSheet({
   const selectedRecordingUrl = selectedCall?.recording_url || (selectedCall?.is_current ? d.recording_url : null)
   const selectedAnswers = (selectedCall?.answers && selectedCall.answers.length) ? selectedCall.answers : (selectedCall?.is_current ? (d.answers || []) : [])
   const selectedCls = selectedCall?.classification_outcome || parseVerdictObj(selectedCall?.verdict_json)?._classification_outcome
-  const selectedIncomplete = !!(selectedCall?.call_is_partial || selectedCall?.status === "failed_partial" || selectedCls === "not_screened" || selectedCls === "interrupted" || selectedCall?.bolna_status === "stopped" || selectedCall?.bolna_status === "canceled" || (selectedCall?.is_current && isIncompleteScreening))
+  const selectedIncomplete = !!(selectedCall?.call_is_partial || selectedCall?.status === "failed_partial" || selectedCls === "not_screened" || selectedCls === "incomplete" || selectedCls === "interrupted" || selectedCall?.bolna_status === "stopped" || selectedCall?.bolna_status === "canceled" || (selectedCall?.is_current && isIncompleteScreening))
+  // One gate for every judgement on this sheet. Transcript review notes may
+  // still be shown, but a score, fit badge, confidence or strengths/concerns
+  // belong only to a call that actually completed a screening.
+  const hideScoring = isIncompleteScreening || selectedIncomplete
   const selectedCallEndInfo = describeCallEnd({
     hangup_by: selectedCall?.hangup_by,
     call_hangup_reason: selectedCall?.call_hangup_reason,
@@ -793,14 +800,42 @@ export function PhoneScreeningResultsSheet({
                     </div>
                   ) : (
                     <>
-                      {data.ai_score && <ScoreBadge score={data.ai_score} />}
-                      {data.ai_recommendation && <RecommendationBadge recommendation={data.ai_recommendation} />}
+                      {!hideScoring && data.ai_score && <ScoreBadge score={data.ai_score} />}
+                      {!hideScoring && data.ai_recommendation && <RecommendationBadge recommendation={data.ai_recommendation} />}
                     </>
                   )}
                   {data.call_duration_seconds && (
                     <Badge variant="outline" className="gap-1.5 px-3 py-1.5 text-xs bg-zinc-50 border-zinc-200">
                       <Clock className="h-3.5 w-3.5" />
                       {formatDuration(data.call_duration_seconds)}
+                    </Badge>
+                  )}
+                  {coverage?.assessable && (
+                    <Badge
+                      variant="outline"
+                      className={`gap-1.5 px-3 py-1.5 text-xs ${
+                        coverage.closed_before_coverage
+                          ? "bg-amber-50 border-amber-300 text-amber-800"
+                          : "bg-zinc-50 border-zinc-200"
+                      }`}
+                      title={
+                        coverage.closed_before_coverage
+                          ? "The agent closed before the interview plan was covered"
+                          : "Interview plan coverage"
+                      }
+                    >
+                      <ListChecks className="h-3.5 w-3.5" />
+                      {coverage.topics_asked ?? 0}/{coverage.topics_planned ?? 0} topics · {coverage.digs_asked ?? 0} digs
+                    </Badge>
+                  )}
+                  {coverage?.early_language_switch && (
+                    <Badge
+                      variant="outline"
+                      className="gap-1.5 px-3 py-1.5 text-xs bg-amber-50 border-amber-300 text-amber-800"
+                      title="The agent switched to Hinglish before the candidate used any Hindi or Hinglish word"
+                    >
+                      <Languages className="h-3.5 w-3.5" />
+                      Language switched early
                     </Badge>
                   )}
                   {data.call_cost_cents != null && (
@@ -816,9 +851,11 @@ export function PhoneScreeningResultsSheet({
                     <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
                     <div>
                       <span className="font-bold">{callEndInfo.short}.</span>{" "}
-                      {classificationOutcome === "not_screened"
-                        ? "The call did not complete a proper screening (e.g., candidate couldn’t hear, hung up early, or auto-cut). Review the transcript/notes and send the call again."
-                        : "A partial transcript/verdict may be available. Review what was recorded and send the call again if needed."}
+                      {coverage?.closed_before_coverage
+                        ? `The agent closed the call before the interview plan was covered (${coverage.topics_asked ?? 0}/${coverage.topics_planned ?? 0} topics, ${coverage.digs_asked ?? 0} digs). No score was given. Review the transcript and send the call again.`
+                        : classificationOutcome === "not_screened"
+                          ? "The call did not complete a proper screening (e.g., candidate couldn’t hear, hung up early, or auto-cut). Review the transcript/notes and send the call again."
+                          : "A partial transcript/verdict may be available. Review what was recorded and send the call again if needed."}
                     </div>
                   </div>
                 )}
@@ -840,32 +877,37 @@ export function PhoneScreeningResultsSheet({
               </div>
 
               {/* Verdict summary — always visible */}
-              {(verd || enriched) && (verdictExplanation || pluses.length > 0 || minuses.length > 0 || fitAssessment) && (
+              {((verd || enriched) && (verdictExplanation || pluses.length > 0 || minuses.length > 0 || fitAssessment) || hideScoring) && (
                 <div className="px-4 pb-3">
                   <div className="p-3 rounded-xl border border-zinc-200 bg-zinc-50/60 space-y-2">
+                    {hideScoring && (
+                      <p className="text-xs font-semibold text-amber-800">
+                        Review notes only — no score or fit verdict was given.
+                      </p>
+                    )}
                     {verdictExplanation && (
                       <p className="text-sm text-zinc-700 leading-relaxed">{verdictExplanation}</p>
                     )}
-                    {fitAssessment && fitAssessment !== verdictExplanation && (
+                    {!hideScoring && fitAssessment && fitAssessment !== verdictExplanation && (
                       <div>
                         <p className="text-[10px] font-bold text-zinc-400 uppercase mb-1">Fit Assessment</p>
                         <p className="text-xs text-zinc-600 leading-relaxed">{fitAssessment}</p>
                       </div>
                     )}
                     <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
-                      {pluses.length > 0 && (
+                      {!hideScoring && pluses.length > 0 && (
                         <div className="flex items-start gap-1.5">
                           <ThumbsUp className="h-3.5 w-3.5 text-green-500 mt-0.5 shrink-0" />
                           <span className="text-green-700">{pluses.length} strengths</span>
                         </div>
                       )}
-                      {minuses.length > 0 && (
+                      {!hideScoring && minuses.length > 0 && (
                         <div className="flex items-start gap-1.5">
                           <ThumbsDown className="h-3.5 w-3.5 text-amber-500 mt-0.5 shrink-0" />
                           <span className="text-amber-700">{minuses.length} concerns</span>
                         </div>
                       )}
-                      {overallVerdict && d.ai_score != null && (
+                      {!hideScoring && overallVerdict && d.ai_score != null && (
                         <Badge variant="outline" className={`text-[10px] font-bold px-2 py-0.5 rounded-full border-none shadow-sm ${
                           overallVerdict === "strong_fit" ? "bg-emerald-100 text-emerald-700" :
                           overallVerdict === "good_fit" ? "bg-green-100 text-green-700" :
@@ -875,7 +917,7 @@ export function PhoneScreeningResultsSheet({
                           {overallVerdict.replace(/_/g, " ")}
                         </Badge>
                       )}
-                      {confidenceScore != null && d.ai_score != null && (
+                      {!hideScoring && confidenceScore != null && d.ai_score != null && (
                         <span className="text-[10px] text-zinc-400">Confidence: {Math.round(confidenceScore * 100)}%</span>
                       )}
                     </div>
@@ -1169,13 +1211,13 @@ export function PhoneScreeningResultsSheet({
                       classification_outcome: crCls,
                     } as any)
                     const act = activityForResult(cr, d?.call_activity_attempts)
-                    const incomplete = crCls === "not_screened" || crCls === "interrupted" || cr.call_is_partial || cr.status === "failed_partial" || (cr.no_record && !!act?.outcome)
+                    const incomplete = crCls === "not_screened" || crCls === "incomplete" || crCls === "interrupted" || cr.call_is_partial || cr.status === "failed_partial" || (cr.no_record && !!act?.outcome)
                     const outcome = cr.no_record
                       ? act?.outcome || "Call placed — no detailed record retained"
-                      : cr.ai_score != null
-                        ? `Score ${Math.round(Number(cr.ai_score))} · ${crEnd.short || "Completed"}`
-                        : incomplete
-                          ? "Ended before screening finished — no score"
+                      : incomplete
+                        ? "Ended before screening finished — no score"
+                        : cr.ai_score != null
+                          ? `Score ${Math.round(Number(cr.ai_score))} · ${crEnd.short || "Completed"}`
                           : crEnd.short || cr.status || "Call ended"
                     const atTime = cr.call_ended_at || act?.ended_at || act?.started_at
                     const atDuration = cr.call_duration_seconds ?? act?.duration_seconds ?? null
@@ -1213,7 +1255,7 @@ export function PhoneScreeningResultsSheet({
                     const crVerd = parseVerdictObj(cr.verdict_json)
                     const crCls = cr.classification_outcome || crVerd?._classification_outcome
                     const crEnd = describeCallEnd({ hangup_by: cr.hangup_by, call_hangup_reason: cr.call_hangup_reason, call_disconnect_reason: cr.call_disconnect_reason, verdict_json: cr.verdict_json, classification_outcome: crCls } as any)
-                    const crIncomplete = cr.status === "failed_partial" || cr.call_is_partial || crCls === "not_screened" || crCls === "interrupted" || cr.bolna_status === "stopped" || cr.bolna_status === "canceled"
+                    const crIncomplete = cr.status === "failed_partial" || cr.call_is_partial || crCls === "not_screened" || crCls === "incomplete" || crCls === "interrupted" || cr.bolna_status === "stopped" || cr.bolna_status === "canceled"
                     // A dialled call with no candidate turn is still an attempt
                     // HR must be able to see; it is not the same as "not called".
                     const crCandidateSpoke = (cr.transcripts || []).some((s: any) => s?.speaker === "candidate") || /(^|\n)\s*(user|candidate)\s*:/i.test(String(cr.transcript_raw || ""))

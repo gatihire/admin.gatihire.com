@@ -142,8 +142,11 @@ export function CandidateTimeline({ participant, candidateName }: CandidateTimel
   if (participant.bolna_execution_id && (participant.call_attempts > 0 || participant.last_attempt_at)) {
     const attemptTime = participant.last_attempt_at || new Date().toISOString()
     const truth = getCallTruth(participant)
-    const isCompleted = participant.bolna_status === "completed"
-    const isSuccess = truth.state === "completed"
+    // Provider status alone is not enough: a call can end on the provider side
+    // while the screening itself was incomplete. Those rows must not produce an
+    // "AI Score" timeline event.
+    const isCompleted = truth.state === "completed"
+    const isSuccess = isCompleted
 
     events.push({
       time: attemptTime,

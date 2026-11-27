@@ -150,7 +150,7 @@ export function describeCallEnd(p: any): { who: string; reason: string; short: s
     /no-answer|no_answer|unanswered/.test(reason) ? "No answer" :
     /rejected|declined/.test(reason) ? "Call rejected by carrier" :
     /hangup|disconnect/.test(reason) ? "Call disconnected" :
-    reason ? reason.replace(/[_-]+/g, " ") : (cls === "not_screened" ? "Incomplete screening" : "Call ended")
+    reason ? reason.replace(/[_-]+/g, " ") : (cls === "not_screened" || cls === "incomplete" ? "Incomplete screening" : "Call ended")
   const short = reasonText === "Call ended" ? "Call ended" :
     who === "Candidate" ? `Candidate ended call · ${reasonText}` :
     who === "AI agent" ? `AI agent ended call · ${reasonText}` :
@@ -223,9 +223,11 @@ function describeEndedCall(
     !hasScreenedCallEvidence(p) ||
     p?.call_is_partial === true ||
     cls === "not_screened" ||
+    cls === "incomplete" ||
     cls === "interrupted" ||
     vj?._insufficient_evidence === true ||
     vj?.callback_requested === true ||
+    vj?._call_coverage?.closed_before_coverage === true ||
     (!hasCandidateTurn(p) && vj?.score == null && p?.ai_score == null)
 
   if (incomplete) {
@@ -411,7 +413,7 @@ export function getCallTruth(p: any): CallTruth {
     }
     // Technically completed on provider side, but screening was not completed
     // properly (couldn't hear, hung up early, auto-cut, too short, etc.)
-    if (cls === "not_screened" || cls === "interrupted" || status === "failed_partial" || p.call_is_partial === true) {
+    if (cls === "not_screened" || cls === "incomplete" || cls === "interrupted" || status === "failed_partial" || p.call_is_partial === true) {
       return truth(
         "partial",
         "1st screening incomplete",

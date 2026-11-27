@@ -17,9 +17,11 @@ import {
   buildPlanFromQuestions,
   buildTemplatePlan,
   jobContextFromRow,
+  planFromUserData,
   renderInterviewPlan,
   renderLegacyQuestions,
   toBolnaUserData,
+  PLAN_VERSION,
 } from "@/lib/interview-plan"
 import {
   buildCandidateInfoFromCollected,
@@ -656,10 +658,15 @@ export async function placeCallForParticipant(
   // (see docs/ai-call-quality-plan.md Appendix B). Never dial context-free, and
   // never dial with a plan-less payload now that the prompt reads
   // {interview_plan}. Keep recruiter-edited questions by wrapping them.
-  if (!String(userData.interview_plan || "").trim()) {
+  const storedPlan = planFromUserData(payload)
+  // v1 plans asked process questions ("rate kaise negotiate kiya?") and assumed
+  // ownership. A queued v1 plan must not keep its bad wording just because the
+  // row was created before this deploy.
+  const stalePlan = !!storedPlan && Number(storedPlan.version || 0) < PLAN_VERSION
+  if (!String(userData.interview_plan || "").trim() || stalePlan) {
     const existingQuestions = String(userData.questions || "")
-    const plan = existingQuestions.trim()
-      ? buildPlanFromQuestions(existingQuestions, jobContextFromRow(row.jobs || { id: row.job_id || "" }), {
+    const plan = stalePlan
+      ? buildTemplatePlan(jobContextFromRow(row.jobs || { id: row.job_id || "" }), {
           id: candidate.id,
           name: candidate.name,
           current_role: candidate.current_role,
@@ -667,14 +674,23 @@ export async function placeCallForParticipant(
           total_experience: candidate.total_experience != null ? Number(candidate.total_experience) : null,
           location: candidate.location,
         })
-      : buildTemplatePlan(jobContextFromRow(row.jobs || { id: row.job_id || "" }), {
-          id: candidate.id,
-          name: candidate.name,
-          current_role: candidate.current_role,
-          resume_text: candidate.resume_text,
-          total_experience: candidate.total_experience != null ? Number(candidate.total_experience) : null,
-          location: candidate.location,
-        })
+      : existingQuestions.trim()
+        ? buildPlanFromQuestions(existingQuestions, jobContextFromRow(row.jobs || { id: row.job_id || "" }), {
+            id: candidate.id,
+            name: candidate.name,
+            current_role: candidate.current_role,
+            resume_text: candidate.resume_text,
+            total_experience: candidate.total_experience != null ? Number(candidate.total_experience) : null,
+            location: candidate.location,
+          })
+        : buildTemplatePlan(jobContextFromRow(row.jobs || { id: row.job_id || "" }), {
+            id: candidate.id,
+            name: candidate.name,
+            current_role: candidate.current_role,
+            resume_text: candidate.resume_text,
+            total_experience: candidate.total_experience != null ? Number(candidate.total_experience) : null,
+            location: candidate.location,
+          })
     const legacy = renderLegacyQuestions(plan)
       .split("\n")
       .map((q, i) => `${i + 1}. ${q.replace(/^\d+\.\s*/, "")}`)
@@ -690,12 +706,18 @@ export async function placeCallForParticipant(
       // that is still read by the old dashboard prompt.
       questions: legacy,
     }
-    logger.warn("Call payload had no interview plan — built one before dialling", {
-      participantId,
-      jobId: row.job_id,
-      topics: plan.topics.length,
-      fromExistingQuestions: Boolean(existingQuestions.trim()),
-    })
+    logger.warn(
+      stalePlan
+        ? "Queued interview plan was v1 — regenerated before dialling"
+        : "Call payload had no interview plan — built one before dialling",
+      {
+        participantId,
+        jobId: row.job_id,
+        topics: plan.topics.length,
+        fromExistingQuestions: Boolean(existingQuestions.trim()) && !stalePlan,
+        previousVersion: storedPlan?.version ?? null,
+      }
+    )
     // Persist it so the next attempt asks exactly the same thing.
     await supabaseAdmin
       .from("phone_screening_participants")

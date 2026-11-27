@@ -116,6 +116,7 @@ Return ONLY a JSON object (no markdown, no commentary) with exactly this structu
 
 RULES:
 - Base EVERY claim on what was actually said in the transcript. Do not infer or fabricate.
+- Never state a call duration, an exchange count, or a turn count. Those come from the telephony provider, not from the transcript; the app writes them separately. Omit them from comprehensive_summary entirely.
 - If the candidate declined to answer something, note it as "declined to share" not a guess.
 - If the call was very short (under 60s), note that the assessment has limited confidence.
 - "not_confirmed" is evidence of what the call left open — "no example of rate

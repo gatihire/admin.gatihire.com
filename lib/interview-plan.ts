@@ -16,7 +16,13 @@ import type { JobContext, CandidateContext } from "@/lib/jd-questions"
  * Bolna. See docs/ai-call-quality-plan.md §4.
  */
 
-export const PLAN_VERSION = 1
+/**
+ * v2 — evidence asks, bilingual wording, fresher mode and an `if_no_experience`
+ * bridge per topic. v1 plans asked process questions ("rate kaise negotiate
+ * kiya?") and assumed ownership the candidate may not have had; queued v1 plans
+ * are regenerated before dialling.
+ */
+export const PLAN_VERSION = 2
 export const TARGET_SECONDS = 300
 export const HARD_CAP_SECONDS = SCREENING_HARD_CAP_SECONDS
 /**
@@ -28,12 +34,16 @@ export const MAX_DIGS_PER_TOPIC = 2
 export const MAX_ASK_WORDS = 15
 export const MAX_DIG_WORDS = 12
 export const MAX_DEALBREAKER_WORDS = 12
+export const MAX_BRIDGE_WORDS = 12
 
 const MODEL = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite-preview"
 
 export interface InterviewPlanDig {
   key: string
+  /** Hinglish wording, Latin script. */
   prompt: string
+  /** Natural English wording of the same dig. */
+  prompt_en?: string
 }
 
 export interface InterviewPlanTopic {
@@ -42,11 +52,21 @@ export interface InterviewPlanTopic {
   source: "jd_must_have" | "resume_claim" | "manual"
   must_have: boolean
   order: number
+  /** Hinglish wording, Latin script. */
   ask: string
+  /** Natural English wording of the same ask. */
+  ask_en?: string
   digs: InterviewPlanDig[]
   strong: string
   weak: string
   resume_hook: string | null
+  /**
+   * What to ask when the candidate says they have not done this work. Without
+   * it the agent jumped to the next topic and the call became a checklist —
+   * exactly what happened when an air-cargo intern was asked about FCL/LCL.
+   */
+  if_no_experience?: string
+  if_no_experience_en?: string
 }
 
 export interface InterviewPlanDealbreaker {
@@ -62,7 +82,7 @@ export interface InterviewPlan {
   version: number
   job_id: string
   generated_at: string
-  language: "hinglish" | "english"
+  language: "hinglish" | "english" | "bilingual"
   call_shape: {
     target_seconds: number
     hard_cap_seconds: number
@@ -121,7 +141,24 @@ const BANNED_ASK: { re: RegExp; label: string }[] = [
   { re: /(switching ka reason|kyun (badal|leave|chhod)|job (change|badal))/i, label: "reason-for-switching question" },
   { re: /kar sakte hain\s*\??$/i, label: "capability question" },
   { re: /\b(hamare|humare)\b/i, label: "company claim inside the question" },
+  // A process question produces a narrated walkthrough, not evidence of work.
+  // "Rate kaise negotiate kiya?" was answered with a generic comparison story
+  // that named no shipment, carrier, volume or result. Ask for the instance.
+  { re: /\bkaise\b/i, label: "process question (kaise) — ask for a real instance instead" },
+  { re: /\bhow (did|do|would|will) (you|your)\b/i, label: "process question (how did you) — ask for a real instance instead" },
 ]
+
+/**
+ * Every ask must point at one real thing the candidate can name: a shipment,
+ * client, order, task, ticket, project, or a specific past instance. Without an
+ * anchor the model writes a topic essay ("FCL aur LCL ka antar bataiye") and the
+ * candidate answers with theory or "aisa hi hota hai".
+ */
+const EVIDENCE_ANCHOR =
+  /(\bkis\b|\bkisi\b|\bkaun|\bkitn|\bexample\b|\bmisal\b|\bek baar\b|\bpichl|\blast\b|\brecent\b|\binternship\b|\btraining\b|\bus\s+(shipment|client|case|order|vendor|project|role|task|ticket|invoice|deal)\b|\bkaun sa\b|\bwhich\b|\bwhat\b|\bspecific\b|\binstance\b|\bone\b|\ba real\b|\btell me about a\b|\bdescribe (a|one|the)\b)/i
+
+const ENGLISH_CLOSED_ASK =
+  /^\s*(do|does|did|have|has|are|is|can|could|would|will|were|was)\s+(you|your)\b/i
 
 function hasAcronymOutsideContext(text: string, allowedText: string): string | null {
   const upper = text.toUpperCase()
@@ -154,7 +191,8 @@ function checkAsk(
   ask: string,
   clientNames: (string | null | undefined)[],
   allowedText: string,
-  maxWords = MAX_ASK_WORDS
+  maxWords = MAX_ASK_WORDS,
+  lang: "hinglish" | "english" = "hinglish"
 ): string[] {
   const errors: string[] = []
   if (wordCount(ask) > maxWords) {
@@ -163,6 +201,14 @@ function checkAsk(
   if ((ask.match(/\?/g) || []).length > 1) {
     errors.push(`stacked question (more than one "?"): ${ask}`)
   }
+  if (!EVIDENCE_ANCHOR.test(ask)) {
+    errors.push(`ask names no real instance (which/last/one shipment, client, task): ${ask}`)
+  }
+  if (lang === "english") {
+    if (ENGLISH_CLOSED_ASK.test(ask)) {
+      errors.push(`closed yes/no question in English: ${ask}`)
+    }
+  } else {
   // "Aapne dispatch kaise plan kiya aur kitni gaadiyan thi?" has one "?" but two
   // asks, so the model would answer whichever half it heard. Counting marks is
   // not enough: require two DIFFERENT interrogatives joined by "aur". Distinct,
@@ -182,6 +228,7 @@ function checkAsk(
   const hasOtherInterrogative = /(kaise|kaun|kaunsa|kaunsi|kaunse|kab|kahan|kahaan|kyun|kyu|kitna|kitni|kitne)\b/i.test(ask)
   if (/^\s*kya\b/i.test(ask) && !hasOtherInterrogative) {
     errors.push(`yes/no question (opens with "Kya", no other interrogative): ${ask}`)
+  }
   }
   // The voice is Hinglish in Latin script. A stray Devanagari word (Gemini does
   // this) changes pronunciation for the TTS voice and reads as broken on screen.
@@ -228,15 +275,24 @@ export function validateInterviewPlan(
 
   for (const raw of rawTopics) {
     const ask = String(raw?.ask || "").trim()
+    const askEn = String(raw?.ask_en || "").trim()
     const label = String(raw?.label || "").trim()
     if (!ask) {
       errors.push("topic has no ask")
       continue
     }
     errors.push(...checkAsk(ask, clientNames, allowedText))
+    // The call starts in English. A plan with only Hinglish wording is why an
+    // English-speaking candidate heard "Achha, shukriya" after saying "yes".
+    if (!askEn) errors.push(`topic has no English ask: ${label || ask}`)
+    else errors.push(...checkAsk(askEn, clientNames, allowedText, MAX_ASK_WORDS, "english"))
 
     const digs = (Array.isArray(raw.digs) ? raw.digs : [])
-      .map((d) => ({ key: slug(String(d?.key || "dig")), prompt: String(d?.prompt || "").trim() }))
+      .map((d) => ({
+        key: slug(String(d?.key || "dig")),
+        prompt: String(d?.prompt || "").trim(),
+        prompt_en: String(d?.prompt_en || "").trim() || undefined,
+      }))
       .filter((d) => d.prompt)
       .slice(0, MAX_DIGS_PER_TOPIC)
     if (digs.length === 0) errors.push(`topic has no digs: ${label || ask}`)
@@ -246,7 +302,18 @@ export function validateInterviewPlan(
       // was the gap that let "Kya kiya aapne Tally ERP.9 ka use karke financial
       // reports generate karne ke liye?" ship — and collect "हां जी हां जी हां जी".
       errors.push(...checkAsk(d.prompt, clientNames, allowedText, MAX_DIG_WORDS))
+      if (!d.prompt_en) errors.push(`dig has no English wording: ${d.prompt}`)
+      else errors.push(...checkAsk(d.prompt_en, clientNames, allowedText, MAX_DIG_WORDS, "english"))
     }
+
+    // Every topic needs a bridge for "I have not done this". Without it the
+    // agent abandoned the topic and the call became a three-question checklist.
+    const bridge = String(raw?.if_no_experience || "").trim()
+    const bridgeEn = String(raw?.if_no_experience_en || "").trim()
+    if (!bridge) errors.push(`topic has no if_no_experience bridge: ${label || ask}`)
+    else errors.push(...checkAsk(bridge, clientNames, allowedText, MAX_BRIDGE_WORDS))
+    if (!bridgeEn) errors.push(`topic has no English if_no_experience bridge: ${label || ask}`)
+    else errors.push(...checkAsk(bridgeEn, clientNames, allowedText, MAX_BRIDGE_WORDS, "english"))
 
     const strong = String(raw?.strong || "").trim()
     const weak = String(raw?.weak || "").trim()
@@ -268,10 +335,13 @@ export function validateInterviewPlan(
       must_have: raw?.must_have !== false,
       order: Number(raw?.order) || topics.length + 1,
       ask,
+      ask_en: askEn || undefined,
       digs,
       strong,
       weak,
       resume_hook: raw?.resume_hook ? String(raw.resume_hook) : null,
+      if_no_experience: bridge || undefined,
+      if_no_experience_en: bridgeEn || undefined,
     })
   }
 
@@ -485,11 +555,47 @@ export function detectRoleShift(
   }
 }
 
+/**
+ * Fresher / intern mode.
+ *
+ * A 0.25-year logistics intern was asked "FCL aur LCL shipments ke beech ka
+ * antar kaise handle kiya?" and answered that large shipments never came — the
+ * plan assumed experience he did not have. Early-career candidates need asks
+ * about the task they were given, not ownership they never had.
+ */
+export function isEarlyCareer(
+  candidate?: CandidateContext | null,
+  job?: JobContext | null
+): boolean {
+  const exp = Number(candidate?.total_experience ?? job?.experience_min_years ?? 0)
+  const role = `${candidate?.current_role || ""} ${candidate?.resume_text || ""}`.slice(0, 800)
+  return (
+    (Number.isFinite(exp) && exp < 1) ||
+    /(intern|internship|trainee|fresher|graduate trainee|apprentice)/i.test(role)
+  )
+}
+
 const COMMON_DIGS: InterviewPlanDig[] = [
-  { key: "scale", prompt: "Kitne log ya kitna volume handle karte the?" },
-  { key: "system", prompt: "Kaun sa system ya software use karte the?" },
-  { key: "ownership", prompt: "Yeh aap khud karte the ya team?" },
-  { key: "result", prompt: "Result kya nikla — ek example?" },
+  {
+    key: "instance",
+    prompt: "Us kaam ka ek real example bataiye?",
+    prompt_en: "Give me one real example of that work?",
+  },
+  {
+    key: "scale",
+    prompt: "Us waqt kitna volume ya kitne log the?",
+    prompt_en: "What volume or how many people were involved?",
+  },
+  {
+    key: "ownership",
+    prompt: "Usme aapne khud kya kiya?",
+    prompt_en: "What did you personally do in it?",
+  },
+  {
+    key: "result",
+    prompt: "Uska result kya raha?",
+    prompt_en: "What was the result?",
+  },
 ]
 
 /**
@@ -506,6 +612,7 @@ export function buildTemplatePlan(
   const responsibilities = Array.isArray(job.key_responsibilities)
     ? job.key_responsibilities.filter(Boolean)
     : []
+  const early = isEarlyCareer(candidate, job)
 
   const firstSkill = mustHave[0] ? short(String(mustHave[0]), 5) : ""
   if (firstSkill) {
@@ -515,17 +622,35 @@ export function buildTemplatePlan(
       source: "jd_must_have",
       must_have: true,
       order: topics.length + 1,
-      ask: `${firstSkill} ka ek real example bataiye — aapne kaise kiya?`,
-      digs: COMMON_DIGS,
-      strong: "Names a real system or task, gives a number, describes their own action",
+      ask: early
+        ? `Internship mein ${firstSkill} par kis task par kaam kiya?`
+        : `Kis shipment ya client par ${firstSkill} use kiya — kya kiya?`,
+      ask_en: early
+        ? `In your internship, which task did you handle in ${firstSkill}?`
+        : `Which shipment or client did you use ${firstSkill} for, and what did you do?`,
+      digs: [
+        {
+          key: "instance",
+          prompt: "Us task ka ek real example bataiye?",
+          prompt_en: "Give me one real example of that task?",
+        },
+        {
+          key: "ownership",
+          prompt: "Usme aapne khud kya kiya?",
+          prompt_en: "What did you personally do in it?",
+        },
+      ],
+      strong: "Names a real task or shipment, gives a number, describes their own action",
       weak: "Only theory, says the team did it, cannot give one example",
       resume_hook: null,
+      if_no_experience: "Yeh kaam nahi kiya to kaun sa milta-julta task kiya?",
+      if_no_experience_en: "If you have not done that, which similar task did you actually do?",
     })
   }
 
   // A manager screened without a people-management question is not a screening.
   // Employee management is merged into the same topic because 3 topics cannot
-  // cover five competencies, and "team size + how you ran them" is the one that
+  // cover five competencies, and "team size + one real case" is the one that
   // separates a manager from a coordinator.
   if (isManagerRole(job)) {
     topics.push({
@@ -534,30 +659,57 @@ export function buildTemplatePlan(
       source: "jd_must_have",
       must_have: true,
       order: topics.length + 1,
-      ask: "Aapke under kitne log the — unka kaam kaise check karte the?",
+      ask: "Aapke under kitne log the — ek mushkil case bataiye?",
+      ask_en: "How many people reported to you, and what was one difficult case?",
       digs: [
-        { key: "scale", prompt: "Kitne log the, aur kaun kaun roles?" },
-        { key: "cadence", prompt: "Review ya meeting kaise karte the?" },
-        { key: "employee_issue", prompt: "Ek employee dispute kaise handle kiya?" },
-        { key: "result", prompt: "Attrition kitna tha — kya badla?" },
+        {
+          key: "scale",
+          prompt: "Unme se kaun kaun se roles the?",
+          prompt_en: "Which roles did those people have?",
+        },
+        {
+          key: "employee_issue",
+          prompt: "Ek performance issue ka real example?",
+          prompt_en: "Give me one real performance issue you handled?",
+        },
       ],
-      strong: "Names team size and roles, a review rhythm, one employee case they owned",
+      strong: "Names team size and roles, one employee case they owned",
       weak: "Says 'team handle karti thi', no size, no example",
       resume_hook: null,
+      if_no_experience: "Team nahi thi to kaun sa kaam khud handle kiya?",
+      if_no_experience_en: "If you did not manage a team, which work did you handle yourself?",
     })
   } else if (responsibilities[0]) {
-    const resp = responsibilityPhrase(String(responsibilities[0]), 8)
+    const resp = responsibilityPhrase(String(responsibilities[0]), 6)
     topics.push({
       id: slug(resp),
       label: `Daily work: ${responsibilityPhrase(String(responsibilities[0]), 5)}`,
       source: "jd_must_have",
       must_have: true,
       order: topics.length + 1,
-      ask: `${resp} ka ek real example bataiye?`,
-      digs: COMMON_DIGS,
+      ask: early
+        ? `Internship mein ${resp} ka kaun sa real example yaad hai?`
+        : `${resp} ka kaun sa real example yaad hai?`,
+      ask_en: early
+        ? `In your internship, which real example of ${resp} do you remember?`
+        : `Which real example of ${resp} do you remember?`,
+      digs: [
+        {
+          key: "scale",
+          prompt: "Us kaam mein kitna volume ya kitne log the?",
+          prompt_en: "What volume or how many people were involved in that work?",
+        },
+        {
+          key: "result",
+          prompt: "Uska result kya raha?",
+          prompt_en: "What was the result?",
+        },
+      ],
       strong: "Describes a real instance, the system used, and the outcome",
       weak: "Generic yes, cannot describe one instance",
       resume_hook: null,
+      if_no_experience: "Yeh kaam nahi kiya to kaun sa related task kiya?",
+      if_no_experience_en: "If you have not done that, which related task did you do?",
     })
   } else if (job.daily_work_summary) {
     topics.push({
@@ -566,11 +718,14 @@ export function buildTemplatePlan(
       source: "jd_must_have",
       must_have: true,
       order: topics.length + 1,
-      ask: "Roz ka kaam kaisa hota tha — ek din ka example bataiye?",
-      digs: COMMON_DIGS,
+      ask: "Pichle role mein ek din ka real example bataiye?",
+      ask_en: "Walk me through one real day in your last role?",
+      digs: COMMON_DIGS.slice(0, 2),
       strong: "Walks through a real day, in order, with names or numbers",
       weak: "Generic description, no sequence, no example",
       resume_hook: null,
+      if_no_experience: "Pichle role nahi tha to kaun sa real task kiya?",
+      if_no_experience_en: "If you have not had a role yet, which real task have you done?",
     })
   } else if (mustHave[1]) {
     const second = short(String(mustHave[1]), 5)
@@ -580,11 +735,14 @@ export function buildTemplatePlan(
       source: "jd_must_have",
       must_have: true,
       order: topics.length + 1,
-      ask: `${second} pe aapne kaam kiya — ek example bataiye.`,
-      digs: COMMON_DIGS,
+      ask: `Pichle role mein ${second} ka ek real example?`,
+      ask_en: `In your last role, what is one real example of ${second}?`,
+      digs: COMMON_DIGS.slice(0, 2),
       strong: "A concrete instance with numbers or a system name",
       weak: "No example, only a claim",
       resume_hook: null,
+      if_no_experience: "Yeh kaam nahi kiya to kaun sa milta-julta task kiya?",
+      if_no_experience_en: "If you have not done that, which similar task did you do?",
     })
   }
 
@@ -595,11 +753,14 @@ export function buildTemplatePlan(
       source: "jd_must_have",
       must_have: true,
       order: 1,
-      ask: "Pichle role mein aapka main kaam kya tha — ek din bataiye?",
-      digs: COMMON_DIGS,
+      ask: "Pichle role mein aapka main kaam kya tha — ek example?",
+      ask_en: "In your last role, what was your main work, with one example?",
+      digs: COMMON_DIGS.slice(0, 2),
       strong: "Describes a real day and their own decisions",
       weak: "Only a designation, no work described",
       resume_hook: null,
+      if_no_experience: "Pichle role nahi tha to kaun sa real task kiya?",
+      if_no_experience_en: "If you have not had a role yet, which real task have you done?",
     })
   }
 
@@ -627,18 +788,32 @@ export function buildTemplatePlan(
     must_have: false,
     order: topics.length + 1,
     ask: claim
-      ? `Resume mein "${claim}" likha hai — wo aapne kaise kiya?`
+      ? `Resume mein "${claim}" likha hai — us task mein aapne kya kiya?`
       : resumeSkill
-        ? `Resume mein ${resumeSkill} likha hai — ek example bataiye?`
+        ? `Resume mein ${resumeSkill} likha hai — kis task mein use kiya?`
         : "Pichle role mein sabse mushkil kaam kya tha — kya kiya aapne?",
+    ask_en: claim
+      ? `Your resume says "${claim}" — what did you do in that task?`
+      : resumeSkill
+        ? `Your resume mentions ${resumeSkill} — which task did you use it in?`
+        : "What was the hardest work in your last role, and what did you do?",
     digs: [
-      { key: "situation", prompt: "Us waqt exactly kya ho raha tha?" },
-      { key: "ownership", prompt: "Aapne khud kya kiya usme?" },
-      { key: "result", prompt: "Aakhir mein kya hua?" },
+      {
+        key: "situation",
+        prompt: "Us waqt exactly kya ho raha tha?",
+        prompt_en: "What exactly was happening at that time?",
+      },
+      {
+        key: "ownership",
+        prompt: "Aapne khud kya kiya usme?",
+        prompt_en: "What did you personally do in it?",
+      },
     ],
     strong: "Speaks from memory, gives specifics, owns the action and the outcome",
     weak: "Repeats the resume line, cannot describe the situation",
     resume_hook: hook,
+    if_no_experience: "Yeh claim nahi hai to kaun sa real task kiya?",
+    if_no_experience_en: "If that is not accurate, which real task did you do?",
   })
 
   const license = String(job.license_type || "").trim()
@@ -659,7 +834,7 @@ export function buildTemplatePlan(
     version: PLAN_VERSION,
     job_id: String(job.id || ""),
     generated_at: new Date().toISOString(),
-    language: "hinglish",
+    language: "bilingual",
     call_shape: {
       target_seconds: TARGET_SECONDS,
       hard_cap_seconds: HARD_CAP_SECONDS,
@@ -719,17 +894,20 @@ export function buildPlanFromQuestions(
     must_have: true,
     order: i + 1,
     ask,
-    digs: COMMON_DIGS,
+    ask_en: undefined,
+    digs: COMMON_DIGS.slice(0, 2),
     strong: "Gives a concrete example with a number, a system, and their own action",
     weak: "Only theory, says the team did it, cannot give one example",
     resume_hook: null,
+    if_no_experience: "Yeh kaam nahi kiya to kaun sa milta-julta task kiya?",
+    if_no_experience_en: "If you have not done that, which similar task did you actually do?",
   }))
 
   return {
     version: PLAN_VERSION,
     job_id: String(job.id || ""),
     generated_at: new Date().toISOString(),
-    language: "hinglish",
+    language: "bilingual",
     call_shape: {
       target_seconds: TARGET_SECONDS,
       hard_cap_seconds: HARD_CAP_SECONDS,
@@ -787,11 +965,25 @@ function buildPlanPrompt(
     : ""
   const topic3Rule = shift
     ? `Topic 3 MUST test that shift: ask for one real instance where they did ${shift.to} work,
-  or how they handled a move from ${shift.from} into it. An opinion about being a
+  or one instance of moving from ${shift.from} into it. An opinion about being a
   fast learner is a weak answer; a real instance is the point.`
     : `Topic 3 MUST verify one concrete claim from the resume; copy the phrase into resume_hook.`
 
-  return `You are designing a 3-topic interview plan for a 5-minute Hinglish phone screening.
+  const early = isEarlyCareer(candidate, job)
+  const earlyRule = early
+    ? `CANDIDATE IS EARLY-CAREER / FRESHER:
+- Every ask must reference their internship, training, college project, or the task
+  they were given. Do not assume ownership ("aapne handle kiya").
+- Do not ask abstract theory (for example FCL vs LCL difference) unless the resume
+  shows that mode. Ask which mode or task they actually handled.
+- Every topic MUST include an "if_no_experience" bridge for when they have not done
+  that work, so the agent stays on the topic instead of jumping to the next one.`
+    : `Every topic MUST include an "if_no_experience" bridge for when the candidate has
+not done that work. The agent uses it to stay on the topic and ask about the
+nearest work they actually did.`
+
+  return `You are designing a 3-topic interview plan for a 5-minute phone screening.
+The call starts in English and switches to Hinglish only if the candidate does.
 Return ONLY a JSON object, no markdown, matching exactly this shape:
 
 {
@@ -802,11 +994,17 @@ Return ONLY a JSON object, no markdown, matching exactly this shape:
       "source": "jd_must_have" | "resume_claim",
       "must_have": true,
       "order": 1,
-      "ask": "one open question",
-      "digs": [{"key":"scale","prompt":"..."},{"key":"ownership","prompt":"..."}],
+      "ask": "Hinglish question, Latin script only",
+      "ask_en": "the same question in natural English",
+      "digs": [
+        {"key":"scale","prompt":"Hinglish dig","prompt_en":"English dig"},
+        {"key":"result","prompt":"Hinglish dig","prompt_en":"English dig"}
+      ],
       "strong": "what a strong answer contains",
       "weak": "what a weak answer looks like",
-      "resume_hook": null
+      "resume_hook": null,
+      "if_no_experience": "Hinglish bridge when they have not done it",
+      "if_no_experience_en": "English bridge when they have not done it"
     }
   ],
   "dealbreakers": [
@@ -828,26 +1026,31 @@ HARD RULES — a plan that breaks any of these is rejected and regenerated:
 - Exactly 3 topics. Topic 1 and 2 come from the JD's must-have skills/responsibilities
   and must test DIFFERENT skills — never two questions about the same thing.
 - ${topic3Rule}
-- Every "ask" is OPEN: start with "Kaise", "Bataiye", "Ek baar bataiye", "Kaun sa".
-  Never "Kya kiya", "kya aapne kabhi", "kya aap", "comfortable hain", "idea hai", "kar sakte hain".
-  A question that can be answered "haan" is a failed question.
-- "ask" is 15 words or fewer, ONE ask, at most one "?".
-- Never ask for a procedure or a walkthrough: no "step-by-step", "pura process",
-  "end to end", "process bataiye". Ask for one REAL instance instead — what they
-  actually did, at what volume, with what result. A process narration fills five
-  minutes and proves nothing.
+- ${earlyRule}
+- EVERY ask must name ONE real thing the candidate can point to: a shipment, client,
+  order, task, ticket, project, or a specific past instance. Use "kis", "kaun sa",
+  "kitna", "ek baar", "pichle", "example". A topic with no instance anchor is rejected.
+- NEVER ask a process question. No "kaise", no "how did you", no "step-by-step",
+  "pura process", "end to end", "process bataiye". Ask what they actually did on one
+  real occasion, not how the work is generally done.
+  Bad: "Rate kaise negotiate kiya?"
+  Good: "Internship mein kis shipment ka rate compare kiya — kaunsi line, kitna difference?"
+  Bad: "FCL aur LCL ka antar kaise handle kiya?"
+  Good: "Aapne kaun sa mode handle kiya — us shipment mein kya kiya?"
+- "ask" and "ask_en" are 15 words or fewer, ONE ask, at most one "?". "ask" is
+  Hinglish in Latin script; "ask_en" is a natural English translation, never a
+  transliteration. Both must ask the same thing.
+- At most 2 digs per topic (3 x 2 digs + 3 asks = 9 spoken questions, ~5 minutes).
+  Each dig is 12 words or fewer, asks for ONE thing (instance, volume, own role,
+  result), and is spoken on its own turn. Every dig needs both "prompt" and
+  "prompt_en". No dig may start with "Kya" or use "kaise"/"how did you".
+- "if_no_experience" and "if_no_experience_en" are 12 words or fewer, and ask about
+  the nearest real work they did. Never a sympathy line; always a bridge to evidence.
 - Never ask about salary/CTC, notice period, joining date, total experience, city,
   relocation, or reason for switching. They are already collected.
 - Never put a client or company name in an "ask". Never say "hamare"/"humare".
 - No acronyms (PF, ESIC, GRIR, P2P, FEFO, WMS, TMS, CLRA, SKU...) unless the resume
   or JD above uses them.
-- At most 2 digs per topic (3 x 2 digs + 3 asks = 9 spoken questions, ~5 minutes).
-  Each dig is 12 words or fewer, asks for ONE thing (scale, system, own role vs
-  team, result), and is spoken on its own turn — never joined to another dig.
-  Bad: "Total kitne vendors the aur financial impact kya tha?" (two asks in one)
-  Good: "Total kitne vendors ka volume handle karte the?" then, next turn,
-        "Uska financial impact kya tha?"
-  No dig may start with "Kya" — that shape returns a yes/no answer.
 - "strong" and "weak" are one line each, in English, describing EVIDENCE not
   personality. They are never spoken aloud.
 - Dealbreakers are confirm-only, yes/no, 12 words or fewer, no "why". Only include
@@ -870,13 +1073,17 @@ function normalizePlan(
     must_have: t?.must_have !== false,
     order: Number(t?.order) || i + 1,
     ask: String(t?.ask || "").trim(),
+    ask_en: t?.ask_en ? String(t.ask_en).trim() : undefined,
     digs: (Array.isArray(t?.digs) ? t.digs : []).map((d: any, j: number) => ({
       key: String(d?.key || `dig_${j + 1}`),
       prompt: String(d?.prompt || "").trim(),
+      prompt_en: d?.prompt_en ? String(d.prompt_en).trim() : undefined,
     })),
     strong: String(t?.strong || "").trim(),
     weak: String(t?.weak || "").trim(),
     resume_hook: t?.resume_hook ? String(t.resume_hook) : null,
+    if_no_experience: t?.if_no_experience ? String(t.if_no_experience).trim() : undefined,
+    if_no_experience_en: t?.if_no_experience_en ? String(t.if_no_experience_en).trim() : undefined,
   }))
 
   const dealbreakers = (Array.isArray(raw?.dealbreakers) ? raw.dealbreakers : []).map((d: any, i: number) => ({
@@ -901,7 +1108,7 @@ function normalizePlan(
     version: PLAN_VERSION,
     job_id: String(job.id || ""),
     generated_at: new Date().toISOString(),
-    language: "hinglish",
+    language: "bilingual",
     call_shape: {
       target_seconds: TARGET_SECONDS,
       hard_cap_seconds: HARD_CAP_SECONDS,
@@ -1031,15 +1238,33 @@ export function renderInterviewPlan(plan: InterviewPlan): string {
   topics.forEach((t, i) => {
     const tag = t.must_have ? "  [must-have]" : ""
     lines.push(`TOPIC ${i + 1} — ${t.label}${tag}`)
-    lines.push(`Ask: ${t.ask}`)
+    if (t.ask_en) {
+      lines.push(`Ask (English): ${t.ask_en}`)
+      lines.push(`Ask (Hinglish): ${t.ask}`)
+    } else {
+      // Legacy/manual plan. The prompt still tells the agent to translate, so an
+      // English-speaking candidate is never read Hinglish notes verbatim.
+      lines.push(`Ask: ${t.ask}`)
+    }
     if (t.digs?.length) {
       // Numbered, one per line. Joined with "·" they read as one long turn
       // ("Total kitne vendors… aur iska financial impact…") and the agent spoke
       // both at once. The dig is a turn boundary, not a list to read out.
       lines.push("Dig if thin — ask ONE per turn, never two together:")
       t.digs.slice(0, maxDigs).forEach((d, i) => {
-        lines.push(`  ${i + 1}) ${d.prompt}`)
+        lines.push(
+          d.prompt_en
+            ? `  ${i + 1}) EN: ${d.prompt_en} | HI: ${d.prompt}`
+            : `  ${i + 1}) ${d.prompt}`
+        )
       })
+    }
+    if (t.if_no_experience) {
+      lines.push(
+        t.if_no_experience_en
+          ? `If they have not done it — EN: ${t.if_no_experience_en} | HI: ${t.if_no_experience}`
+          : `If they have not done it: ${t.if_no_experience}`
+      )
     }
     if (t.strong) lines.push(`A strong answer: ${t.strong}.`)
     if (t.weak) lines.push(`A weak answer: ${t.weak}.`)
@@ -1060,9 +1285,11 @@ export function renderInterviewPlan(plan: InterviewPlan): string {
 
   lines.push("HOW TO RUN THIS")
   lines.push("- One topic at a time, in this order. Easy first, hardest last.")
+  lines.push("- Use the English wording while the candidate is speaking English; use the Hinglish wording only after they switch. Never translate word-for-word — say the same question naturally.")
   lines.push(`- Ask the topic question once. Dig up to ${maxDigs} times, only when the answer is thin.`)
   lines.push("- One question per turn. Never join two digs with \"aur\" and never ask the next one while the candidate is still answering.")
   lines.push("- If the answer is already strong, move to the next topic. Do not pad.")
+  lines.push("- If they have not done the work, use the \"If they have not done it\" line and stay on the topic. Do not jump to the next topic.")
   lines.push("- Never read this plan out loud. It is your notes, not your script.")
 
   return lines.join("\n").trim()

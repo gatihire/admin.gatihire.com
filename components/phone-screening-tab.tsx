@@ -10,6 +10,7 @@ import {
 } from "lucide-react"
 import { PhoneScreeningCandidateSelector } from "./phone-screening-candidate-selector"
 import { PhoneScreeningResultsSheet } from "./phone-screening-results-sheet"
+import { getCallTruth } from "@/lib/call-truth"
 
 interface Campaign {
   id: string
@@ -31,6 +32,10 @@ interface Participant {
   ai_score: number | null
   ai_recommendation: string | null
   call_duration_seconds: number | null
+  bolna_status?: string | null
+  call_is_partial?: boolean | null
+  call_attempts?: number | null
+  verdict_json?: Record<string, unknown> | string | null
   scheduled_call_at?: string | null
   callback_preference?: string | null
   review_status?: string | null
@@ -370,16 +375,20 @@ export function PhoneScreeningTab({ jobId }: { jobId: string }) {
                                   </Button>
                                 )}
                                 {/* Only show a score when the call actually completed a proper
-                                    screening. A default 6/10 "further_review" on an incomplete
-                                    call (wife picked up, auto-cut, too short) misleads HR into
+                                    screening. A default 2/10 "not a fit" on an incomplete call
+                                    (candidate hung up, auto-cut, coverage gap) misleads HR into
                                     thinking a real screening happened. */}
-                                {p.status === "completed" && p.ai_score && (
+                                {p.status === "completed" && p.ai_score != null && getCallTruth(p).state === "completed" ? (
                                   <span className={`text-sm font-black ${
                                     (p.ai_score || 0) >= 7 ? "text-green-600" : (p.ai_score || 0) >= 4 ? "text-amber-600" : "text-red-600"
                                   }`}>
                                     {p.ai_score}/10
                                   </span>
-                                )}
+                                ) : p.status === "completed" && getCallTruth(p).state === "partial" ? (
+                                  <span className="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">
+                                    Incomplete · no score
+                                  </span>
+                                ) : null}
                               </div>
                             </div>
                           ))}
