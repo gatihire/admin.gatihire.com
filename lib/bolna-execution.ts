@@ -27,6 +27,7 @@ import { updateParticipantSafely } from "@/lib/participant-update"
 import { analyzeCallCoverage, type CallCoverage } from "@/lib/call-coverage"
 import { truthfulSummary, truthfulVerdictSummary } from "@/lib/summary-truth"
 import { planFromUserData } from "@/lib/interview-plan"
+import { HR_EXACT_TIME_SOURCE } from "@/lib/hr-exact-schedule-validation"
 
 // Terminal-execution handling shared by the live webhook and the manual
 // sync/reconcile recovery routes. Everything here must be idempotent enough to
@@ -1628,12 +1629,15 @@ export interface ParticipantRecord {
   retry_count: number
   whatsapp_missed_nudge_sent: boolean
   whatsapp_history: Array<{ messageId: string | null; template: string; sentAt: string; status: string }> | null
+  booking_source?: string | null
+  screening_context?: any
   candidates?: { id: string; name?: string | null; phone?: string | null } | null
   jobs?: { id: string; title?: string | null; client_name?: string | null } | null
 }
 
 const PARTICIPANT_SELECT = `
   id, status, call_attempts, retry_count, whatsapp_missed_nudge_sent, whatsapp_history,
+  booking_source, screening_context,
   candidates: candidate_id (id, name, phone),
   jobs: job_id (id, title, client_name)
 `
@@ -2059,19 +2063,30 @@ export async function handleFailedExecution(
   // this, a recruiter reads only the WhatsApp exchange and has to dig into
   // provider metadata to learn the call never connected.
   const unanswered = execution.status === "no-answer" || execution.status === "busy"
+  const hrCtx =
+    participant.screening_context && typeof participant.screening_context === "object"
+      ? (participant.screening_context as any)
+      : null
+  const hrBooked =
+    participant.booking_source === HR_EXACT_TIME_SOURCE ||
+    hrCtx?.hrScheduledSlot?.source === HR_EXACT_TIME_SOURCE ||
+    !!hrCtx?.hrScheduledSlot?.scheduledAt
+  const baseFailureText = isPartialCall
+    ? "Call got cut off mid-conversation — whatever was captured is flagged for human review."
+    : maxRetriesReached
+      ? "Couldn't reach the candidate after several attempts — the profile is marked unreachable."
+      : unanswered
+        ? "The candidate didn't pick up — we'll retry shortly."
+        : execution.status === "error" || execution.status === "failed"
+          ? "The call failed to connect — we'll try again later."
+          : `The call ended early (${execution.status}).`
   await appendWhatsappHistory(participant.id, {
     at: now,
     kind: unanswered ? "call_missed" : "call_failed",
     direction: "internal",
-    text: isPartialCall
-      ? "Call got cut off mid-conversation — whatever was captured is flagged for human review."
-      : maxRetriesReached
-        ? "Couldn't reach the candidate after several attempts — the profile is marked unreachable."
-        : unanswered
-          ? "The candidate didn't pick up — we'll retry shortly."
-          : execution.status === "error" || execution.status === "failed"
-            ? "The call failed to connect — we'll try again later."
-            : `The call ended early (${execution.status}).`,
+    text: hrBooked
+      ? `HR-booked exact slot ${isPartialCall ? "ended early" : "did not connect"} — ${baseFailureText}`
+      : baseFailureText,
     status: "failed",
     error: execution.error_message || execution.status || undefined,
   })

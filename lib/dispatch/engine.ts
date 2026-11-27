@@ -17,6 +17,7 @@
 // round-trip to discover what it is looking at.
 
 import { getCallTruth, type CallTruth } from "@/lib/call-truth"
+import { HR_EXACT_TIME_SOURCE } from "@/lib/hr-exact-schedule-validation"
 
 export const HOUR_MS = 60 * 60 * 1000
 
@@ -133,6 +134,8 @@ export interface DispatchParticipant {
   call_attempts?: number | null
   next_retry_at?: string | null
   scheduled_call_at?: string | null
+  booking_source?: string | null
+  screening_context?: any
   call_duration_seconds?: number | null
   conversation_duration?: number | null
   call_voicemail?: boolean | null
@@ -799,6 +802,16 @@ function waitingSinceFor(input: WorkItemInput, kind: WorkItemKind): string {
   }
 }
 
+/** An HR-booked exact slot leaves its source on the row even after it fires. */
+function wasHrExactSlot(p?: DispatchParticipant | null): boolean {
+  if (p?.booking_source === HR_EXACT_TIME_SOURCE) return true
+  let ctx: any = p?.screening_context
+  if (typeof ctx === "string") {
+    try { ctx = JSON.parse(ctx) } catch { return false }
+  }
+  return ctx?.hrScheduledSlot?.source === HR_EXACT_TIME_SOURCE || !!ctx?.hrScheduledSlot?.scheduledAt
+}
+
 function titlesFor(
   input: WorkItemInput,
   kind: WorkItemKind,
@@ -820,11 +833,34 @@ function titlesFor(
         title: `Declined ${jobTitle}`,
         detail: "The candidate said they are not interested — review it, or close the application.",
       }
-    case "human":
+    case "human": {
+      // An HR-booked call is a promise to the candidate, not an anonymous sweep.
+      // Say what needs doing when that exact-time call did not produce a result.
+      if (wasHrExactSlot(p)) {
+        if (truth?.state === "partial" || truth?.state === "needs_review") {
+          return {
+            title: `Needs review — incomplete · ${jobTitle}`,
+            detail: truth?.detail || "The HR-booked call ended before a complete screening. No score was given — review the transcript.",
+          }
+        }
+        if (truth?.state === "no_answer" || truth?.state === "busy" || truth?.state === "not_placed") {
+          return {
+            title: `No answer — re-slot needed · ${jobTitle}`,
+            detail: truth?.detail || "The HR-booked call did not reach the candidate. Ask them for another exact time.",
+          }
+        }
+        if (truth?.state === "scheduled") {
+          return {
+            title: `Scheduled · ${jobTitle}`,
+            detail: truth?.detail || "The exact-time AI call is booked. No action is needed until it fires.",
+          }
+        }
+      }
       return {
         title: `Needs you on ${jobTitle}`,
         detail: truth?.detail || "The AI screening was flagged for a human — take it from here.",
       }
+    }
     case "call":
       return { title: `Screen to review · ${jobTitle}`, detail: "The screening call finished — review it and decide the next step." }
     case "hold":

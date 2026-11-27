@@ -216,6 +216,8 @@ export async function GET(request: NextRequest) {
             "call_attempts",
             "next_retry_at",
             "scheduled_call_at",
+            "booking_source",
+            "screening_context",
             "call_duration_seconds",
             "call_voicemail",
             "call_hangup_reason",

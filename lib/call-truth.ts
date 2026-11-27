@@ -91,6 +91,17 @@ function parseVerdict(p: any): any {
   }
 }
 
+function parseScreeningContext(p: any): any {
+  const ctx = p?.screening_context
+  if (!ctx) return null
+  if (typeof ctx === "object") return ctx
+  try {
+    return JSON.parse(ctx)
+  } catch {
+    return null
+  }
+}
+
 function getTranscriptText(p: any): string {
   return String(p?.transcript_raw || p?.transcript || "").trim()
 }
@@ -596,8 +607,11 @@ export function getCallTruth(p: any): CallTruth {
   // could not tell apart before.
   if (status === "call_scheduled" || status === "scheduled") {
     const due = scheduledAt
-    const bookedBy =
-      p.booking_source === "candidate_requested"
+    const hrSlot =
+      p.booking_source === "hr_exact_time" ? parseScreeningContext(p)?.hrScheduledSlot : null
+    const bookedBy = hrSlot
+      ? "HR-booked exact slot"
+      : p.booking_source === "candidate_requested"
         ? "Booked by the candidate"
         : p.booking_source === "auto_retry"
           ? "Auto-retry booked"
@@ -626,7 +640,9 @@ export function getCallTruth(p: any): CallTruth {
     return truth(
       "scheduled",
       bookedBy,
-      `Call scheduled for ${fmtTime(due) || "a chosen slot"}`,
+      hrSlot?.bookedBy
+        ? `Call at ${fmtTime(due) || "the chosen time"} IST · booked by ${hrSlot.bookedBy}`
+        : `Call scheduled for ${fmtTime(due) || "a chosen slot"}`,
       { tone: "info", bucket: "engaged" }
     )
   }

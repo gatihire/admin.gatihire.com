@@ -33,6 +33,7 @@ import { CandidateMetricsBar } from "./candidate-metrics-bar"
 import { CollectedInfoView, PreScreenVerdict } from "./candidate-collected-info"
 import { supabase } from "@/lib/supabase"
 import { WhatsAppThreadTimeline } from "./whatsapp-thread-timeline"
+import { HrExactScheduleControl } from "./hr-exact-schedule-control"
 import { getCallTruth, CALL_TRUTH_FILTERS, MAX_TOTAL_CALL_ATTEMPTS } from "@/lib/call-truth"
 import { formatAge } from "@/lib/dispatch/engine"
 import { RootCauseAnalytics } from "./root-cause-analytics"
@@ -2757,6 +2758,14 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
+
+              {/* HR-authored exact slot — sits beside Nudge, not inside it.
+                  Hidden entirely unless the client feature flag is on. */}
+              <HrExactScheduleControl
+                participant={participant}
+                hasPhone={!!c.phone}
+                onChanged={onRefreshParticipants}
+              />
 
               {/* Spacer */}
               <div className="flex-1" />

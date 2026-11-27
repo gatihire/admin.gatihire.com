@@ -12,8 +12,14 @@ import { appendWhatsappHistory } from "@/lib/whatsapp-history"
  * never sent to the candidate.
  */
 
-export type HrActionName = "nudge" | "call" | "retry_call" | "manual_message"
-export type HrActionStatus = "sent" | "started" | "deferred" | "failed"
+export type HrActionName =
+  | "nudge"
+  | "call"
+  | "retry_call"
+  | "manual_message"
+  | "schedule"
+  | "cancel_schedule"
+export type HrActionStatus = "sent" | "started" | "deferred" | "failed" | "cancelled"
 
 export type HrActionEntry = {
   at: string
@@ -53,6 +59,10 @@ function verb(action: HrActionName): string {
       return "call retry"
     case "manual_message":
       return "message"
+    case "schedule":
+      return "exact slot booking"
+    case "cancel_schedule":
+      return "exact slot cancellation"
   }
 }
 
@@ -68,6 +78,8 @@ function outcome(status: HrActionStatus, detail?: string, executionId?: string |
       return detail ? `deferred · ${detail}` : "deferred"
     case "failed":
       return detail ? `failed · ${detail}` : "failed"
+    case "cancelled":
+      return detail ? `cancelled · ${detail}` : "cancelled"
   }
 }
 

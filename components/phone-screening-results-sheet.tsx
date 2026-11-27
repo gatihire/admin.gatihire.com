@@ -25,6 +25,7 @@ import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { CollectedInfoView, PreScreenVerdict } from "@/components/candidate-collected-info"
 import { WhatsAppConversationModal } from "@/components/whatsapp-conversation-modal"
+import { HrExactScheduleControl } from "@/components/hr-exact-schedule-control"
 import { getCallTruth, describeCallEnd, MAX_TOTAL_CALL_ATTEMPTS as MAX_CALL_ATTEMPTS } from "@/lib/call-truth"
 
 interface TranscriptSegment {
@@ -874,6 +875,15 @@ export function PhoneScreeningResultsSheet({
                     </div>
                   </div>
                 )}
+
+                {/* HR can book/cancel the exact slot without leaving the results sheet. */}
+                <div className="flex flex-wrap items-center gap-2 mb-3">
+                  <HrExactScheduleControl
+                    participant={data}
+                    hasPhone={!!data.candidates?.phone}
+                    onChanged={() => { void loadParticipant() }}
+                  />
+                </div>
               </div>
 
               {/* Verdict summary — always visible */}

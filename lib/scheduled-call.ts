@@ -31,6 +31,9 @@ import {
 } from "@/lib/pre-screen"
 import { logger } from "@/lib/logger"
 import { MAX_TOTAL_CALL_ATTEMPTS } from "@/lib/call-truth"
+import { HR_EXACT_TIME_SOURCE, notBeforeSeconds } from "@/lib/hr-exact-schedule-validation"
+import { recordHrAction } from "@/lib/hr-action-history"
+import { logCandidateActivity } from "@/lib/activity-logger"
 
 // WhatsApp outreach → human-escalation cadence. No blind AI calls: a silent
 // outbound candidate gets one WhatsApp reminder, then goes to a human recruiter.
@@ -201,7 +204,7 @@ function isTerminalProviderStatus(status?: string | null): boolean {
 export { isTerminalProviderStatus }
 
 /** Provider statuses meaning a call is genuinely still open right now. */
-function isLiveProviderStatus(status?: string | null): boolean {
+export function isLiveProviderStatus(status?: string | null): boolean {
   const s = String(status || "").trim().toLowerCase()
   return !s ? false : ["queued", "initiated", "ringing", "in-progress", "in_progress", "inprogress"].includes(s)
 }
@@ -257,6 +260,75 @@ export async function scheduleBolnaCall(
   } catch (err: any) {
     logger.error("QStash publish failed", { participantId, error: err?.message })
     return { scheduled: false, error: err?.message || "QStash publish failed" }
+  }
+}
+
+/**
+ * Publish a call for an exact instant, rather than "N seconds from now".
+ *
+ * HR-authored slots carry `bypassCallingHours`: the recruiter has already spoken
+ * to the candidate and has consent for that precise time, so the automatic
+ * 10:00–19:00 window must not move it. Every other guard (attempt budget,
+ * in-flight dial, duplicate sibling row) still lives in the QStash trigger.
+ */
+export async function scheduleBolnaCallAt(
+  participantId: string,
+  dueAt: Date,
+  opts?: { bypassCallingHours?: boolean }
+): Promise<{ scheduled: boolean; messageId?: string; error?: string }> {
+  const token = getQStashToken()
+  const url = getTriggerUrl()
+
+  if (!token || !url.startsWith("http")) {
+    return { scheduled: false, error: "QStash not configured (QSTASH_TOKEN / PHONE_SCREENING_WEBHOOK_BASE)" }
+  }
+
+  const notBefore = notBeforeSeconds(dueAt)
+  if (!Number.isFinite(notBefore) || notBefore <= Math.floor(Date.now() / 1000)) {
+    return { scheduled: false, error: "Slot must be in the future" }
+  }
+
+  try {
+    const client = new Client({ token })
+    const published = await client.publishJSON({
+      url,
+      body: {
+        participantId,
+        // Only HR's explicit booking carries this. Automatic retries, watchdog
+        // sweeps and candidate taps still go through the calling-hours guard.
+        ...(opts?.bypassCallingHours ? { bypassCallingHours: true } : {}),
+      },
+      notBefore,
+    })
+    logger.info("Scheduled exact-time Bolna call via QStash", {
+      participantId,
+      notBefore,
+      messageId: published.messageId,
+    })
+    return { scheduled: true, messageId: published.messageId }
+  } catch (err: any) {
+    logger.error("Exact-time QStash publish failed", { participantId, error: err?.message })
+    return { scheduled: false, error: err?.message || "QStash publish failed" }
+  }
+}
+
+/** Best-effort cancellation of a queued QStash message. The row guard is the
+ *  second layer if this ever fails (a cancelled row is no longer `call_scheduled`). */
+export async function cancelBolnaScheduledCall(messageId?: string | null): Promise<boolean> {
+  if (!messageId) return false
+  const token = getQStashToken()
+  if (!token) return false
+  try {
+    const client = new Client({ token })
+    await client.messages.cancel(messageId)
+    logger.info("Cancelled queued QStash call", { messageId })
+    return true
+  } catch (err: any) {
+    logger.warn("Could not cancel queued QStash call — row guard will refuse it", {
+      messageId,
+      error: err?.message,
+    })
+    return false
   }
 }
 
@@ -331,6 +403,8 @@ interface ParticipantRow {
   whatsapp_sent_at?: string | null
   next_retry_at?: string | null
   scheduled_call_at?: string | null
+  booking_source?: string | null
+  screening_context?: any
   campaign_id?: string | null
   placement_attempts?: number | null
   next_placement_retry_at?: string | null
@@ -384,8 +458,8 @@ export async function placeCallForParticipant(
     .from("phone_screening_participants")
     .select(`
       id, status, call_attempts, call_payload_json, info_data,
-      whatsapp_sent_at, next_retry_at, scheduled_call_at, campaign_id,
-      placement_attempts, next_placement_retry_at, job_id,
+      whatsapp_sent_at, next_retry_at, scheduled_call_at, booking_source,
+      screening_context, campaign_id, placement_attempts, next_placement_retry_at, job_id,
       candidates: candidate_id (id, name, phone, total_experience, location, current_role, resume_text),
       jobs: job_id (id, title, client_name, skills_must_have, description,
         license_type, role_category, city,
@@ -768,6 +842,15 @@ export async function placeCallForParticipant(
 
   const now = new Date().toISOString()
   const attempts = row.call_attempts + 1
+  const slotCtx =
+    row.screening_context && typeof row.screening_context === "object"
+      ? (row.screening_context as any)
+      : null
+  const wasHrExactSlot =
+    row.booking_source === HR_EXACT_TIME_SOURCE ||
+    slotCtx?.hrScheduledSlot?.source === HR_EXACT_TIME_SOURCE ||
+    !!slotCtx?.hrScheduledSlot?.scheduledAt
+
   await supabaseAdmin
     .from("phone_screening_participants")
     .update({
@@ -781,6 +864,28 @@ export async function placeCallForParticipant(
       updated_at: now,
     })
     .eq("id", participantId)
+
+  if (wasHrExactSlot) {
+    // The exact-time promise has now been honoured. Keep the thread honest:
+    // booking → provider accepted, rather than a silent status change.
+    await recordHrAction(participantId, {
+      action: "schedule",
+      status: "started",
+      executionId: result.executionId || null,
+      detail: "HR-booked exact slot fired",
+    })
+    await logCandidateActivity({
+      jobId: row.job_id || "",
+      candidateId: candidate?.id || "",
+      participantId,
+      eventType: "hr_schedule_placed",
+      eventData: {
+        executionId: result.executionId || null,
+        attempts,
+      },
+      actor: "system",
+    })
+  }
 
   return { success: true }
 }

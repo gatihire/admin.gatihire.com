@@ -11,6 +11,7 @@ import {
 import { PhoneScreeningCandidateSelector } from "./phone-screening-candidate-selector"
 import { PhoneScreeningResultsSheet } from "./phone-screening-results-sheet"
 import { getCallTruth } from "@/lib/call-truth"
+import { HR_EXACT_TIME_SOURCE, formatIst } from "@/lib/hr-exact-schedule-validation"
 
 interface Campaign {
   id: string
@@ -37,6 +38,8 @@ interface Participant {
   call_attempts?: number | null
   verdict_json?: Record<string, unknown> | string | null
   scheduled_call_at?: string | null
+  booking_source?: string | null
+  screening_context?: Record<string, unknown> | string | null
   callback_preference?: string | null
   review_status?: string | null
   created_at: string
@@ -92,6 +95,16 @@ function formatDuration(seconds: number | null): string {
 function formatDate(iso: string): string {
   const d = new Date(iso)
   return d.toLocaleDateString("en-IN", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
+}
+
+function hrSlotFor(p: Participant): { scheduledAt: string; bookedBy?: string } | null {
+  if (p.booking_source !== HR_EXACT_TIME_SOURCE) return null
+  let ctx: any = p.screening_context
+  if (typeof ctx === "string") {
+    try { ctx = JSON.parse(ctx) } catch { return null }
+  }
+  const slot = ctx?.hrScheduledSlot
+  return slot?.scheduledAt ? slot : null
 }
 
 export function PhoneScreeningTab({ jobId }: { jobId: string }) {
@@ -342,12 +355,24 @@ export function PhoneScreeningTab({ jobId }: { jobId: string }) {
                               </div>
                               <div className="flex items-center gap-2 flex-shrink-0">
                                 <StatusBadge status={p.status} />
-                                {p.status === "call_scheduled" && p.scheduled_call_at && (
+                                {p.status === "call_scheduled" && p.scheduled_call_at && hrSlotFor(p) ? (() => {
+                                  const hrSlot = hrSlotFor(p)!
+                                  return (
+                                    <Badge
+                                      variant="outline"
+                                      className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border-indigo-200 gap-1"
+                                      title={hrSlot.bookedBy ? `Booked by ${hrSlot.bookedBy}` : "Booked by HR"}
+                                    >
+                                      <Clock className="h-3 w-3" />
+                                      HR slot · {formatIst(new Date(hrSlot.scheduledAt))} IST
+                                    </Badge>
+                                  )
+                                })() : p.status === "call_scheduled" && p.scheduled_call_at ? (
                                   <Badge variant="outline" className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border-amber-200 gap-1">
                                     <Clock className="h-3 w-3" />
                                     {formatDate(p.scheduled_call_at)}
                                   </Badge>
-                                )}
+                                ) : null}
                                 {p.status === "call_scheduled" && p.callback_preference && (
                                   <span className="text-[10px] text-amber-600 max-w-[120px] truncate" title={p.callback_preference}>
                                     "{p.callback_preference}"

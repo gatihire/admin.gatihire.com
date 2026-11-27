@@ -44,7 +44,7 @@ export async function GET(request: NextRequest) {
   const PIPELINE_COLUMNS = `
       id, campaign_id, job_id, candidate_id, status, origin, bolna_status,
       bolna_execution_id, retry_count, next_retry_at, scheduled_call_at,
-      call_started_at, call_ended_at, call_attempts,
+      booking_source, call_started_at, call_ended_at, call_attempts,
       call_duration_seconds, call_is_partial, call_voicemail,
       call_hangup_reason, call_disconnect_reason, hangup_by, last_attempt_at,
       carrier, ring_duration,
@@ -66,7 +66,7 @@ export async function GET(request: NextRequest) {
       id, campaign_id, job_id, candidate_id, status, origin,
       ai_score, ai_recommendation, call_duration_seconds,
       bolna_status, call_is_partial, call_attempts, call_ended_at, verdict_json,
-      scheduled_call_at, callback_preference, review_status, created_at,
+      scheduled_call_at, booking_source, callback_preference, review_status, created_at,
       candidates: candidate_id (id, name, email, phone, current_role)
     `
   const STATUS_COLUMNS = "id, campaign_id, job_id, status, bolna_status, updated_at"
