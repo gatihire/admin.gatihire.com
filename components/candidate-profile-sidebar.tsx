@@ -306,7 +306,7 @@ export function CandidateProfileSidebar({
           origin: (application as any)?.origin || "outbound",
           createApplication: true,
           callMode: mode,
-          campaignConfig: { nudgeHours: 4, escalateHours: 8, maxCallAttempts: 2 },
+          campaignConfig: { nudgeHours: 4, escalateHours: 8, maxCallAttempts: 10 },
         }),
       })
       const data = await readHrActionResponse<any>(res, "Could not start screening")

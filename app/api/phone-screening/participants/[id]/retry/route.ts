@@ -26,7 +26,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const { id } = await params
 
     // A reason is mandatory so the activity log explains why a human spent one of
-    // a candidate's three attempts. Without it the audit trail records only that
+    // a candidate's attempts (up to ten). Without it the audit trail records only that
     // a retry happened, which is exactly the trail needed to investigate a
     // complaint about being called repeatedly.
     const body = await request.json().catch(() => ({}))
@@ -120,7 +120,7 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // No local attempt-cap pre-check below. placeCallImmediately evaluates, in
     // order: a call already with the provider, then a call already booked, then
     // the attempt budget. Checking the cap here would tell HR "attempt limit
-    // reached" for a candidate whose third call is still ringing, when the
+    // reached" for a candidate whose next call is still ringing, when the
     // accurate answer is "wait for the call in progress". The shared path also
     // owns flagging the row for manual followup when the budget really is
     // exhausted, so nothing is lost by not duplicating that check.

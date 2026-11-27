@@ -479,7 +479,7 @@ export function DbMatchesTab({ jobId, onViewProfile, onCandidateAdded }: DbMatch
           createApplication: true,
           callMode,
           origin: "outbound",
-          campaignConfig: { nudgeHours: 4, escalateHours: 8, maxCallAttempts: 2 },
+          campaignConfig: { nudgeHours: 4, escalateHours: 8, maxCallAttempts: 10 },
         }),
       })
       const data = await readHrActionResponse<any>(res, "Outreach failed")

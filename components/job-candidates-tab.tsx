@@ -1257,7 +1257,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
           campaignConfig: {
             nudgeHours: 4,
             escalateHours: 8,
-            maxCallAttempts: 2,
+            maxCallAttempts: MAX_TOTAL_CALL_ATTEMPTS,
           },
         }),
       })
@@ -1371,7 +1371,7 @@ export function CandidatesTab({ jobId, applications, loading, activeStage, activ
           origin,
           createApplication: true,
           callMode: "collect_info_first",
-          campaignConfig: { nudgeHours: 4, escalateHours: 8, maxCallAttempts: 2 },
+          campaignConfig: { nudgeHours: 4, escalateHours: 8, maxCallAttempts: MAX_TOTAL_CALL_ATTEMPTS },
         }),
       })
       const data = await readHrActionResponse<any>(res, "Failed to send WhatsApp")
@@ -2326,7 +2326,7 @@ function CandidateCard({ application, jobId, callStatus, participant, aiInfo, cl
           origin: application.origin || "outbound",
           createApplication: true,
           callMode: mode,
-          campaignConfig: { nudgeHours: 4, escalateHours: 8, maxCallAttempts: 2 },
+          campaignConfig: { nudgeHours: 4, escalateHours: 8, maxCallAttempts: MAX_TOTAL_CALL_ATTEMPTS },
         }),
       })
       const data = await readHrActionResponse<any>(res, "Failed to start screening")

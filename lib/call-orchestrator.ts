@@ -13,6 +13,7 @@ import { generateJDQuestions } from "@/lib/jd-questions"
 import { renderInterviewPlan, toBolnaUserData } from "@/lib/interview-plan"
 import { buildAlreadyCollectedUserData, buildResumeInfo } from "@/lib/prompt-user-data"
 import { scheduleOutreachFollowup, scheduleBolnaCall, outreachNudgeHours, outreachEscalateHours, prepareScheduleOffer, markScheduleOffer } from "@/lib/scheduled-call"
+import { MAX_TOTAL_CALL_ATTEMPTS } from "@/lib/call-truth"
 import { type CandidateOrigin, type CandidateFlow, deriveCandidateFlow } from "@/lib/origin"
 import { type InfoSource, stampSources, mergeSources } from "@/lib/info-provenance"
 import { updateParticipant } from "@/lib/participant-update"
@@ -768,7 +769,10 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
   // Per-job campaign config (with sensible defaults)
   const nudgeH = input.campaignConfig?.nudgeHours ?? outreachNudgeHours()
   const escalateH = input.campaignConfig?.escalateHours ?? outreachEscalateHours()
-  const maxAttempts = input.campaignConfig?.maxCallAttempts ?? 2
+  const maxAttempts = Math.min(
+    MAX_TOTAL_CALL_ATTEMPTS,
+    Math.max(1, input.campaignConfig?.maxCallAttempts ?? MAX_TOTAL_CALL_ATTEMPTS)
+  )
   
   // Pre-screen config (for collect_info_first)
   const preScreenConfig = {

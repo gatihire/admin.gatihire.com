@@ -223,18 +223,26 @@ function formatCallTime(iso: string): string {
 /**
  * Open the sheet on the call HR actually needs to see.
  *
- * Attempts are listed 1st → 3rd, but older attempts often have no retained
+ * Attempts are listed 1st → 10th, but older attempts often have no retained
  * record. Defaulting to index 0 opened an empty "call was placed" placeholder
  * while the recording and result sat on a later tab — exactly the report that
  * a finished call had "no recording and no result". Prefer the current attempt,
  * then any attempt with stored evidence, and only then fall back to the first
  * tab.
  */
+function ordinalLabel(n: number): string {
+  const mod100 = n % 100
+  if (mod100 >= 11 && mod100 <= 13) return `${n}th`
+  switch (n % 10) {
+    case 1: return `${n}st`
+    case 2: return `${n}nd`
+    case 3: return `${n}rd`
+    default: return `${n}th`
+  }
+}
+
 function callAttemptLabel(attempt: number): string {
-  if (attempt === 1) return "1st Call"
-  if (attempt === 2) return "2nd Call"
-  if (attempt === 3) return "3rd Call"
-  return `Call ${attempt}`
+  return `${ordinalLabel(attempt)} Call`
 }
 
 /** Match a stored call result to the activity-log entry for the same dial. */

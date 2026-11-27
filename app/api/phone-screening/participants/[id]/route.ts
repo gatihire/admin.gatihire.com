@@ -308,7 +308,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     callResults.push(a)
     if (callResults.length >= MAX_TOTAL_CALL_ATTEMPTS) break
   }
-  // Ensure chronological/attempt labels are sensible (1st/2nd/3rd by attempt or order)
+  // Ensure chronological/attempt labels are sensible (1st, 2nd, 3rd … by attempt or order)
   callResults.sort((a, b) => (Number(a?.attempt || 0) - Number(b?.attempt || 0)) || (String(a?.call_ended_at || "").localeCompare(String(b?.call_ended_at || ""))))
   const knownAttempts = new Set(callResults.map((a) => Number(a?.attempt)).filter((n) => Number.isFinite(n)))
   for (let n = 1; n < Number(participant?.call_attempts || 0); n++) {

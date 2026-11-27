@@ -55,20 +55,20 @@ export async function getMaxCallAttempts(campaignId?: string | null): Promise<nu
       .eq("id", campaignId)
       .maybeSingle()
     if (campaign?.max_call_attempts) {
-      return Math.max(1, Math.min(3, campaign.max_call_attempts))
+      return Math.max(1, Math.min(MAX_TOTAL_CALL_ATTEMPTS, campaign.max_call_attempts))
     }
   }
-  return clampInt(process.env.MAX_CALL_ATTEMPTS, 2, 1, 3)
+  return clampInt(process.env.MAX_CALL_ATTEMPTS, MAX_TOTAL_CALL_ATTEMPTS, 1, MAX_TOTAL_CALL_ATTEMPTS)
 }
 
 // Synchronous fallback for callers without campaign context
-export const MAX_CALL_ATTEMPTS = 2
+export const MAX_CALL_ATTEMPTS = MAX_TOTAL_CALL_ATTEMPTS
 
 /**
  * Hard ceiling on how many times we will ever dial one candidate.
  *
  * The automatic ladder and manual HR retries used to draw from separate budgets
- * — the ladder stopped at `MAX_CALL_ATTEMPTS` (2) but the retry button had no
+ * — the ladder stopped at `MAX_CALL_ATTEMPTS` (10) but the retry button had no
  * ceiling at all, and it even accepted `completed`. Combined that allowed an
  * unbounded number of outbound AI calls to one phone number, which is both a
  * spend risk and a harassment/complaint risk.

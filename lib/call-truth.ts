@@ -32,7 +32,7 @@ export interface CallTruth {
   state: CallTruthState
   /** Short label for cards/filters. */
   label: string
-  /** One line a human can act on, e.g. "Rang out · attempt 1 of 2 · retry 4:30pm". */
+  /** One line a human can act on, e.g. "Rang out · attempt 1 of 10 · retry 4:30pm". */
   detail: string
   /** Bucket used by the existing AI Screen sub-section filters. */
   bucket: "pending" | "waiting" | "engaged" | "calling" | "done" | "failed" | "review"
@@ -265,19 +265,21 @@ function truth(
   }
 }
 
-const MAX_ATTEMPTS_DEFAULT = 2
-
 /**
  * Hard ceiling on total placements per participant, across every path
  * (automatic ladder, WhatsApp reply, pipeline "Call Now", manual retry).
  * Lives here so both the truth derivation and the card actions can read it
  * without importing the server-only scheduler.
  */
-export const MAX_TOTAL_CALL_ATTEMPTS = 3
+export const MAX_TOTAL_CALL_ATTEMPTS = 10
+
+const MAX_ATTEMPTS_DEFAULT = MAX_TOTAL_CALL_ATTEMPTS
 
 export function getMaxAttempts(p?: { max_call_attempts?: number | null } | null): number {
   const n = Number(p?.max_call_attempts)
-  return Number.isFinite(n) && n >= 1 ? Math.min(3, n) : MAX_ATTEMPTS_DEFAULT
+  return Number.isFinite(n) && n >= 1
+    ? Math.min(MAX_TOTAL_CALL_ATTEMPTS, Math.round(n))
+    : MAX_ATTEMPTS_DEFAULT
 }
 
 /**

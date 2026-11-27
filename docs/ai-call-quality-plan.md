@@ -1085,7 +1085,7 @@ Fixes:
   call evidence) from stored call data: voicemail → voicemail, connected but no candidate
   turn / `not_screened` / `interrupted` / callback request → `partial`, a real screening →
   `completed`, no outcome data → `not_placed` (attempt limit reached). It also carries the
-  attempt number ("attempt 3 of 3") into the card detail.
+  attempt number ("attempt 3 of 10") into the card detail.
 - The attempt cap is now a single exported constant (`MAX_TOTAL_CALL_ATTEMPTS` in
   `lib/call-truth.ts`) rather than duplicated in the scheduler, so client components can
   read it without importing server-only code.
@@ -1093,10 +1093,10 @@ Fixes:
   offers "View Results" when a record exists, otherwise "Manual Follow-up". The card's
   results entry point is shown for any call with an outcome, not just `bolna_status =
   completed`, so an incomplete screening is still readable.
-- Every dialled attempt is now visible in the results sheet (1st / 2nd / 3rd Call), even
+- Every dialled attempt is now visible in the results sheet (1st / 2nd / 3rd … 10th Call), even
   when the candidate never spoke. Older rows with no retained history get an explicitly
   labelled "Call was placed — no detailed record retained" placeholder rather than a
-  fabricated transcript. Attempt snapshots are kept for all three attempts, not two.
+  fabricated transcript. Attempt snapshots are kept for every dial, up to the shared ceiling of 10.
 
 The other 22 `max_retries` rows were checked with the same derivation: none now resolve to
 `awaiting_provider`.
@@ -1203,6 +1203,29 @@ dial. It remains covered by the original 502 log (`wt5jt-1795695657371-3a015dd38
 shared `placeCallImmediately()` guard, which now wraps that refusal in a 409 with
 `reason` and `liveParticipantId`.
 
+### 7.10 The 27 Nov Himanshu Rawat round: "maximum attempt reached" at 3
+
+Himanshu Rawat had two screening rows for the same phone on job
+`8bdac25f…`; the active one sat at `call_attempts = 3` with
+`bolna_status = max_retries`, so the card offered no more dialling and HR could not
+nudge or call him again. The shared ceiling was raised from **3 to 10**:
+
+- `MAX_TOTAL_CALL_ATTEMPTS` in `lib/call-truth.ts` is now 10 and is the single source for the
+  card, results sheet, truth labels, watchdog, retry endpoint and `/call-now`. Direct Call Now,
+  retries, WhatsApp/callback nudges and the automatic ladder all read the same counter.
+- `getMaxAttempts()` and `getMaxCallAttempts()` now default/clamp to 10 instead of 2/3, so a
+  card can no longer say "3 of 3" while the real budget is larger. New campaigns created from the
+  admin UI default to 10; a stored campaign value can lower the automatic ladder but never raise
+  it above 10.
+- The 11 existing campaigns for this job all had `max_call_attempts = 2`. They were backed up
+  and updated to 10 so the *automatic* ladder also reaches the new ceiling. Other jobs keep their
+  currently stored campaign value until explicitly backfilled.
+- Attempt labels in the results sheet now go past 3rd ("4th Call" … "10th Call") using a proper
+  ordinal helper; earlier rows still show an honest placeholder instead of an invented transcript.
+
+No real dial was placed while verifying. `npx tsc --noEmit`, `npm run build` and
+`npm run lint -- --quiet` all passed.
+
 ---
 
 ## 8. Speed
@@ -1257,7 +1280,8 @@ Rules to implement in `lib/scheduled-call.ts` / `lib/journey-watchdog.ts`:
    Window is configurable via `CALL_WINDOW_START_HOUR`, `CALL_WINDOW_END_HOUR`,
    `CALL_WINDOW_DAYS` (0 = Sunday).
 2. **Retry ladder.** Attempt 1 at the best window; attempt 2 same day +3 h; attempt 3 next day
-   11:00–13:00. Max 3 (already enforced as `MAX_TOTAL_CALL_ATTEMPTS`).
+   11:00–13:00, and so on until the shared ceiling of 10 is reached. Max 10 (enforced as
+   `MAX_TOTAL_CALL_ATTEMPTS` on every placement path, including direct Call Now and nudge/callback).
 3. **Voicemail → WhatsApp, not a third call.** If `answered_by_voice_mail` is true, send the
    WhatsApp nudge and stop dialling.
 4. **Silent pickup → one retry, then WhatsApp.** Two consecutive calls with no candidate speech on

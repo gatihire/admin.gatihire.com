@@ -156,7 +156,7 @@ export async function POST(request: NextRequest) {
       // If the candidate asked to be called back later, queue an automatic retry
       // so the delayed trigger places the next call on its own. Increment
       // call_attempts (never reset to 1) so the shared attempt budget is real:
-      // MAX_TOTAL_CALL_ATTEMPTS (3) caps every placement path.
+      // MAX_TOTAL_CALL_ATTEMPTS (10) caps every placement path.
       if (parsed.callback_requested || parsed.callback_preference) {
         try {
           const currentAttempts = Number(participants[0]?.call_attempts || 0)

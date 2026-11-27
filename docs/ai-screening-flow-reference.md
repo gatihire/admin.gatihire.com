@@ -212,7 +212,7 @@ buttons: [ { id: "call_now" }, { id: "in_10_min" }, { id: "in_30_min" } ]
 | `missed_call_reschedule` | `candidateName`, `jobTitle`, `companyName`, **`callerNumber`** | Candidate didn't pick up |
 | `call_completed` | `candidateName`, `jobTitle`, `companyName`, **`callerNumber`** | Screening call finished |
 
-Default ladder: `nudgeHours` **4** → `escalateHours` **8**, `maxCallAttempts: 2`
+Default ladder: `nudgeHours` **4** → `escalateHours` **8**, `maxCallAttempts: 10`
 (`outreachNudgeHours()` / `outreachEscalateHours()`, env-overridable and clamped to 1–24).
 
 ### The caller number (`+918031805503`)
