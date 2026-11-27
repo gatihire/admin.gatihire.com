@@ -122,6 +122,10 @@ export async function placeBolnaCall(params: BolnaCallParams): Promise<BolnaCall
   const body: Record<string, unknown> = {
     agent_id: agentId,
     recipient_phone_number: recipient,
+    // No calling-hours policy anywhere in the stack. Even if the live agent
+    // still has a legacy guardrail from a dashboard edit, this call must ring
+    // now instead of being rescheduled by the provider.
+    bypass_call_guardrails: true,
     user_data: params.userData,
   }
   if (params.fromNumber || fromNumber) {
@@ -519,10 +523,11 @@ export function buildBolnaAgentPayload(
       agent_name: opts?.agentName || "Gati Hire Screening",
       agent_welcome_message: welcome,
       webhook_url: `${webhookBase}/api/bolna/webhook/execution`,
-      calling_guardrails: {
-        call_start_hour: 9,
-        call_end_hour: 21,
-      },
+      // No provider-side calling window. Bolna otherwise falls back to a
+      // 9 AM–9 PM reschedule window, which would move calls we deliberately
+      // place outside it. `bypass_call_guardrails` on every /call is the
+      // belt-and-braces companion to this.
+      calling_guardrails: null,
       tasks: [
         {
           task_type: "conversation",

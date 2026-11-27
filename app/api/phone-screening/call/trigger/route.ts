@@ -17,9 +17,9 @@ async function handler(request: NextRequest) {
 
     logger.info("QStash trigger received", { participantId, body })
 
-    // A candidate who picked "Call Now" gets a flag on the queued message, so
-    // their explicit request can fire outside the automatic calling window.
-    // Watchdog/outreach retries publish no flag and stay deferred at night.
+    // Legacy messages may still carry `bypassCallingHours`. It is harmless:
+    // there is no calling-hours gate any more. The guarded placement still owns
+    // the attempt cap, live-call and sibling-row checks.
     const bypassCallingHours = body?.bypassCallingHours === true
 
     const result = await placeCallForParticipant(participantId, {

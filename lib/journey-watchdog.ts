@@ -9,7 +9,6 @@ import {
 import { getBolnaExecution, BOLNA_TERMINAL_STATUSES } from "@/lib/bolna"
 import { updateParticipantSafely } from "@/lib/participant-update"
 import { logger } from "@/lib/logger"
-import { isWithinCallingHours, nextCallingWindowStart, callingWindowLabel } from "@/lib/calling-hours"
 
 /**
  * The journey watchdog.
@@ -95,10 +94,6 @@ export interface JourneySweepResult {
   callsFailed: number
   flaggedForHr: number
   details: Array<{ participantId: string; bucket: JourneyBucket; outcome: string }>
-  /** The outbound calling window at sweep time. Every dial is gated by it, so a
-   *  sweep that scans rows and places nothing between 19:00 and 10:00 IST is
-   *  working, not broken. */
-  callingWindow?: { label: string; open: boolean; nextStart: string }
 }
 
 type Row = {
@@ -156,11 +151,6 @@ export async function sweepJourney(opts?: {
     callsFailed: 0,
     flaggedForHr: 0,
     details: [],
-    callingWindow: {
-      label: callingWindowLabel(),
-      open: isWithinCallingHours(),
-      nextStart: nextCallingWindowStart().toISOString(),
-    },
   }
 
   // ── 1. A call was booked for a time that has passed, but no call happened ──
@@ -421,10 +411,9 @@ export async function sweepJourney(opts?: {
     }
 
     for (const row of (data || []) as Row[]) {
-      // A row deferred into the next calling window looks identical to a stuck
-      // one, except for its two clocks. Without this the 10-minute sweep would
-      // hand it to `placeCallForParticipant` at 02:00, get it deferred again,
-      // and rewrite the same timestamps forever.
+      // A row booked for a future time (an HR exact-time slot, for example)
+      // looks identical to a stuck one except for its clocks. The sweep must
+      // leave it alone until that time arrives.
       const nowMs = Date.now()
       const clocks = [row.scheduled_call_at, row.next_placement_retry_at]
       if (clocks.some((t) => t && new Date(t).getTime() > nowMs)) continue

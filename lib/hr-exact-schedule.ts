@@ -223,11 +223,9 @@ export async function bookHrExactSlot(input: {
     return { ok: false, code: "publish_failed", error: `Could not save the slot: ${updateError.message}` }
   }
 
-  // HR spoke to the candidate and has consent for this exact time, so the
-  // automatic calling window is deliberately bypassed for this one message.
-  const published = await scheduleBolnaCallAt(participant.id, checked.dueAt, {
-    bypassCallingHours: true,
-  })
+  // HR spoke to the candidate and has consent for this exact time. QStash's
+  // `notBefore` is what pins the delivery to that exact instant.
+  const published = await scheduleBolnaCallAt(participant.id, checked.dueAt)
 
   if (!published.scheduled) {
     const failCtx = {

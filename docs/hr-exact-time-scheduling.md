@@ -42,8 +42,8 @@ Verified from `.env.local` without printing secret values:
 | `QSTASH_URL` | `qstash-eu-central-1.upstash.io` |
 | `PHONE_SCREENING_WEBHOOK_BASE` | `admin.gatihire.com` — trigger URL resolves correctly |
 | `CRON_SECRET` | set — watchdog/reconcile cron auth is intact |
-| `CALL_WINDOW_*` overrides | not set — automatic paths keep 10:00–19:00 IST, Mon–Sat; HR exact slots explicitly bypass this |
-| Feature flags | not set — correctly off until quality sign-off |
+| `CALL_WINDOW_*` overrides | removed — there is no calling-hours window; all paths dial at any hour |
+| Feature flags | enabled in Production/Preview (`ENABLE_HR_EXACT_TIME_SCHEDULING`, `NEXT_PUBLIC_ENABLE_HR_EXACT_TIME_SCHEDULING`) |
 
 No new credential is needed. Production must get the two feature flags as Vercel env vars when we are ready to enable.
 
@@ -85,7 +85,7 @@ Validation, in order:
 5. No other future `scheduled_call_at` / `next_retry_at` — booking twice must be a 409, not two calls.
 6. `call_attempts < MAX_TOTAL_CALL_ATTEMPTS`.
 7. Lead time ≥ 5 minutes, horizon ≤ 7 days (QStash free-plan ceiling; safe on paid plans too).
-8. No calling-hours restriction. HR spoke to the candidate and has explicit consent, so the QStash message carries `bypassCallingHours: true`. Automatic retries/watchdog still obey the 10:00–19:00 IST window.
+8. No calling-hours restriction anywhere. HR spoke to the candidate and has explicit consent; QStash's `notBefore` pins the exact delivery time. Retries and watchdog calls may also fire at any hour.
 9. `note` and `reason` are trimmed and stored in the audit trail.
 
 Response: `{ success: true, ok: true, participantId, scheduledAt, scheduledAtIst, messageId, attempts, nextAttempt }`.
@@ -98,8 +98,8 @@ Cancellation is mandatory in practice — candidates change their mind. Clears `
 
 QStash **does** provide exact-time delivery: publish with `notBefore` (the `Upstash-Not-Before` header), a Unix timestamp in seconds. Max delay is 7 days on the free plan and 1 year on pay-as-you-go; the installed `@upstash/qstash` SDK supports `notBefore`. So we use QStash directly — no custom polling worker.
 
-- Publish one message to `/api/phone-screening/call/trigger` with `notBefore: floor(dueAt/1000)` and body `{ participantId, bypassCallingHours: true }`. HR already has the candidate's verbal consent for that exact time, so the automatic window must not move the call.
-- The existing QStash-signature-verified trigger calls `placeCallForParticipant(..., { guard: true, bypassCallingHours: true })`, which still owns the attempt cap, live-call guard and sibling-row guard.
+- Publish one message to `/api/phone-screening/call/trigger` with `notBefore: floor(dueAt/1000)` and body `{ participantId }`. HR already has the candidate's verbal consent for that exact time.
+- The existing QStash-signature-verified trigger calls `placeCallForParticipant(..., { guard: true })`, which still owns the attempt cap, live-call guard and sibling-row guard.
 - Store the QStash message id in `screening_context.hrScheduledSlot.messageId`; cancellation calls QStash `messages.cancel(messageId)` first, and the row guard is the second layer if that ever fails.
 - On provider acceptance: `status = calling`, `bolna_status = queued`, increment `call_attempts`, clear the booking, log HR action `scheduled_call_placed`.
 - If provider rejects: do **not** silently drop the slot — clear the booking, record placement failure, fall back to the existing retry ladder, and surface it in Today as a failed placement.
@@ -125,7 +125,7 @@ No-answer re-slot is idempotent per execution, reuses the existing WhatsApp send
 |---|---|
 | HR books two slots for same candidate | Second request 409; one active slot only |
 | HR re-books after no answer | Allowed while budget remains; previous slot is closed first |
-| Candidate proposes a time outside 10:00–19:00 IST | Allowed — HR has explicit consent; message carries `bypassCallingHours: true` |
+| Candidate proposes any time | Allowed — HR has explicit consent; the exact time is pinned with QStash `notBefore` |
 | Slot beyond QStash plan limit | Cap the picker at 7 days (safe on free + paid); show a clear message for later dates |
 | Slot time passes while provider is paused | Do not dial; move to `needs_manual_followup` and show Today alert |
 | Webhook fires late / watchdog and QStash both fire | Provider execution ID is the idempotency key; guard refuses a second dial |
@@ -138,10 +138,10 @@ No-answer re-slot is idempotent per execution, reuses the existing WhatsApp send
 ### 1. Scheduling primitives — `lib/scheduled-call.ts`
 
 - Export `isLiveProviderStatus()` so both routes use the same live-call definition (`queued`, `initiated`, `ringing`, `in-progress`).
-- Add `scheduleBolnaCallAt(participantId, dueAt, opts?: { bypassCallingHours?: boolean })`:
+- Add `scheduleBolnaCallAt(participantId, dueAt)`:
   - builds the same QStash trigger URL and body as today,
   - publishes with `notBefore: Math.floor(dueAt.getTime() / 1000)` instead of a relative `delay`,
-  - HR booking calls this with `bypassCallingHours: true` so the exact time is honoured,
+  - the exact time is honoured because QStash delivers at `notBefore` and no calling-hours gate exists,
   - returns `{ scheduled, messageId?, error? }` from the publish response.
 - Add `cancelBolnaScheduledCall(messageId)`: calls `client.messages.cancel(messageId)`, logs and returns success without throwing.
 - Keep the existing `scheduleBolnaCall(delay)` untouched for retries/nudges — this change is additive only.
@@ -151,7 +151,7 @@ No-answer re-slot is idempotent per execution, reuses the existing WhatsApp send
 - `hrSchedulingEnabled()` — reads `ENABLE_HR_EXACT_TIME_SCHEDULING`; defaults false.
 - `validateHrSlot(scheduledAt, timezone, now)` — returns a typed `{ ok, dueAt?, error?, code? }`:
   - `invalid_time`, `past_or_too_soon` (<5 min), `too_far` (>7 days).
-  - No calling-hours check: HR has explicit candidate consent, so the slot is honoured at the exact time even outside 10:00–19:00 IST.
+  - No calling-hours check exists anywhere; the slot is honoured at the exact time.
 - `bookHrExactSlot({ participantId, scheduledAt, timezone, note, reason, actor, actorId })` — loads the participant with candidate/job/campaign, applies all guards, writes the row + context in **one update**, publishes the QStash message with `notBefore`, and records HR action + activity. On publish failure it fails closed: clears the booking, sets `provider_error`, flags `needs_manual_followup`, returns a typed error.
 - `cancelHrExactSlot({ participantId, actor, actorId })` — refuses if the call is live or already due; cancels the QStash message, restores `previousStatus`, clears booking fields, records audit.
 

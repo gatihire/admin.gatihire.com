@@ -75,14 +75,12 @@ async function renudgeExistingParticipant(opts: {
       // that is why HR could not nudge a candidate at all. placeCallForParticipant
       // builds the interview plan itself when the payload has none.
       // This is an explicit HR "start calls now" action. `force` overrides a
-      // stale callback clock left by the calling-window deferral; it still
-      // cannot bypass the attempt budget or a live provider call. Without it
-      // HR saw "0 calls placed" while the row sat on a future `scheduled_call_at`.
-      // `bypassCallingHours` makes this human action possible at any hour; only
-      // automatic sweeps keep the 10:00–19:00 guard.
+      // stale future callback clock; it still cannot bypass the attempt budget
+      // or a live provider call. Without it HR saw "0 calls placed" while the
+      // row sat on a future `scheduled_call_at`. There is no calling-hours
+      // guard to bypass any more.
       const result = await placeCallImmediately(participantId, {
         force: true,
-        bypassCallingHours: true,
       })
       if (result.skipped) {
         return { ok: false, kind: "call", error: result.error || "A call is already in progress" }
@@ -615,9 +613,6 @@ export async function POST(request: NextRequest) {
       fallbackOrigin,
       createdBy: ctx.authUser.id,
       callMode,
-      // The whole trigger endpoint is an authenticated HR action. A fresh
-      // "Call Now" batch is manually pushed, not an automatic sweep.
-      allowOutsideCallingHours: true,
       campaignConfig: body.campaignConfig,
     })
 
@@ -635,17 +630,12 @@ export async function POST(request: NextRequest) {
       const rowStatus = String(row.status || "")
       const isCall = String(row.screening_mode || "") === "call_now"
       const failed = rowStatus === "failed" || rowStatus === "needs_manual_followup" || !!row.last_placement_error
-      const deferred = rowStatus === "call_scheduled" && !!row.scheduled_call_at
       const action = await recordHrAction(row.id, {
         action: isCall ? "call" : "nudge",
-        status: failed ? "failed" : deferred ? "deferred" : isCall ? "started" : "sent",
+        status: failed ? "failed" : isCall ? "started" : "sent",
         actor,
         at: now,
-        detail: failed
-          ? row.last_placement_error || `Screening status: ${rowStatus}`
-          : deferred
-            ? `next calling window ${new Date(row.scheduled_call_at).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`
-            : undefined,
+        detail: failed ? row.last_placement_error || `Screening status: ${rowStatus}` : undefined,
         executionId: row.bolna_execution_id,
       })
       if (action) hrActions.push({ ...action, candidateId: row.candidate_id })
@@ -671,7 +661,6 @@ export async function POST(request: NextRequest) {
       callsFailed: result.callsFailed,
       nudgeSent: (result.nudgeSent || 0) + renudgedCandidates,
       skippedNoPhone: result.skippedNoPhone.length > 0 ? result.skippedNoPhone : undefined,
-      deferredOutsideHours: result.deferredOutsideHours || 0,
       errors: result.errors,
       renudgedCount: renudgedCandidates,
       renudgeErrors: renudgeFailures.length > 0 ? renudgeFailures : undefined,

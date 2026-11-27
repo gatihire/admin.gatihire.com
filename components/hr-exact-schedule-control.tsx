@@ -239,8 +239,7 @@ export function HrExactScheduleControl({
           <DialogHeader>
             <DialogTitle>Book an exact AI call time</DialogTitle>
             <DialogDescription>
-              All times are India time (IST). The call fires at this exact time — including outside
-              10:00–19:00 — because HR already has the candidate’s consent.
+              All times are India time (IST). The call fires at this exact time.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3 pt-1">

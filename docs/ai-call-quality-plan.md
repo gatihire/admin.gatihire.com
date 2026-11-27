@@ -1,7 +1,7 @@
 # AI Screening Call Quality — Plan
 
 *Plain-language plan for the team. Read time: about 20 minutes.*
-*Status: **plan, nothing built yet**. Code changes start only after this is agreed.*
+*Status: **historical plan — mostly built**. Where it mentions a calling window, that part is **superseded**: on 27 Nov 2026 the 10:00–19:00 IST rule was removed from the app, the watchdog, the bulk trigger and the live Bolna agent. Calls may be placed at any hour; attempt caps and live-call guards remain.*
 
 ---
 
@@ -42,7 +42,7 @@ The first live review (Appendix B) exposed three gaps in this plan. They are now
 | How many topics? | **3**, as you specified: two from the JD's must-haves, one that verifies a claim from the resume. |
 | Which model? | Keep `gemini-3.1-flash-lite-preview` on the main agent for now; **test a stronger model on a separate test agent** before switching. Latency already went 510 ms → 966 ms to first word. |
 | Where do dealbreakers go? | **Confirm-only, at the end**, not as interview topics. "HMV licence hai na?" is a yes/no, not a conversation. |
-| When do we call? | **10:00–19:00 IST, best window 11:00–13:00.** Outside that, WhatsApp instead. |
+| When do we call? | ~~10:00–19:00 IST~~ **Superseded:** no calling window; HR, retries and watchdog may dial at any hour. |
 | When does the client see the report? | After the call is scored, same day. Not in this phase. |
 
 ---
@@ -1277,21 +1277,13 @@ Connect rate is the metric that moved the wrong way, and it is not a conversatio
 
 Rules to implement in `lib/scheduled-call.ts` / `lib/journey-watchdog.ts`:
 
-1. **Calling window.** Place outbound calls only 10:00–19:00 IST, Monday–Saturday. Outside the
-   window, set `scheduled_call_at` to the next window instead of dialling.
-   *Implemented: `lib/calling-hours.ts`, enforced in `placeCallForParticipant` (the one
-   place every proactive dial passes through) and in the bulk `call_now` branch of
-   `lib/call-orchestrator.ts`, which dials directly. A deferred row keeps its status or
-   moves from `calling` to `call_scheduled`, gets both its clocks pushed to the window
-   start, and is dialled by `booked_not_fired` at 10:00. No attempt is spent. The only
-   exemption is the Bolna inbound webhook — the candidate called us.*
-   The window guards **automatic** dialling only. An explicit HR "Call Now"/"Retry"
-   (including a bulk "Start calls now") and a candidate who asks to be called pass
-   `bypassCallingHours` / `allowOutsideCallingHours` and can be pushed at any hour.
-   The watchdog, outreach escalation and QStash retries never set those flags and
-   keep deferring outside the window.*
-   Window is configurable via `CALL_WINDOW_START_HOUR`, `CALL_WINDOW_END_HOUR`,
-   `CALL_WINDOW_DAYS` (0 = Sunday).
+1. ~~**Calling window.** Place outbound calls only 10:00–19:00 IST, Monday–Saturday.~~
+   **Removed on 27 Nov 2026.** There is no calling-hours gate in `placeCallForParticipant`,
+   the bulk `call_now` branch, the watchdog or the live Bolna agent (`calling_guardrails`
+   is disabled and every `/call` sends `bypass_call_guardrails: true`). HR actions,
+   candidate requests, retries and watchdog calls all dial at any hour. The attempt
+   budget, in-flight check and sibling-row guard are unchanged. The best-window
+   pickup numbers in the table above remain historical data, not a placement rule.
 2. **Retry ladder.** Attempt 1 at the best window; attempt 2 same day +3 h; attempt 3 next day
    11:00–13:00, and so on until the shared ceiling of 10 is reached. Max 10 (enforced as
    `MAX_TOTAL_CALL_ATTEMPTS` on every placement path, including direct Call Now and nudge/callback).
@@ -1372,7 +1364,7 @@ attempt, and a question that breaks the rules is refused with a reason rather th
 | 2 | Topic count | 3 (2 JD + 1 resume claim) | You |
 | 3 | Dealbreaker placement | End, confirm-only | You |
 | 4 | Client names in questions | Banned everywhere, including manual edits | You |
-| 5 | Calling window | 10:00–19:00 IST, best 11:00–13:00 | Ops |
+| 5 | ~~Calling window~~ | ~~10:00–19:00 IST~~ Removed — calls at any hour | Ops |
 | 6 | Model switch | Test agent first, decide on coverage vs latency | You |
 | 7 | Client report timing | Same day after scoring, phase 2 | You |
 | 8 | Plan regeneration on retry | Never — reuse the stored plan | Engineering |
@@ -1395,8 +1387,8 @@ attempt, and a question that breaks the rules is refused with a reason rather th
 | `lib/whatsapp-history.ts` | Dedupes execution-linked call outcome / post-call entries so re-syncs cannot stack "Call completed" lines |
 | `lib/activity-logger.ts` / `components/candidate-activity-timeline.tsx` | `call_ended` event for calls without a usable screening result |
 | `lib/call-truth.ts` | Single source of truth for call state; now resolves `max_retries` and unknown statuses from stored call data, and owns `MAX_TOTAL_CALL_ATTEMPTS` |
-| `lib/journey-watchdog.ts` | Calling window + retry ladder |
-| `lib/calling-hours.ts` | IST calling window (10:00–19:00, Mon–Sat), used by every automatic proactive dial; explicit HR/candidate requests bypass |
+| `lib/journey-watchdog.ts` | Retry/backstop ladder — no calling window |
+| `lib/bolna.ts` | Agent payload has `calling_guardrails: null`; every `/call` sends `bypass_call_guardrails: true` |
 | `components/candidate-profile-sidebar.tsx:407` | Plan / Text editor tabs, `manual_override` |
 | `components/phone-screening-results-sheet.tsx:1620` | Show topics + evidence instead of a flat question list |
 | `docs/job-intake-and-screening-criteria copy.md` | Source of the Screening Brief shape; the plan object should stay compatible with it |

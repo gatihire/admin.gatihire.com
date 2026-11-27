@@ -60,6 +60,7 @@ async function main() {
     ["Bolna language switcher disabled", !tools.multilingual_config?.enabled, "multilingual_config"],
     ["no blank handoff line", !liveBlob.includes("Let me connect you with"), "live agent"],
     ["no platform goodbye", taskConfig.call_hangup_message == null, "call_hangup_message"],
+    ["no calling-hour guardrails", liveConfig?.calling_guardrails == null, "calling_guardrails"],
     ["6-minute cap", Number(taskConfig.call_terminate) === 360, `call_terminate=${taskConfig.call_terminate}`],
     ["air cargo keyword", String(transcriber.keywords || "").includes("air cargo"), "keywords"],
     ["AWB keyword", String(transcriber.keywords || "").includes("AWB"), "keywords"],

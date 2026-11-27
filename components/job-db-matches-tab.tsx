@@ -485,7 +485,7 @@ export function DbMatchesTab({ jobId, onViewProfile, onCandidateAdded }: DbMatch
       const data = await readHrActionResponse<any>(res, "Outreach failed")
 
       const errors = [...(Array.isArray(data.errors) ? data.errors : []), ...(Array.isArray(data.renudgeErrors) ? data.renudgeErrors : [])]
-      if (errors.length > 0 && (data.nudgeSent || 0) === 0 && (data.callsTriggered || 0) === 0 && (data.deferredOutsideHours || 0) === 0) {
+      if (errors.length > 0 && (data.nudgeSent || 0) === 0 && (data.callsTriggered || 0) === 0) {
         throw new HrActionError(res.status, { error: String(errors[0]) }, "Outreach failed")
       }
 

@@ -152,10 +152,10 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // The previous direct placeBolnaCall also sent the RAW call_payload_json,
     // which is empty for most candidates, so every retried call screened against
     // a blank CTC and notice period.
-    // HR pressed Retry: a manual push, not a sweep. It can happen at any hour
-    // while the attempt cap and live-call guard remain in force.
+    // HR pressed Retry. Calls can happen at any hour; the attempt cap and
+    // live-call guard remain in force.
     const actor = ctx.authUser?.email || ctx.authUser?.id || null
-    const result = await placeCallImmediately(participant.id, { bypassCallingHours: true })
+    const result = await placeCallImmediately(participant.id)
 
     if (!result.success) {
       const error = result.error || "Failed to place retry call"

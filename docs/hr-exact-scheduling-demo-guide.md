@@ -40,8 +40,8 @@ Hard-refresh first.
    waiting.
 6. At the exact minute, QStash delivers one message and the call is placed once.
    Status moves to `calling`, then to the normal completed / incomplete outcome.
-   Point out that this works even outside 10:00–19:00 IST because HR already has
-   consent — automatic retries and the watchdog still obey the window.
+   Point out that the exact time is honoured precisely — there is no calling-hours
+   window anywhere in the stack any more.
 7. To show cancellation, book a second test slot and click **Cancel slot** before
    it is due. Toast: **“Slot cancelled — no call will be placed.”** Once a call is
    live, cancellation is refused by design.
@@ -80,8 +80,7 @@ Hard-refresh first.
 >    optionally paste the candidate's own words, and fill **Why this exact time**
 >    with at least 10 characters. Click **Book exact slot**.
 > 4. The row changes to **HR slot · <time> IST · your name** and **Today** shows
->    **Scheduled**. The AI call fires once at that exact time — even outside
->    10:00–19:00 — because you already have the candidate's consent.
+>    **Scheduled**. The AI call fires once at that exact time.
 > 5. If plans change, click **Cancel slot** before the time. Once the call is
 >    live it cannot be cancelled.
 >
@@ -92,8 +91,8 @@ Hard-refresh first.
 >   screening** with no score/fit. Do not treat it as a finished screening.
 > - If nobody answers, the card says **No answer — re-slot needed**; the normal
 >   WhatsApp re-slot message goes to the candidate.
-> - Automatic retries still call only between 10:00 and 19:00 IST. HR-booked
->   slots are the only exception, because you have explicit consent.
+> - There is no calling-hours window: HR-booked slots, retries and watchdog calls
+>   can all fire at any hour. The attempt cap and live-call guard still apply.
 >
 > To pause the whole feature, ask Eng to remove the two flags and redeploy — no
 > code change needed.

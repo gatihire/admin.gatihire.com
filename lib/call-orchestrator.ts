@@ -7,7 +7,6 @@
 import { supabaseAdmin } from "@/lib/supabase"
 import { placeBolnaCall } from "@/lib/bolna"
 import { pauseCallsForBalance, getProviderPause } from "@/lib/provider-health"
-import { isWithinCallingHours, nextCallingWindowStart, callingWindowLabel } from "@/lib/calling-hours"
 import { getWhatsAppService, talentOutreachTemplateName } from "@/lib/whatsapp"
 import { generateJDQuestions } from "@/lib/jd-questions"
 import { renderInterviewPlan, toBolnaUserData } from "@/lib/interview-plan"
@@ -699,11 +698,7 @@ export interface OrchestrateScreeningInput {
   /** "quick_screen": WhatsApp outreach with buttons (Interested/Not Interested/Call Now). */
   /** "collect_info_first": single detailed_info_request template, parse all fields, pre-screen, then call. */
   callMode?: "call_now" | "quick_screen" | "collect_info_first"
-  /**
-   * Set only for an explicit HR action. A bulk "Call Now" pressed by a person
-   * is not an automatic sweep, so it may ring outside 10:00–19:00 IST. The
-   * watchdog, outreach escalation and QStash retries never set this.
-   */
+  /** @deprecated Calling is unrestricted; kept so existing callers keep compiling. */
   allowOutsideCallingHours?: boolean
   /** Per-job campaign config */
   campaignConfig?: {
@@ -727,8 +722,6 @@ export interface OrchestrateScreeningResult {
   callsFailed: number
   nudgeSent: number
   skippedNoPhone: string[]
-  /** Calls booked into the next calling window rather than dialled now. */
-  deferredOutsideHours?: number
   errors?: string[]
 }
 
@@ -873,8 +866,6 @@ export async function orchestrateScreening(input: OrchestrateScreeningInput): Pr
   let triggered = 0
   let failed = 0
   let nudgeSent = 0
-  /** Booked into the next calling window instead of dialling at an unsociable hour. */
-  let deferred = 0
   const errors: string[] = []
 
   for (let i = 0; i < validCandidates.length; i++) {
@@ -1035,28 +1026,7 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
       continue
     }
 
-    // Automatic bulk placement keeps the calling window. An HR clicking
-    // "Start calls now" is an explicit human request and passes
-    // `allowOutsideCallingHours`, so it can be pushed at any hour. The watchdog
-    // and outreach escalation do not pass it and still defer to the next window.
-    if (!input.allowOutsideCallingHours && !isWithinCallingHours()) {
-      const windowStart = nextCallingWindowStart()
-      const windowIso = windowStart.toISOString()
-      await supabaseAdmin
-        .from("phone_screening_participants")
-        .update({
-          status: "call_scheduled",
-          scheduled_call_at: windowIso,
-          next_retry_at: windowIso,
-          next_placement_retry_at: windowIso,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("campaign_id", campaign.id)
-        .eq("candidate_id", candidate.id)
-      deferred++
-      continue
-    }
-
+    // No calling-hours gate: bulk placement dials immediately at any hour.
     const { userData, generatedQuestions, geminiPromptUsed } = await buildCallUserData(candidate, job, client, origin, participantId)
 
     const result = await placeBolnaCall({
@@ -1187,15 +1157,6 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
     .update({ status: campaignStatus, updated_at: new Date().toISOString() })
     .eq("id", campaign.id)
 
-  // One line, not one per candidate: a batch of twenty started at 21:00 should
-  // read as a single "this is scheduled for tomorrow" message, not twenty errors.
-  if (deferred > 0) {
-    errors.push(
-      `${deferred} call${deferred === 1 ? "" : "s"} deferred — outside calling hours (${callingWindowLabel()}). ` +
-        `They will be dialled at the next window.`
-    )
-  }
-
   return {
     campaignId: campaign.id,
     totalCandidates: validCandidates.length,
@@ -1203,7 +1164,6 @@ if (i > 0 && i % WHATSAPP_BATCH_SIZE === 0) {
     callsFailed: failed,
     nudgeSent,
     skippedNoPhone,
-    deferredOutsideHours: deferred,
     errors: errors.length > 0 ? errors : undefined,
   }
 }

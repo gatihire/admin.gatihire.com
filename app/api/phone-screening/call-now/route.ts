@@ -28,12 +28,10 @@ export async function POST(request: NextRequest) {
     // It is NOT an override of the hard attempt budget — placeCallForParticipant
     // refuses to dial past MAX_TOTAL_CALL_ATTEMPTS even with force, and flags the
     // row for manual followup when it does.
-    // An HR click is a person asking for the call now, so the automatic
-    // 10:00–19:00 guard does not apply. The attempt cap and live-call guard
-    // still do.
+    // There is no calling-hours guard any more. The attempt cap and live-call
+    // guard still apply. `bypassCallingHours` is kept only for older callers.
     const result = await placeCallImmediately(participantId, {
       force: true,
-      bypassCallingHours: true,
     })
 
     if (!result.success) {
