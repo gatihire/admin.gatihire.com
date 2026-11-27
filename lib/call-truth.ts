@@ -381,6 +381,18 @@ function describeWhyNoCall(p: any): { label: string; detail: string } {
   }
 }
 
+/**
+ * True when the provider call ended but a proper screening did not happen.
+ *
+ * The useful distinction for retry buttons: `bolna_status="completed"` only
+ * means the phone call finished. A row can carry that status and still be a
+ * partial screening (agent closed early, coverage gap, candidate cut off).
+ * Those rows must be re-diallable; genuinely completed screenings are not.
+ */
+export function isIncompleteScreening(p: any): boolean {
+  return getCallTruth(p).state === "partial"
+}
+
 export function getCallTruth(p: any): CallTruth {
   if (!p) {
     return truth("not_placed", "No call placed", "Not started yet", { tone: "neutral", bucket: "pending" })

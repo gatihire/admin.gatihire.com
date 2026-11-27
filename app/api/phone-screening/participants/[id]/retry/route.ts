@@ -5,12 +5,18 @@ import { logger } from "@/lib/logger"
 import { placeCallImmediately, MAX_TOTAL_CALL_ATTEMPTS, markRecruiterApproval } from "@/lib/scheduled-call"
 import { logCandidateActivity } from "@/lib/activity-logger"
 import { recordHrAction } from "@/lib/hr-action-history"
+import { isIncompleteScreening } from "@/lib/call-truth"
 
 export const runtime = "nodejs"
 
 // A finished screening is not a failed one. Re-dialling a candidate who already
 // completed their screening is a re-screen decision, not a retry, and must go
 // through an explicit action so it cannot happen by accident or by a stale UI.
+//
+// `completed` is added below ONLY when getCallTruth says the SCREENING was
+// incomplete. A partial call keeps the provider status "completed" and the row
+// status "completed" while the agent closed early — refusing it here was why
+// HR saw "Send Call Again" and got "screening already completed" on click.
 const RETRYABLE_STATUSES = ["failed", "unreachable", "failed_partial"]
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -44,6 +50,8 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
         id, candidate_id, job_id, status, call_payload_json, bolna_execution_id,
         bolna_status, call_attempts, retry_count,
         callback_preference, call_cost_cents,
+        verdict_json, call_is_partial, call_duration_seconds,
+        hangup_by, call_hangup_reason, call_disconnect_reason,
         candidates: candidate_id (id, name, phone),
         jobs: job_id (id, title, client_name)
       `)
@@ -59,11 +67,16 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     const job = Array.isArray(participant.jobs) ? participant.jobs[0] : participant.jobs
 
     const status = participant.status || ""
+    const screeningIncomplete = isIncompleteScreening(participant)
 
-    // Distinct refusal for a finished screening. This used to be silently
-    // accepted because "completed" sat in the retryable list, which let anyone
-    // re-call a candidate who had already given their answers.
-    if (status === "completed" || participant.bolna_status === "completed") {
+    // Distinct refusal for a finished SCREENING — not for a finished provider
+    // call. A partial row carries status="completed" and bolna_status="completed"
+    // even though the agent closed before the plan was covered; those are exactly
+    // the calls HR must be able to re-dial to get proper communication.
+    if (
+      !screeningIncomplete &&
+      (status === "completed" || participant.bolna_status === "completed")
+    ) {
       return NextResponse.json(
         {
           error:
@@ -101,9 +114,15 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // needs_manual_followup is retryable only while budget remains: it is how the
     // cap and the manual-followup button both park a row, and a recruiter clearing
     // the hold should be able to spend a remaining attempt.
+    // A provider-completed but screening-incomplete row is the retry case HR is
+    // actually looking at when the card shows "1st screening incomplete".
     const retryableStatuses =
       attemptsSoFar < MAX_TOTAL_CALL_ATTEMPTS
-        ? [...RETRYABLE_STATUSES, "needs_manual_followup"]
+        ? [
+            ...RETRYABLE_STATUSES,
+            "needs_manual_followup",
+            ...(screeningIncomplete && status === "completed" ? ["completed"] : []),
+          ]
         : RETRYABLE_STATUSES
 
     if (!retryableStatuses.includes(status)) {
