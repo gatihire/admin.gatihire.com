@@ -16,14 +16,20 @@ If the candidate says no and proposes a time, HR currently writes it in Excel an
 
 The booking itself is the HR action. Auto-dialling at the booked time is therefore not an unattended call — it is the execution of an explicit HR commitment already made to the candidate.
 
-## Status: build behind a flag, keep paused
+## Status: enabled in production
 
-Quality verification is still pending, so both server and client are gated:
+Both flags are **on** for Production and Preview as of the 27 Nov deployment
+(`dpl_87mirws5GHpjRA4fE1sow55rnCq6`, `admin.gatihire.com`):
 
 - `ENABLE_HR_EXACT_TIME_SCHEDULING` — server flag on the schedule/cancel routes.
-- `NEXT_PUBLIC_ENABLE_HR_EXACT_TIME_SCHEDULING` — hides the UI until enabled.
+- `NEXT_PUBLIC_ENABLE_HR_EXACT_TIME_SCHEDULING` — shows the UI.
 
-Both default to **false**. Enable only after two clean consenting calls pass the quality gate (3/3 topics, real-instance answers, no early language switch, no invented duration, no score on a partial call).
+They default to false in code, so a fresh environment is inert until the flags
+are set. Rollout gate: two clean consenting calls (3/3 topics, real-instance
+answers, no early language switch, no invented duration, no score on a partial
+call). If a live call regresses, remove the two Vercel env vars and redeploy —
+the UI and routes disappear again without a code change. See
+`docs/hr-exact-scheduling-demo-guide.md` for the demo script and team note.
 
 ### Credential audit (checked before planning)
 
@@ -189,6 +195,6 @@ Both follow the existing `retry/route.ts` pattern: `getInternalAuthContext`, `ha
 
 ### 8. Rollout
 
-- Flags stay off through this change set; code is deployable and inert.
-- Enable only after two clean consenting calls pass the quality gate agreed earlier.
+- Flags were off through the build and are now on in Production/Preview after the quality sign-off agreed earlier.
+- To pause: delete both env vars in Vercel and redeploy; no code change is needed.
 - If QStash delivery fails, the watchdog's `booked_not_fired` bucket rescues the row exactly as it does for candidate-requested slots today.
