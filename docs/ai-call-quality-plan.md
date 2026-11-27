@@ -769,6 +769,16 @@ Two notes for whoever touches this next:
 
 The model experiment is not applied; it needs an A/B, not a switch.
 
+**27 Nov root cause of the "Let me connect you with  who speaks English" line.**
+The dashboard had enabled Bolna's own `multilingual_config` with
+`active_language: hi`, `language_switch_trigger: requested_or_auto_detected` and
+an empty `agent_name` in the English hand-in. Bolna's engine — not our prompt —
+auto-switched on a bare "Yes. It's a good time." and spoke its handoff template
+with a blank name. The fix is `multilingual_config: null` in
+`buildBolnaAgentPayload` plus a much shorter `BOLNA_MASTER_PROMPT` that owns
+language state. `call_hangup_message: null` removes the platform's second
+"Goodbye." after the prompt's closing line.
+
 ### 7.1 Prompt safeguards added after the first live call
 
 The 11:39 call on 18 Nov (375 s, 569 candidate words, 3 of 3 topics) exposed the last

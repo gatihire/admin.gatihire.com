@@ -45,14 +45,21 @@ async function main() {
     liveConfig?.agent_prompts?.task_1?.system_prompt ||
     ""
   const task = (liveConfig?.tasks || [])[0] || {}
-  const transcriber = task?.tools_config?.transcriber || {}
+  const tools = task?.tools_config || {}
+  const transcriber = tools.transcriber || {}
   const taskConfig = task?.task_config || {}
+  const liveBlob = JSON.stringify(live)
 
   const checks: [string, boolean, string][] = [
-    ["one-way language state", livePrompt.includes("ONE-WAY STATE MACHINE"), "prompt"],
-    ["consent words are not language signals", livePrompt.includes("are NOT language signals"), "prompt"],
-    ["closing gate", livePrompt.includes("CLOSING GATE"), "prompt"],
+    ["simple prompt (under 5k chars)", livePrompt.length < 5000, `${livePrompt.length} chars`],
+    ["English-first language rule", livePrompt.includes("Start in English"), "prompt"],
+    ["consent words are not language signals", livePrompt.includes("are not language signals"), "prompt"],
+    ["closing gate", livePrompt.includes("Say the closing only after"), "prompt"],
+    ["no-repeat rule", livePrompt.includes("Never ask the same thing twice"), "prompt"],
     ["no-experience bridge", livePrompt.includes("If they have not done it"), "prompt"],
+    ["Bolna language switcher disabled", !tools.multilingual_config?.enabled, "multilingual_config"],
+    ["no blank handoff line", !liveBlob.includes("Let me connect you with"), "live agent"],
+    ["no platform goodbye", taskConfig.call_hangup_message == null, "call_hangup_message"],
     ["6-minute cap", Number(taskConfig.call_terminate) === 360, `call_terminate=${taskConfig.call_terminate}`],
     ["air cargo keyword", String(transcriber.keywords || "").includes("air cargo"), "keywords"],
     ["AWB keyword", String(transcriber.keywords || "").includes("AWB"), "keywords"],
